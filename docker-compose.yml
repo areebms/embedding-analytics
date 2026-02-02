@@ -1,0 +1,12 @@
+services:
+  lambda-base:
+    image: comparative-nuance-engine/lambda-base:0.1
+    build:
+      context: .
+      dockerfile: base/Dockerfile
+
+  lambda-scrape:
+    image: comparative-nuance-engine/lambda-scrape:0.1
+    build:
+      context: .
+      dockerfile: functions/scrape/Dockerfile

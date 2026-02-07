@@ -1,3 +1,5 @@
+import csv
+import io
 import os
 import json
 
@@ -68,6 +70,7 @@ def get_keys_with_prefix(session, s3_prefix):
     bucket = session.resource("s3").Bucket(S3_BUCKET)
     return [obj.key for obj in bucket.objects.filter(Prefix=s3_prefix)]
 
+
 def extract_index(event):
     if not isinstance(event, dict):
         return None
@@ -88,3 +91,7 @@ def extract_index(event):
         return payload.get("index")
 
     return None
+
+
+def yield_sentences_from_s3(session, s3_key):
+    yield from csv.reader(io.StringIO(load_text_from_s3(session, s3_key)))

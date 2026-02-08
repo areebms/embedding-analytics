@@ -22,3 +22,11 @@ services:
       dockerfile: functions/train-kvector/Dockerfile
       args:
         AWS_URI_PREFIX: ${AWS_URI_PREFIX}
+  
+  lambda-train-kvectors:
+    image: ${AWS_URI_PREFIX}/${AWS_ECR_REPO}/lambda-train-kvectors:0.1
+    build:
+      context: .
+      dockerfile: functions/train-kvectors/Dockerfile
+      args:
+        AWS_URI_PREFIX: ${AWS_URI_PREFIX}

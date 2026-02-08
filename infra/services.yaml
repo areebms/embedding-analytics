@@ -20,3 +20,7 @@ services:
     image: lambda-train-kvector
     memory: 6144
     timeout: 600
+  
+  train-kvectors:
+    function_name: train-kvectors
+    image: lambda-train-kvectors

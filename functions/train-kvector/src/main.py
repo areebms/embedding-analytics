@@ -35,7 +35,7 @@ def _get_session_and_table():
     return _session, _table
 
 
-def train_kvector(index, sentences):
+def train_kvector(index):
 
     models_dir = Path("/tmp/models")
     models_dir.mkdir(parents=True, exist_ok=True)
@@ -47,7 +47,14 @@ def train_kvector(index, sentences):
     print("os.cpu_count()", os.cpu_count())
 
     # never exceed what python thinks exists
-    workers = min(workers, os.cpu_count() or 1) 
+    workers = min(workers, os.cpu_count() or 1)
+    session, table = _get_session_and_table()
+
+    sentences = []
+    for sentence in yield_sentences_from_s3(session, s3_token_lemmas_key):
+        sentences.append(
+            [word for word in sentence if word.isalpha() and len(word) > MIN_TOKEN_SIZE]
+        ) 
 
     wv = Word2Vec(
         sentences,
@@ -69,7 +76,7 @@ def train_kvector(index, sentences):
     logger.info("Model generation completed", extra={"index": index})
 
     s3_key = f"word_vectors/{index}/{save_path.name}"
-    session, table = _get_session_and_table()
+    
     upload_object(session, s3_key, save_path.read_bytes(), "application/octet-stream")
 
     table.update_entry(index, "s3_word_vectors_prefix", f"word_vectors/{index}/")
@@ -89,10 +96,5 @@ if __name__ == "__main__":
         print(f"{index} has not been tokenized.")
         exit()
 
-    sentences = []
-    for sentence in yield_sentences_from_s3(session, s3_token_lemmas_key):
-        sentences.append(
-            [word for word in sentence if word.isalpha() and len(word) > MIN_TOKEN_SIZE]
-        )
 
-    train_kvector(index, sentences)
+    train_kvector(index)

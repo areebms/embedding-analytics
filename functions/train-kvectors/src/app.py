@@ -1,7 +1,7 @@
 import json
 import logging
 
-from main import train_kvector
+from main import initiate_train_vectors
 from shared.aws import extract_index
 
 
@@ -16,5 +16,11 @@ def handler(event, context):
         logger.warning("Generate model request missing index")
         return {"statusCode": 400, "body": json.dumps({"error": "index is required"})}
 
-    train_kvector(index)
-    return {"statusCode": 200, "body": json.dumps({"status": "ok", "index": index})}
+    passed, attempted = initiate_train_vectors(index)
+
+    return {
+        "statusCode": 200,
+        "body": json.dumps(
+            {"index": index, "attempted": attempted, "initiated": passed}
+        ),
+    }

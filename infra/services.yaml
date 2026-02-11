@@ -28,3 +28,7 @@ services:
   aggregate-data:
     function_name: aggregate-data
     image: lambda-aggregate-data
+  
+  api:
+    function_name: api
+    image: lambda-api

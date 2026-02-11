@@ -2,9 +2,9 @@ import csv
 import io
 import os
 import json
+import tempfile
 
 from boto3 import Session
-
 from botocore.exceptions import ClientError
 
 
@@ -48,6 +48,27 @@ class PipelineTable:
                 return False
             raise
 
+    def get_all(self, fields=None):
+        if fields:
+            scan_kwargs = {
+                "ProjectionExpression": ", ".join([f"#{field}" for field in fields]),
+                "ExpressionAttributeNames": {f"#{field}": field for field in fields},
+            }
+        else:
+            scan_kwargs = {}
+
+        items = []
+        response = self.table.scan(**scan_kwargs)
+        while True:
+            items.extend(response.get("Items", []))
+            if "LastEvaluatedKey" not in response:
+                break
+            response = self.table.scan(
+                ExclusiveStartKey=response["LastEvaluatedKey"],
+                **scan_kwargs,
+            )
+        return items
+
 
 def upload_object(
     session, s3_key, file_bytes, content_type="text/plain; charset=utf-8"
@@ -60,6 +81,11 @@ def upload_object(
 def load_bytes_from_s3(session, s3_key):
     response = session.resource("s3").Object(S3_BUCKET, s3_key).get()
     return response["Body"].read()
+
+
+def load_text_stream_from_s3(session, s3_key):
+    body = session.resource("s3").object(S3_BUCKET, s3_key).get()["Body"]
+    return io.TextIOWrapper(body, encoding="utf-8")
 
 
 def load_text_from_s3(session, s3_key):
@@ -95,3 +121,10 @@ def extract_index(event):
 
 def yield_sentences_from_s3(session, s3_key):
     yield from csv.reader(io.StringIO(load_text_from_s3(session, s3_key)))
+
+
+def load_file_from_s3(session, s3_key):
+    with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
+        session.resource("s3").object(S3_BUCKET, s3_key).download_fileobj(tmp_file)
+        tmp_file.flush()
+        return tmp_file.name

@@ -1,19 +1,29 @@
 services:
   lambda-scrape:
     image: ${AWS_URI_PREFIX}/${AWS_ECR_REPO}/lambda-scrape:0.1
+    env_file:
+    - .env
     build:
       context: .
       dockerfile: functions/scrape/Dockerfile
+      target: local
       args:
         AWS_URI_PREFIX: ${AWS_URI_PREFIX}
 
   lambda-tokenize:
     image: ${AWS_URI_PREFIX}/${AWS_ECR_REPO}/lambda-tokenize:0.1
+    env_file:
+    - .env
     build:
       context: .
       dockerfile: functions/tokenize/Dockerfile
+      target: local
       args:
         AWS_URI_PREFIX: ${AWS_URI_PREFIX}
+    volumes:
+      - ./functions/tokenize/src/app.py:/var/task/app.py
+      - ./functions/tokenize/src/main.py:/var/task/main.py
+      - ./functions/tokenize/src/ignored_nouns.txt:/var/task/ignored_nouns.txt
 
   lambda-train-kvector:
     image: ${AWS_URI_PREFIX}/${AWS_ECR_REPO}/lambda-train-kvector:0.1

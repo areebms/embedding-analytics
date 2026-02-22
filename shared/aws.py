@@ -78,6 +78,15 @@ def upload_object(
     )
 
 
+def upload_file(session, s3_key, path):
+    session.client("s3").upload_file(
+        path,
+        S3_BUCKET,
+        s3_key,
+        ExtraArgs={"ContentType": "application/octet-stream"},
+    )
+
+
 def load_bytes_from_s3(session, s3_key):
     response = session.resource("s3").Object(S3_BUCKET, s3_key).get()
     return response["Body"].read()

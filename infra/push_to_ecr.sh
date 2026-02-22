@@ -45,7 +45,7 @@ for SERVICE in "$*"; do
   -f "$DOCKERFILE" .
 
   # run tests
-  docker run --rm -it --env-file .env --entrypoint python $FULL_TAG main.py --platform-name gutenberg --platform-id 60411
+  docker run --rm -it --env-file .env --entrypoint python $FULL_TAG main.py --platform gutenberg --id 60411 --seed 10
 
   docker push "$FULL_TAG"
 

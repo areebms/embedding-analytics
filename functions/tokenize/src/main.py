@@ -107,6 +107,14 @@ def tokenize(index):
     if not s3_text_key:
         logger.info("Index has not been scraped", extra={"index": index})
         return
+    
+    if (
+        item.get("s3_token_texts_key")
+        and item.get("s3_token_lemmas_key")
+        and item.get("s3_token_tags_key")
+    ):
+        logger.info("Index has already been tokenized", extra={"index": index})
+        return
 
     text = load_text_from_s3(session, s3_text_key)
     nlp = spacy.load("en_core_web_sm", disable=["ner"])

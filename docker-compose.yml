@@ -27,20 +27,32 @@ services:
 
   lambda-train-kvector:
     image: ${AWS_URI_PREFIX}/${AWS_ECR_REPO}/lambda-train-kvector:0.1
+    env_file:
+    - .env
     build:
       context: .
+      target: local
       dockerfile: functions/train-kvector/Dockerfile
       args:
         AWS_URI_PREFIX: ${AWS_URI_PREFIX}
-  
+    volumes:
+      - ./functions/train-kvector/src/app.py:/var/task/app.py
+      - ./functions/train-kvector/src/main.py:/var/task/main.py
+
   lambda-train-kvectors:
     image: ${AWS_URI_PREFIX}/${AWS_ECR_REPO}/lambda-train-kvectors:0.1
+    env_file:
+    - .env
     build:
       context: .
+      target: local
       dockerfile: functions/train-kvectors/Dockerfile
       args:
         AWS_URI_PREFIX: ${AWS_URI_PREFIX}
-
+    volumes:
+      - ./functions/train-kvectors/src/app.py:/var/task/app.py
+      - ./functions/train-kvectors/src/main.py:/var/task/main.py
+  
   lambda-aggregate-data:
     image: ${AWS_URI_PREFIX}/${AWS_ECR_REPO}/lambda-aggregate-data:0.1
     build:

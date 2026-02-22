@@ -1,4 +1,4 @@
-FROM public.ecr.aws/lambda/python:3.13 as base
+FROM public.ecr.aws/lambda/python:3.13 AS base
 
 COPY functions/scrape/requirements.txt /requirements.txt
 WORKDIR ${LAMBDA_TASK_ROOT}

@@ -21,13 +21,9 @@ services:
     memory: 1536
     timeout: 600
   
-  train-kvectors:
-    function_name: train-kvectors
-    image: lambda-train-kvectors
-  
-  aggregate-data:
-    function_name: aggregate-data
-    image: lambda-aggregate-data
+  align-kvectors:
+    function_name: align-kvectors
+    image: lambda-align-kvectors
   
   api:
     function_name: api

@@ -1,13 +1,32 @@
 import os
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi_cache import FastAPICache
+from fastapi_cache.backends.redis import RedisBackend
+from fastapi_cache.decorator import cache
 from mangum import Mangum
+from redis import asyncio as aioredis
 
 from main import KeyedVectorGroup
 from shared.aws import PipelineTable, get_session
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 1. Connect to your external Redis
+    redis = aioredis.from_url(os.environ["REDIS_URL"])
+    # Startup connectivity check
+    await redis.ping()
+
+    # 2. Initialize the global cache to use Redis
+    FastAPICache.init(RedisBackend(redis), prefix=os.environ["REDIS_PREFIX"])
+    yield
+    await redis.close()
+
+
+app = FastAPI(lifespan=lifespan)
 
 origins = [
     "http://localhost:5173",
@@ -26,6 +45,7 @@ app.add_middleware(
 
 
 @app.get("/similarity/{book_id}/{primary_term}")
+@cache(expire=None)
 def similarity(primary_term: str, book_id):
     keyed_vector_group = KeyedVectorGroup(index=f"gutenberg-{book_id}")
     keyed_vector_group.fetch_precalculated_data()
@@ -45,6 +65,7 @@ def similarity(primary_term: str, book_id):
 
 
 @app.get("/books")
+@cache(expire=None)
 def books():
     return [
         {
@@ -54,8 +75,16 @@ def books():
             "title": item["title"],
         }
         for item in PipelineTable(get_session()).get_all(
-            ["platform_data", "author", "published_year", "title"]
+            [
+                "platform_data",
+                "author",
+                "published_year",
+                "title",
+                "s3_aligned_data_prefix",
+            ]
         )
+        if item.get("s3_aligned_data_prefix")
     ]
 
-handler = Mangum(app)
+
+handler = Mangum(app, lifespan="on")

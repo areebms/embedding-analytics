@@ -41,9 +41,16 @@ services:
 
   lambda-api:
     image: ${AWS_URI_PREFIX}/${AWS_ECR_REPO}/lambda-api:0.1
+    env_file:
+    - .env
     build:
       context: .
       dockerfile: functions/api/Dockerfile
+      target: local
       args:
         AWS_URI_PREFIX: ${AWS_URI_PREFIX}
-
+    volumes:
+      - ./functions/api/src/app.py:/var/task/app.py
+      - ./functions/api/src/main.py:/var/task/main.py
+    ports:
+    - "8000:8000"

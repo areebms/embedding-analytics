@@ -15,12 +15,11 @@ from shared.aws import PipelineTable, get_session
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 1. Connect to your external Redis
     redis = aioredis.from_url(os.environ["REDIS_URL"])
     # Startup connectivity check
     await redis.ping()
 
-    # 2. Initialize the global cache to use Redis
+    # Initialize global cache to use Redis
     FastAPICache.init(RedisBackend(redis), prefix=os.environ["REDIS_PREFIX"])
     yield
     await redis.close()
@@ -50,12 +49,13 @@ def similarity(primary_term: str, book_id):
     keyed_vector_group = KeyedVectorGroup(index=f"gutenberg-{book_id}")
     keyed_vector_group.fetch_precalculated_data()
     table_data = []
-    for term, stability_data in keyed_vector_group.term_stability_data.items():
+    
+    for term in list(keyed_vector_group.centroid.key_to_index):
         table_data.append(
             {
                 "term": term,
-                "count": stability_data["count"],
-                "coherence": 1 - float(stability_data["semantic"]),
+                "count": keyed_vector_group.centroid[term]["count"],
+                "coherence": 1 - float(keyed_vector_group.centroid[term]["count"]),
                 "similarity": float(
                     keyed_vector_group.centroid.similarity(term, primary_term)
                 ),
@@ -73,7 +73,6 @@ def books():
             "label": f"{item['author'].split(',')[0]} ({item['published_year']})",
             "author": item["author"],
             "title": item["title"],
-            "s3_aligned_data_prefix": item["s3_aligned_data_prefix"]
         }
         for item in PipelineTable(get_session()).get_all(
             [
@@ -81,10 +80,10 @@ def books():
                 "author",
                 "published_year",
                 "title",
-                "s3_aligned_data_prefix",
+                "s3_prefix_models",
             ]
         )
-        if item.get("s3_aligned_data_prefix")
+      if 's3_prefix_models' in item
     ]
 
 

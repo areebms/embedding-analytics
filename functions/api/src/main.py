@@ -16,14 +16,14 @@ from shared.aws import (
 class KeyedVectorGroup:
 
     def __init__(self, index):
-        self.s3_prefix = f"keyed_vector_group_data/{index}"
+        self.s3_prefix = f"kvectors/{index}"
         self.keyed_vectors_stack = []
         self.centroid = None
         self.label = index.split("-")[1]
         self.term_stability_data = {}
 
     def fetch_keyed_vectors_stack(self, session):
-        model_keys = get_keys_with_prefix(session, f"{self.s3_prefix}/aligned_models/")
+        model_keys = get_keys_with_prefix(session, f"{self.s3_prefix}/aligned/")
         for key in sorted(model_keys):
             self.keyed_vectors_stack.append(self.load_keyed_vector_from_s3(key))
 
@@ -40,17 +40,6 @@ class KeyedVectorGroup:
             session, f"{self.s3_prefix}/centroid.model"
         )
 
-    def fetch_term_stability_data(self, session):
-        text_stream = load_text_stream_from_s3(session, f"{self.s3_prefix}/term_stability.csv")
-
-        try:
-            for row in csv.DictReader(text_stream):
-                self.term_stability_data[row.pop("term")] = row
-        finally:
-            text_stream.close()
-        return self.term_stability_data
-
     def fetch_precalculated_data(self):
         session = get_session()
         self.fetch_centroid_data(session)
-        self.fetch_term_stability_data(session)

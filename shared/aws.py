@@ -101,9 +101,14 @@ def load_text_from_s3(session, s3_key):
     return load_bytes_from_s3(session, s3_key).decode("utf-8")
 
 
-def get_keys_with_prefix(session, s3_prefix):
+def yield_keys_with_prefix(session, s3_prefix):
     bucket = session.resource("s3").Bucket(S3_BUCKET)
-    return [obj.key for obj in bucket.objects.filter(Prefix=s3_prefix)]
+    for obj in bucket.objects.filter(Prefix=s3_prefix):
+        yield obj.key
+
+
+def get_keys_with_prefix(session, s3_prefix):
+    return list(yield_keys_with_prefix(session, s3_prefix))
 
 
 def extract_index(event):

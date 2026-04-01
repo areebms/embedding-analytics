@@ -1,4 +1,3 @@
-import json
 import logging
 import os
 import tempfile
@@ -77,16 +76,15 @@ def normalized_disparity_alignment(terms, kvector, centroid):
     rotation, _ = orthogonal_procrustes(
         kvector.vectors[idx_kv], centroid.vectors[idx_ref]
     )
-    
+
     kvector.vectors = kvector.vectors @ rotation
-    
+
     # Clear Cache
     if hasattr(kvector, "vectors_norm"):
         kvector.vectors_norm = None
     if hasattr(kvector, "norms"):
         kvector.norms = None
     kvector.fill_norms(force=True)
-
 
     # disparity = Frobenius Norm squared = Sum of Squared Errors
     disparity = np.linalg.norm(centroid.vectors - kvector.vectors, ord="fro") ** 2
@@ -95,7 +93,9 @@ def normalized_disparity_alignment(terms, kvector, centroid):
         np.linalg.norm(centroid.vectors - centroid.vectors.mean(axis=0), ord="fro") ** 2
     )
 
-    return disparity / centroid_variance # equivalent to 1 - coefficient of determination
+    return (
+        disparity / centroid_variance
+    )  # equivalent to 1 - coefficient of determination
 
 
 def generate_centroid_kvector(terms, kvector_stack):
@@ -121,13 +121,15 @@ def gradient_descent_alignment(
     # Generalized Procrustes Analysis (Gower, 1975)
     gradient = 1
     for _ in range(max_iterations):
-        disparity = []
+        normalized_disparities = []
         centroid = generate_centroid_kvector(terms, kvector_stack)
         for kvector in kvector_stack:
-            disparity.append(normalized_disparity_alignment(terms, kvector, centroid))
-        gradient = gradient - mean(disparity)
+            normalized_disparities.append(
+                normalized_disparity_alignment(terms, kvector, centroid)
+            )
+        gradient = gradient - mean(normalized_disparities)
         if gradient <= min_gradient:
-            return centroid, mean(disparity)
+            return centroid, mean(normalized_disparities)
 
     raise Exception("Kvectors not aligned")
 
@@ -140,7 +142,7 @@ def align_kvectors(index):
     )
     if not kvector_stack:
         print(f"No models found for {index}.")
-        exit()
+        return
 
     terms = list(kvector_stack[0].key_to_index)
 
@@ -151,11 +153,30 @@ def align_kvectors(index):
         terms, kvector_stack, 40, 0.0001
     )
 
+    term_disparities = np.mean(
+        [
+            np.sum((kvector.vectors - centroid.vectors) ** 2, axis=1)
+            for kvector in kvector_stack
+        ],
+        axis=0,
+    )
+
+    term_variances = np.sum(
+        (centroid.vectors - centroid.vectors.mean(axis=0)) ** 2, axis=1
+    )
+
+    for i, term in enumerate(terms):
+        centroid.set_vecattr(term, "count", kvector_stack[0].get_vecattr(term, "count"))
+        centroid.set_vecattr(term, "disparity", float(term_disparities[i]))
+        centroid.set_vecattr(term, "variance", float(term_variances[i]))
+        centroid.set_vecattr(
+            term, "r_squared", float(1 - (term_disparities[i] / term_variances[i]))
+        )
+
     upload_kvectors_to_s3(session, index, centroid, kvector_stack, file_names)
     table.update_entry(index, "mean_disparity", Decimal(str(mean_disparity)))
     table.update_entry(index, "s3_prefix_models", f"kvectors/{index}/")
 
-    # TODO: Move to new lambda
     publish(table, session, index)
 
 

@@ -3,6 +3,7 @@ import os
 import io
 import json
 from collections import defaultdict
+from decimal import Decimal
 
 import numpy as np
 from gensim.models import KeyedVectors
@@ -10,6 +11,7 @@ from gensim.models import KeyedVectors
 
 from shared.aws import (
     PipelineTable,
+    TermTable,
     get_session,
     load_file_from_s3,
     load_text_from_s3,
@@ -45,8 +47,10 @@ class RawCentroidData:
     def collect_data(self):
         for term in list(self.centroid.key_to_index):
             self.data[term]["centroid_vector"] = to_table_format(self.centroid[term])
-            for attr in ["count", "disparity", "variance", "r_squared"]:
-                self.data[term][attr] = self.centroid.get_vecattr(term, attr)
+            self.data[term]["count_"] = int(self.centroid.get_vecattr(term, "count"))
+            self.data[term]["variance_"] = Decimal(str(self.centroid.get_vecattr(term, "variance")))
+            self.data[term]["disparity"] = Decimal(str(self.centroid.get_vecattr(term, "disparity")))
+            self.data[term]["r_squared"] = Decimal(str(self.centroid.get_vecattr(term, "r_squared")))
 
         return self.data
 
@@ -63,7 +67,7 @@ class RawPOSData:
     @classmethod
     def from_s3(cls, session, index):
         table = PipelineTable(session)
-        item = table.get(index, expression="s3_token_lemmas_key,s3_token_tags_key")
+        item = table.get_entry(index, ["s3_token_lemmas_key", "s3_token_tags_key"])
 
         token_lemmas = list(
             csv.reader(
@@ -112,9 +116,8 @@ class RawKVectorStack:
     def from_s3(cls, session, index):
         s3_keys = []
         kvectors = []
-
         for key in yield_keys_with_prefix(session, f"kvectors/{index}/aligned/"):
-            if key.endswith(".model"):
+            if not key.endswith(".model"):
                 continue
             s3_keys.append(key)
             kvectors.append(load_kvector_from_s3(session, key))
@@ -138,44 +141,25 @@ def save_term_data(index):
     raw_centroid_data = RawCentroidData.from_s3(session, index).collect_data()
     raw_pos_data_obj = RawPOSData.from_s3(session, index)
     raw_pos_data_obj.collect_data()
+    raw_vector_stack_data = RawKVectorStack.from_s3(session, index).collect_data()
 
     terms = raw_pos_data_obj.get_terms() & set(raw_centroid_data)
 
-    table = PipelineTable(session=session)
-
-    for term in terms:
-        for field, value in raw_centroid_data[term].items():
-            table.update_entry(
-                index={"term": term, "index": index}, field=field, value=value
-            )
-        table.update_entry(
-            index={"term": term, "index": index},
-            field="ilocs",
-            value=raw_pos_data_obj.lemma_iloc[term],
-        )
-        table.update_entry(
-            index={"term": term, "index": index},
-            field="tags",
-            value=raw_pos_data_obj.lemma_tags[term],
-        )
-
-    raw_vector_stack_data = RawKVectorStack.from_s3(session, index).collect_data()
+    table = TermTable(session)
 
     for term in terms:
         seeds = sorted(raw_vector_stack_data[term].keys())
-        vectors = [raw_vector_stack_data[term][seed] for seed in seeds]
-
-        table.update_entry(
-            index={"term": term, "index": index}, field="seeds", value=seeds
-        )
-
-        table.update_entry(
-            index={"term": term, "index": index}, field="vectors", value=vectors
-        )
+        table.update_entries(term, index, {
+            **raw_centroid_data[term],
+            "ilocs": raw_pos_data_obj.lemma_iloc[term],
+            "tags": raw_pos_data_obj.lemma_tags[term],
+            "seeds": seeds,
+            "vectors": [raw_vector_stack_data[term][seed] for seed in seeds],
+        })
 
 
 def publish(table, session, index):
-    item = table.get(index, expression="s3_metadata_key")
+    item = table.get_entry(index, ["s3_metadata_key"])
     s3_metadata_key = item.get("s3_metadata_key")
     if not s3_metadata_key:
         print(f"{index} has not been scraped.")
@@ -183,5 +167,10 @@ def publish(table, session, index):
 
     metadata = json.loads(load_text_from_s3(session, s3_metadata_key))
 
-    table.update_entry(index, "author", ";".join(metadata["author"]))
-    table.update_entry(index, "title", metadata["title"][0])
+    table.update_entries(
+        index,
+        {
+            "author": ";".join(metadata["author"]),
+            "title": metadata["title"][0],
+        },
+    )

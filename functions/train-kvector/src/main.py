@@ -39,7 +39,7 @@ def _get_sentences(session, table, index):
     if index in sentences:
         return sentences[index]
 
-    item = table.get(index, expression="s3_token_lemmas_key")
+    item = table.get_entry(index, ["s3_token_lemmas_key"])
     s3_token_lemmas_key = item.get("s3_token_lemmas_key")
 
     if not s3_token_lemmas_key:

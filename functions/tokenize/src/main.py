@@ -98,9 +98,9 @@ def tokenize(index):
 
     table = PipelineTable(session)
 
-    item = table.get(
+    item = table.get_entry(
         index,
-        expression="s3_text_key,s3_token_texts_key,s3_token_lemmas_key,s3_token_tags_key",
+        ["s3_text_key", "s3_token_texts_key", "s3_token_lemmas_key", "s3_token_tags_key"],
     )
 
     s3_text_key = item.get("s3_text_key")

@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import csv
 import os
 
 from gensim.models import KeyedVectors
 
 from shared.aws import (
     get_session,
-    load_text_stream_from_s3,
     load_file_from_s3,
     get_keys_with_prefix,
 )

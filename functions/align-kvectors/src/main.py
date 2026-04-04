@@ -174,8 +174,13 @@ def align_kvectors(index):
         )
 
     upload_kvectors_to_s3(session, index, centroid, kvector_stack, file_names)
-    table.update_entry(index, "mean_disparity", Decimal(str(mean_disparity)))
-    table.update_entry(index, "s3_prefix_models", f"kvectors/{index}/")
+    table.update_entries(
+        index,
+        {
+            "mean_disparity": Decimal(str(mean_disparity)),
+            "s3_prefix_models": f"kvectors/{index}/",
+        },
+    )
 
     publish(table, session, index)
 

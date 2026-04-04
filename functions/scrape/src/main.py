@@ -14,10 +14,10 @@ def scrape(index):
 
     session = get_session()
     table = PipelineTable(session)
-    created = table.put(index)
+    created = table.put_entry(index)
 
     if not created:
-        item = table.get(index, "platform_data, s3_text_key")
+        item = table.get_entry(index, "platform_data, s3_text_key")
         if item and "s3_text_key" in item:
             print(f"{index} has already been scraped.")
             return

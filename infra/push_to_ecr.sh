@@ -35,6 +35,12 @@ for SERVICE in "$*"; do
   echo
   echo "=== $SERVICE (fn=$FUNCTION img=$IMAGE mem=$MEMORY timeout=$TIMEOUT) ==="
 
+  # run tests before docker work, fail fast
+  if [ -d "functions/$FUNCTION/tests" ]; then
+    echo "Running tests for $FUNCTION"
+    pytest "functions/$FUNCTION" -v
+  fi
+
   docker buildx build \
   --platform linux/amd64 \
   --provenance=false \

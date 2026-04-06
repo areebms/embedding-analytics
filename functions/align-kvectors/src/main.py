@@ -1,6 +1,5 @@
 import logging
 import os
-import tempfile
 from decimal import Decimal
 from pathlib import Path
 
@@ -9,10 +8,12 @@ from gensim.models import KeyedVectors
 from scipy.linalg import orthogonal_procrustes
 from statistics import mean
 
-from shared.aws import PipelineTable, get_keys_with_prefix, get_session, upload_file
+from shared.aws import PipelineTable, get_session, upload_file, yield_s3_files
 from shared.commons import get_index
-from publish import publish
 
+
+MAX_ITERATIONS = 40
+MIN_GRADIENT = 0.0001
 VECTOR_SIZE = 200
 S3_BUCKET = os.getenv("S3_BUCKET")
 
@@ -32,50 +33,48 @@ def _get_session_and_table():
     return _session, _table
 
 
-def _load_kvectors_from_s3(session, s3_prefix):
-    s3_keys = sorted(
-        key
-        for key in get_keys_with_prefix(session, s3_prefix)
-        if key.endswith(".model")
-    )
-    kvector_stack = []
-    file_names = []
-    s3_client = session.client("s3")
-    for key in s3_keys:
-        fd, tmp_path = tempfile.mkstemp(suffix=".model")
-        os.close(fd)
-        try:
-            s3_client.download_file(S3_BUCKET, key, tmp_path)
+class S3Kvectors:
+
+    def __init__(self, session, index):
+        self.session = session
+        self.index = index
+
+    def load(self):
+        file_names = []
+        kvector_stack = []
+
+        for key, tmp_path in yield_s3_files(
+            self.session, f"kvectors/{self.index}/collected/", ".model"
+        ):
             kvector_stack.append(KeyedVectors.load(tmp_path))
             file_names.append(key.split("/")[-1])
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except FileNotFoundError:
-                pass
-    return kvector_stack, file_names
+
+        return file_names, kvector_stack 
+
+    def upload(self, centroid, kvectors, file_names):
+        models_dir = Path("/tmp/models")
+        models_dir.mkdir(parents=True, exist_ok=True)
+
+        for i in range(len(kvectors)):
+            save_path = models_dir / file_names[i]
+            kvectors[i].save(str(save_path))
+            upload_file(
+                self.session,
+                f"kvectors/{self.index}/aligned/{save_path.name}",
+                save_path,
+            )
+
+        save_path = models_dir / "centroid"
+        centroid.save(str(save_path))
+        upload_file(self.session, f"kvectors/{self.index}/centroid.model", save_path)
 
 
-def upload_kvectors_to_s3(session, index, centroid, kvectors, file_names):
-    models_dir = Path("/tmp/models")
-    models_dir.mkdir(parents=True, exist_ok=True)
-
-    for i in range(len(kvectors)):
-        save_path = models_dir / file_names[i]
-        kvectors[i].save(str(save_path))
-        upload_file(session, f"kvectors/{index}/aligned/{save_path.name}", save_path)
-
-    save_path = models_dir / "centroid"
-    centroid.save(str(save_path))
-    upload_file(session, f"kvectors/{index}/centroid.model", save_path)
-
-
-def normalized_disparity_alignment(terms, kvector, centroid):
-    idx_ref = np.array([centroid.key_to_index[w] for w in terms])
-    idx_kv = np.array([kvector.key_to_index[w] for w in terms])
-    rotation, _ = orthogonal_procrustes(
-        kvector.vectors[idx_kv], centroid.vectors[idx_ref]
+def normalized_disparity_alignment(terms, kvector, centroid_vectors_by_term):
+    centroid_matrix = np.array(
+        [centroid_vectors_by_term[w] for w in terms], dtype=np.float32
     )
+    idx_kv = np.array([kvector.key_to_index[w] for w in terms])
+    rotation, _ = orthogonal_procrustes(kvector.vectors[idx_kv], centroid_matrix)
 
     kvector.vectors = kvector.vectors @ rotation
 
@@ -87,10 +86,10 @@ def normalized_disparity_alignment(terms, kvector, centroid):
     kvector.fill_norms(force=True)
 
     # disparity = Frobenius Norm squared = Sum of Squared Errors
-    disparity = np.linalg.norm(centroid.vectors - kvector.vectors, ord="fro") ** 2
+    disparity = np.linalg.norm(centroid_matrix - kvector.vectors, ord="fro") ** 2
 
     centroid_variance = (
-        np.linalg.norm(centroid.vectors - centroid.vectors.mean(axis=0), ord="fro") ** 2
+        np.linalg.norm(centroid_matrix - centroid_matrix.mean(axis=0), ord="fro") ** 2
     )
 
     return (
@@ -98,60 +97,24 @@ def normalized_disparity_alignment(terms, kvector, centroid):
     )  # equivalent to 1 - coefficient of determination
 
 
-def generate_centroid_kvector(terms, kvector_stack):
+def compute_centroid_vectors(terms, kvector_stack):
     vectors_by_term = {}
     for raw_vectors in kvector_stack:
         for term in terms:
             vectors_by_term.setdefault(term, []).append(raw_vectors[term])
+    return {
+        term: np.mean(vectors_by_term[term], axis=0).astype(np.float32)
+        for term in terms
+    }
 
-    centroid_keyed_vector = KeyedVectors(vector_size=VECTOR_SIZE)
-    centroid_keyed_vector.add_vectors(
+
+def build_centroid_kvector(terms, kvector_stack, centroid_vectors_by_term):
+    centroid = KeyedVectors(vector_size=VECTOR_SIZE)
+    centroid.add_vectors(
         terms,
-        np.stack([np.mean(vectors_by_term[term], axis=0) for term in terms]).astype(
-            np.float32
-        ),
+        np.stack([centroid_vectors_by_term[term] for term in terms]),
     )
-    centroid_keyed_vector.fill_norms(force=True)
-    return centroid_keyed_vector
-
-
-def gradient_descent_alignment(
-    terms, kvector_stack, max_iterations, min_gradient=0.0001
-):
-    # Generalized Procrustes Analysis (Gower, 1975)
-    gradient = 1
-    for _ in range(max_iterations):
-        normalized_disparities = []
-        centroid = generate_centroid_kvector(terms, kvector_stack)
-        for kvector in kvector_stack:
-            normalized_disparities.append(
-                normalized_disparity_alignment(terms, kvector, centroid)
-            )
-        gradient = gradient - mean(normalized_disparities)
-        if gradient <= min_gradient:
-            return centroid, mean(normalized_disparities)
-
-    raise Exception("Kvectors not aligned")
-
-
-def align_kvectors(index):
-    session, table = _get_session_and_table()
-
-    kvector_stack, file_names = _load_kvectors_from_s3(
-        session, f"kvectors/{index}/collected/"
-    )
-    if not kvector_stack:
-        print(f"No models found for {index}.")
-        return
-
-    terms = list(kvector_stack[0].key_to_index)
-
-    for kvector in kvector_stack:
-        normalized_disparity_alignment(terms, kvector, kvector_stack[0])
-
-    centroid, mean_disparity = gradient_descent_alignment(
-        terms, kvector_stack, 40, 0.0001
-    )
+    centroid.fill_norms(force=True)
 
     term_disparities = np.mean(
         [
@@ -173,7 +136,67 @@ def align_kvectors(index):
             term, "r_squared", float(1 - (term_disparities[i] / term_variances[i]))
         )
 
-    upload_kvectors_to_s3(session, index, centroid, kvector_stack, file_names)
+    return centroid
+
+
+def gradient_descent_alignment(
+    terms, kvector_stack, max_iterations, min_gradient=0.0001
+):
+    # Generalized Procrustes Analysis (Gower, 1975)
+    prev_disparity = float("inf")
+    for iteration in range(max_iterations):
+        normalized_disparities = []
+        centroid_vectors_by_term = compute_centroid_vectors(terms, kvector_stack)
+
+        for kvector in kvector_stack:
+            normalized_disparities.append(
+                normalized_disparity_alignment(terms, kvector, centroid_vectors_by_term)
+            )
+        current_disparity = mean(normalized_disparities)
+
+        if (prev_disparity - current_disparity) <= min_gradient:
+            return centroid_vectors_by_term, current_disparity, iteration + 1
+        prev_disparity = current_disparity
+
+    raise Exception("Kvectors not aligned")
+
+
+def perform_alignment(kvector_stack):
+
+    terms = list(kvector_stack[0].key_to_index)
+
+    # Align all kvectors with the first kvector for repeatability.
+    initial_centroid_vectors = {term: kvector_stack[0][term] for term in terms}
+    for kvector in kvector_stack:
+        normalized_disparity_alignment(terms, kvector, initial_centroid_vectors)
+
+    centroid_vectors_by_term, mean_disparity, _ = gradient_descent_alignment(
+        terms, kvector_stack, MAX_ITERATIONS, MIN_GRADIENT
+    )
+
+    centroid = build_centroid_kvector(terms, kvector_stack, centroid_vectors_by_term)
+
+    return mean_disparity, centroid
+
+
+def align_kvectors(index):
+    session, table = _get_session_and_table()
+
+    s3_kvectors = S3Kvectors(session, index)
+
+    file_names, kvector_stack = s3_kvectors.load()
+
+    if not kvector_stack:
+        print(f"No models found for {index}.")
+        return
+
+    # Sort for repeatability
+    file_names, kvector_stack = map(list, zip(*sorted(zip(file_names, kvector_stack))))
+
+    mean_disparity, centroid = perform_alignment(kvector_stack)
+
+    s3_kvectors.upload(centroid, kvector_stack, file_names)
+
     table.update_entries(
         index,
         {
@@ -181,8 +204,6 @@ def align_kvectors(index):
             "s3_prefix_models": f"kvectors/{index}/",
         },
     )
-
-    publish(table, session, index)
 
 
 if __name__ == "__main__":

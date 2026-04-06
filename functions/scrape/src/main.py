@@ -24,11 +24,7 @@ def scrape(index):
 
     html = get_html(index.split("-")[1])
     html_key = f"html/{index}.html"
-    upload_object(
-        session,
-        html_key,
-        html.encode("utf-8"),  # TODO: move encoding to function?
-    )
+    upload_object(session, html_key, html)
     table.update_entry(index, "s3_html_key", html_key)
 
     metadata = get_metadata(index.split("-")[1])
@@ -36,14 +32,14 @@ def scrape(index):
     upload_object(
         session,
         metadata_key,
-        json.dumps(metadata).encode("utf-8"),  # TODO: move encoding to function?
+        json.dumps(metadata),
         content_type="application/json; charset=utf-8",
     )
     table.update_entry(index, "s3_metadata_key", metadata_key)
 
     text = get_text(html)
     text_key = f"text/{index}.txt"
-    upload_object(session, text_key, text.encode("utf-8"))
+    upload_object(session, text_key, text)
     table.update_entry(index, "s3_text_key", text_key)
     print(f"{index} scraped.")
 

@@ -57,7 +57,7 @@ def chunk_text(nlp, text):
 def csv_bytes(rows):
     buffer = io.StringIO()
     csv.writer(buffer).writerows(rows)
-    return buffer.getvalue().encode("utf-8")
+    return buffer.getvalue()
 
 
 def get_related_verbs(lemma):

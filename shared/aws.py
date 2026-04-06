@@ -101,7 +101,9 @@ class TermTable(BaseTable):
         super().__init__(session, TERM_TABLE)
 
     def update_entry(self, term, platform_data, field, value):
-        super().update_entry({"term": term, "platform_data": platform_data}, field, value)
+        super().update_entry(
+            {"term": term, "platform_data": platform_data}, field, value
+        )
 
     def update_entries(self, term, platform_data, data):
         super().update_entries({"term": term, "platform_data": platform_data}, data)
@@ -130,8 +132,11 @@ class TermTable(BaseTable):
 def upload_object(
     session, s3_key, file_bytes, content_type="text/plain; charset=utf-8"
 ):
-    session.resource("s3").Object(S3_BUCKET, s3_key).put(
-        Body=file_bytes, ContentType=content_type
+    session.client("s3").upload_fileobj(
+        io.BytesIO(file_bytes.encode("utf-8")),
+        S3_BUCKET,
+        s3_key,
+        ExtraArgs={"ContentType": content_type},
     )
 
 
@@ -142,6 +147,22 @@ def upload_file(session, s3_key, path):
         s3_key,
         ExtraArgs={"ContentType": "application/octet-stream"},
     )
+
+
+def yield_s3_files(session, s3_prefix, file_extension):
+    s3_resource = session.resource("s3")
+    bucket = s3_resource.Bucket(S3_BUCKET)
+    for obj in bucket.objects.filter(Prefix=s3_prefix):
+        if file_extension not in obj.key:
+            continue
+
+        with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
+            s3_resource.Object(S3_BUCKET, obj.key).download_fileobj(tmp_file)
+            tmp_file.flush()
+            try:
+                yield obj.key, tmp_file.name
+            finally:
+                os.unlink(tmp_file.name)
 
 
 def load_text_from_s3(session, s3_key):
@@ -157,16 +178,6 @@ def load_text_from_s3(session, s3_key):
 def yield_sentences_from_s3(session, s3_key):
     body = session.resource("s3").Object(S3_BUCKET, s3_key).get()["Body"]
     yield from csv.reader(io.TextIOWrapper(body, encoding="utf-8"))
-
-
-def yield_keys_with_prefix(session, s3_prefix):
-    bucket = session.resource("s3").Bucket(S3_BUCKET)
-    for obj in bucket.objects.filter(Prefix=s3_prefix):
-        yield obj.key
-
-
-def get_keys_with_prefix(session, s3_prefix):
-    return list(yield_keys_with_prefix(session, s3_prefix))
 
 
 def extract_index(event):
@@ -189,10 +200,3 @@ def extract_index(event):
         return payload.get("index")
 
     return None
-
-
-def load_file_from_s3(session, s3_key):
-    with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
-        session.resource("s3").Object(S3_BUCKET, s3_key).download_fileobj(tmp_file)
-        tmp_file.flush()
-        return tmp_file.name

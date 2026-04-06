@@ -6,7 +6,7 @@ from random import randint
 
 from gensim.models import Word2Vec
 
-from shared.aws import PipelineTable, get_session, upload_file, yield_sentences_from_s3
+from shared.aws import get_pipeline_table, get_session, upload_file, yield_sentences_from_s3
 from shared.commons import get_index
 
 VECTOR_SIZE = 200
@@ -18,18 +18,6 @@ MIN_COUNT = 10
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-
-_session = None
-_table = None
-
-
-def _get_session_and_table():
-    global _session, _table
-    if _session is None:
-        _session = get_session()
-    if _table is None:
-        _table = PipelineTable(_session)
-    return _session, _table
 
 
 sentences = {}
@@ -90,7 +78,7 @@ def upload_kvector(session, index, kvector, seed):
 
 
 def train_and_upload_kvector(index, seed):
-    session, table = _get_session_and_table()
+    session, table = get_session(), get_pipeline_table()
     kvector = train_kvector(session, table, index, seed)
     upload_kvector(session, index, kvector, seed)
 

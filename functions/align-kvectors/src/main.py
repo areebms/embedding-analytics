@@ -8,7 +8,7 @@ from gensim.models import KeyedVectors
 from scipy.linalg import orthogonal_procrustes
 from statistics import mean
 
-from shared.aws import PipelineTable, get_session, upload_file, yield_s3_files
+from shared.aws import get_session, get_pipeline_table, upload_file, yield_s3_files
 from shared.commons import get_index
 
 
@@ -17,20 +17,8 @@ MIN_GRADIENT = 0.0001
 VECTOR_SIZE = 200
 S3_BUCKET = os.getenv("S3_BUCKET")
 
-_session = None
-_table = None
-
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-
-
-def _get_session_and_table():
-    global _session, _table
-    if _session is None:
-        _session = get_session()
-    if _table is None:
-        _table = PipelineTable(_session)
-    return _session, _table
 
 
 class S3Kvectors:
@@ -180,7 +168,8 @@ def perform_alignment(kvector_stack):
 
 
 def align_kvectors(index):
-    session, table = _get_session_and_table()
+    session = get_session()
+    table = get_pipeline_table()
 
     s3_kvectors = S3Kvectors(session, index)
 

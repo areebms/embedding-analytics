@@ -3,6 +3,7 @@ import io
 import os
 import json
 import tempfile
+from contextlib import contextmanager
 
 from boto3 import Session
 from boto3.dynamodb.conditions import Key
@@ -16,8 +17,22 @@ PIPELINE_TABLE = os.getenv("PIPELINE_TABLE")
 TERM_TABLE = os.getenv("TERM_TABLE")
 
 
+session = None
+pipeline_table = None
+
+
 def get_session():
-    return Session(profile_name=AWS_PROFILE, region_name=AWS_REGION)
+    global session
+    if session is None:
+        session = Session(profile_name=AWS_PROFILE, region_name=AWS_REGION)
+    return session
+
+
+def get_pipeline_table():
+    global pipeline_table
+    if pipeline_table is None:
+        pipeline_table = PipelineTable(get_session())
+    return pipeline_table
 
 
 class BaseTable:
@@ -149,20 +164,27 @@ def upload_file(session, s3_key, path):
     )
 
 
-def yield_s3_files(session, s3_prefix, file_extension):
-    s3_resource = session.resource("s3")
-    bucket = s3_resource.Bucket(S3_BUCKET)
-    for obj in bucket.objects.filter(Prefix=s3_prefix):
-        if file_extension not in obj.key:
-            continue
+class S3Loader:
 
+    def __init__(self, session):
+        self.s3_resource = session.resource("s3")
+
+    @contextmanager
+    def load_file(self, s3_object_key):
         with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
-            s3_resource.Object(S3_BUCKET, obj.key).download_fileobj(tmp_file)
-            tmp_file.flush()
-            try:
-                yield obj.key, tmp_file.name
-            finally:
-                os.unlink(tmp_file.name)
+            self.s3_resource.Object(S3_BUCKET, s3_object_key).download_fileobj(tmp_file)
+        try:
+            yield s3_object_key, tmp_file.name
+        finally:
+            os.unlink(tmp_file.name)
+
+    def yield_s3_files(self, s3_prefix, file_extension):
+        bucket = self.s3_resource.Bucket(S3_BUCKET)
+        for obj in bucket.objects.filter(Prefix=s3_prefix):
+            if file_extension not in obj.key:
+                continue
+            with self.load_file(obj.key) as result:
+                yield result
 
 
 def load_text_from_s3(session, s3_key):

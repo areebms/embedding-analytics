@@ -1,7 +1,7 @@
 import json
 import os
 
-from shared.aws import PipelineTable, upload_object, get_session
+from shared.aws import get_pipeline_table, upload_object, get_session
 from shared.commons import get_index
 from retrieve import get_html, get_text, get_metadata
 
@@ -13,7 +13,7 @@ AWS_PROFILE = os.getenv("AWS_PROFILE")
 def scrape(index):
 
     session = get_session()
-    table = PipelineTable(session)
+    table = get_pipeline_table()
     created = table.put_entry(index)
 
     if not created:

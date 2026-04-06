@@ -8,7 +8,7 @@ from nltk.corpus import wordnet
 from nltk.tokenize import sent_tokenize
 from nltk.stem import WordNetLemmatizer
 
-from shared.aws import PipelineTable, upload_object, load_text_from_s3, get_session
+from shared.aws import get_pipeline_table, upload_object, load_text_from_s3, get_session
 from shared.commons import get_index
 
 logger = logging.getLogger(__name__)
@@ -96,7 +96,7 @@ def aggressively_lemmatize(token, pos):
 def tokenize(index):
     session = get_session()
 
-    table = PipelineTable(session)
+    table = get_pipeline_table()
 
     item = table.get_entry(
         index,

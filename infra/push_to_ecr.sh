@@ -23,6 +23,7 @@ aws ecr get-login-password --region "$REGION" \
 
 for SERVICE in "$*"; do
   FUNCTION="$(yq e ".services.$SERVICE.function_name" "$FILE")"
+  FUNCTION_NAME="$LAMBDA_PREFIX-$FUNCTION"
   IMAGE="$(yq e ".services.$SERVICE.image" "$FILE")"
   MEMORY="$(yq e ".services.$SERVICE.memory // $DEFAULT_MEMORY" "$FILE")"
   TIMEOUT="$(yq e ".services.$SERVICE.timeout // $DEFAULT_TIMEOUT" "$FILE")"
@@ -34,6 +35,12 @@ for SERVICE in "$*"; do
   echo
   echo "=== $SERVICE (fn=$FUNCTION img=$IMAGE mem=$MEMORY timeout=$TIMEOUT) ==="
 
+  # run tests before docker work, fail fast
+  if [ -d "functions/$FUNCTION/tests" ]; then
+    echo "Running tests for $FUNCTION"
+    pytest "functions/$FUNCTION" -v
+  fi
+
   docker buildx build \
   --platform linux/amd64 \
   --provenance=false \
@@ -44,7 +51,7 @@ for SERVICE in "$*"; do
   -f "$DOCKERFILE" .
 
   # run tests
-  docker run --rm -it --env-file .env --entrypoint python $FULL_TAG main.py --platform-name gutenberg --platform-id 60411
+  docker run --rm -it --env-file .env --entrypoint python $FULL_TAG main.py --platform gutenberg --id 60411 --seed 10
 
   docker push "$FULL_TAG"
 
@@ -55,16 +62,16 @@ for SERVICE in "$*"; do
   IMAGE_URI="$AWS_URI_PREFIX/$ECR_REPO@$DIGEST"
   
   # TODO: Only Update if changed.
-  if aws lambda get-function --region "$REGION" --function-name "$FUNCTION" >/dev/null 2>&1; then
-    aws lambda update-function-code --region "$REGION" --function-name "$FUNCTION" --image-uri "$IMAGE_URI"
-    aws lambda update-function-configuration --region "$REGION" --function-name "$FUNCTION" --memory-size "$MEMORY" --timeout "$TIMEOUT"
+  if aws lambda get-function --region "$REGION" --function-name "$FUNCTION_NAME" >/dev/null 2>&1; then
+    aws lambda update-function-code --region "$REGION" --function-name "$FUNCTION_NAME" --image-uri "$IMAGE_URI"
+    aws lambda update-function-configuration --region "$REGION" --function-name "$FUNCTION_NAME" --memory-size "$MEMORY" --timeout "$TIMEOUT"
   else
     aws lambda create-function --region "$REGION" \
-      --function-name "$FUNCTION" --package-type Image \
+      --function-name "$FUNCTION_NAME" --package-type Image \
       --code "ImageUri=$IMAGE_URI" --role "$LAMBDA_ROLE_ARN" \
       --memory-size "$MEMORY" --timeout "$TIMEOUT"
   fi
 
-  aws lambda wait function-active-v2 --region "$REGION" --function-name "$FUNCTION"
+  aws lambda wait function-active-v2 --region "$REGION" --function-name "$FUNCTION_NAME"
   echo "Done: $SERVICE"
 done

@@ -1,265 +1,147 @@
 # Embedding Analytics — Backend
 
-Most NLP similarity tools give you a single number and call it a day. This one gives you a number *and* tells you how much to trust it.
+Embedding similarity with confidence intervals.
 
-The backend trains **ensembles of Word2Vec models** on Project Gutenberg texts, aligns them via **Orthogonal Procrustes analysis**, and exposes the results through a FastAPI endpoint — all serverless, all containerized, zero idle cost.
+Instead of:
+```
+similarity("market", "price") = 0.35
+```
+You get:
+```
+similarity = 0.35, 95% CI [0.31, 0.40]
+```
+
+Trains **ensembles of Word2Vec models** on Project Gutenberg texts, aligns them via **Generalized Procrustes Analysis**, and serves similarity with confidence intervals through a FastAPI endpoint. Serverless, containerized, zero idle cost.
 
 **→ [Live Demo](https://www.embedding-analytics.com)** &nbsp;|&nbsp; **→ [Frontend Repo](https://github.com/areebms/embedding-analytics-frontend)**
 
----
-
-## Why ensembles?
-
-Word2Vec is stochastic. Two models trained on identical text will learn slightly different vector spaces. That's usually treated as a nuisance. Here it's the whole point.
-
-Train enough independent models on the same corpus, align their vector spaces, and the variance becomes meaningful:
-
-| Signal | Interpretation |
-|---|---|
-| Low variance across runs | Stable, trustworthy semantic relationship |
-| High variance across runs | The model is uncertain — treat with skepticism |
-| Systematic drift between corpora | Real semantic shift worth investigating |
-
-You get similarity scores *with built-in confidence* — not just "these words are related" but "these words are reliably related."
 
 ---
 
 ## Architecture
 
+```mermaid
+graph TD
+    subgraph API
+        direction LR
+        UI[React] <--> FAPI[FastAPI]
+    end
+
+    subgraph Storage
+        direction LR
+        DDB[(DynamoDB)]
+        RED[(Redis)]
+        S3[(S3)]
+    end
+
+    subgraph DP [Data Pipeline]
+        direction LR
+        SCR[Scrape] --> TOK[Tokenize] --> TRN["Train (×N seeds)"] --> ALN[Align] --> PUB[Publish]
+    end
+
+    FAPI -.-> RED
+    FAPI <--> DDB
+    PUB --> DDB
+    DP --> S3
 ```
-┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-│   scrape     │───▶│   tokenize   │───▶│train-kvectors│───▶│aggregate-data│
-│  (Lambda)    │    │   (Lambda)   │    │   (Lambda)   │    │   (Lambda)   │
-└──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
-       │                    │                    │                    │
-       └────────────────────┴────────────────────┴────────────────────┘
-                                    │
-                            [S3 Artifact Storage]
-                            [DynamoDB Pipeline State]
-                                    │
-                            ┌───────▼────────┐
-                            │   api (Lambda) │
-                            └───────┬────────┘
-                                    │
-                            [React Frontend]
-```
 
-Six Docker containers, each a single Lambda function, all on Python 3.13. DynamoDB tracks pipeline state so every stage is idempotent. Artifacts flow through S3.
+Six containerized Lambda functions on Python 3.13. S3 stores intermediate artifacts during training. DynamoDB stores final term-level vectors (float16) and metadata for fast API reads. Redis caching is optional.
 
-| Stage | Input | Output |
-|---|---|---|
-| `scrape` | Gutenberg book ID | HTML + text + metadata → S3 |
-| `tokenize` | Raw text | Lemmatized token CSVs → S3 |
-| `train-kvectors` | Corpus index | Fires N parallel `train-kvector` invocations |
-| `train-kvector` | Token lemmas | One trained `.model` → S3 |
-| `aggregate-data` | N raw models | Aligned models + centroid + variance CSV → S3 |
-| `api` | HTTP request | Similarity + coherence scores as JSON |
+**→ [Detailed pipeline documentation](docs/pipeline.md)** — per-stage inputs, outputs, configs, and design decisions.
+
+**→ [Alignment math](docs/alignment.md)** — Generalized Procrustes Analysis, convergence, per-term metrics.
 
 ---
 
-## The Pipeline
+## API
 
-### lambda-scrape
-`functions/scrape/` — BeautifulSoup, Requests
-
-Pulls books from Project Gutenberg by ID, strips the standard header/footer, and stores HTML, clean text, and bibliographic metadata to S3. Skips re-scraping if the index already has an `s3_text_key` in DynamoDB.
-
-| S3 artifact | Contents |
-|---|---|
-| `html/{index}.html` | Raw HTML |
-| `text/{index}.txt` | Extracted body text |
-| `metadata/{index}.json` | Title, author, publication info |
-
----
-
-### lambda-tokenize
-`functions/tokenize/` — spaCy (`en_core_web_sm`), NLTK
-
-Segments text into sentences (NLTK), lemmatizes with spaCy (parser and NER disabled for speed), and outputs three parallel CSVs. Smart-chunks large documents to stay under spaCy's max-length limit without splitting mid-sentence. Skips re-tokenizing if all three output keys already exist.
-
-| S3 artifact | Contents |
-|---|---|
-| `token_texts/{index}.csv` | Original tokens, one sentence per row |
-| `token_lemmas/{index}.csv` | Lowercased lemmas — what Word2Vec trains on |
-| `token_tags/{index}.csv` | POS tags |
-
----
-
-### lambda-train-kvectors (Orchestrator)
-`functions/train-kvectors/`
-
-Fans out to N parallel `train-kvector` workers via Lambda's async `InvocationType='Event'` — fire and forget, no blocking. Returns `{ initiated, attempted }`. Ensemble size is set by the `KVECTORS_TRAINED` Lambda env var (defaults to `2`).
-
----
-
-### lambda-train-kvector (Worker)
-`functions/train-kvector/` — Gensim
-
-Trains one Word2Vec model. Filters lemmas to alphabetic tokens longer than 3 chars. Calculates worker count from Lambda's allocated memory (`vcpu = memory_mb / 1769.0`, capped at 6). Saves with a `{timestamp}-{randint}.model` name to avoid S3 collisions across parallel invocations.
-
-**Word2Vec config:**
-| Parameter | Value |
-|---|---|
-| Vector size | 200 |
-| Window | 10 tokens |
-| Min count | 2 |
-| Algorithm | Skip-gram (`sg=1`) |
-| Training | Hierarchical softmax (`hs=1`) |
-| Negative sampling | Off |
-| Epochs | 30 |
-
-> This function runs at 6144 MB (~3.5 vCPUs). Word2Vec training is CPU-bound, and Lambda's vCPU allocation scales linearly with memory — so more memory means faster training, not just more RAM.
-
----
-
-### lambda-aggregate-data
-`functions/aggregate-data/` — NumPy, SciPy, scikit-learn
-
-The heavy math step. Loads all raw models, aligns them, computes centroids, calculates variance, and writes everything back to S3. Also backfills author/title in DynamoDB from Gutenberg metadata.
-
-**Procrustes alignment:** For each model, finds orthogonal rotation `R` minimizing `||A·R - B||²`, solved via SVD (`R = U·Vᵀ` where `U·Σ·Vᵀ = BᵀA`). Applied in-place with norms recomputed. Preserves cosine similarity while putting all models in the same coordinate frame.
-
-**Variance metrics per term:**
-| Field | What it measures |
-|---|---|
-| `overall` | Mean Euclidean distance from centroid — total spread |
-| `semantic` | Mean cosine distance from centroid — directional variance |
-| `norm` | Mean absolute deviation in vector magnitude |
-
-Output lands at `keyed_vector_group_data/{index}/` — aligned models, `centroid.model`, and `term_stability.csv`.
-
----
-
-### lambda-api
-`functions/api/` — FastAPI, Mangum, Redis
-
-A thin read layer over the S3 artifacts. [Mangum](https://github.com/jordaneremieff/mangum) makes FastAPI work inside a Lambda Function URL. Responses are cached in Redis with no expiry (`expire=None`) — cold S3 loads happen exactly once per corpus/term.
-
-**`GET /books`**  
-All corpora that have completed the full pipeline.
+**`GET /books`** — all corpora with completed pipelines.
 ```json
-[{ "id": 3300, "label": "Smith (1776)", "author": "Smith, Adam", "title": "An Inquiry into the Nature and Causes of the Wealth of Nations" }]
+[
+  {
+    "id": 3300,
+    "label": "Smith (1776)",
+    "author": "Smith, Adam",
+    "title": "An Inquiry into...",
+    "published_year": 1776
+  }
+]
 ```
 
-**`GET /similarity/{book_id}/{primary_term}`**  
-Every term in the corpus, ranked by cosine similarity to `primary_term`, with coherence and frequency.
+**`POST /similarity/{book_id}`** — similarity with 95% confidence intervals via t-distribution. Supports dual-term queries (vectors averaged and re-normalized).
 ```json
-[{ "term": "price", "similarity": 0.354, "coherence": 0.938, "count": 1337 }]
+// Request
+{ "primary_term": "market", "secondary_term": "price" }
+
+// Response
+[
+  {
+    "term": "labour",
+    "pos": ["N", "V"],
+    "count": 1337,
+    "similarity": 0.354,
+    "similarity_ci": [0.312, 0.396]
+  }
+]
 ```
 
-`coherence = 1 - semantic_variance`. A score of 0.938 means the model is very confident that *price* reliably associates with *market* — it held up consistently across training runs.
-
-**CORS:** `localhost:5173` + whatever's in `PRODUCTION_DOMAIN`.
+Tight CI = ensemble agreed. Wide CI = treat with skepticism.
 
 ---
 
-## Lambda Resource Config
-
-| Function | Memory | Timeout | Why |
-|---|---|---|---|
-| scrape | 256 MB | 120s | I/O bound, no heavy compute |
-| tokenize | 512 MB | 120s | spaCy needs a bit more headroom |
-| train-kvector | 6144 MB | 600s | CPU-bound — RAM = vCPUs on Lambda |
-| train-kvectors | 256 MB | 120s | Just fires async invocations |
-| aggregate-data | 256 MB | 120s | NumPy ops on pre-loaded vectors |
-| api | 256 MB | 120s | Reads from Redis/S3 |
-
----
-
-## Getting Started
-
-### Prerequisites
-- Docker + Docker Compose
-- AWS CLI (Lambda, S3, ECR, DynamoDB permissions)
-- [`yq`](https://github.com/mikefarah/yq) — `push_to_ecr.sh` uses it to parse `services.yaml`
-- Redis — required by the API at startup
-
-> **Apple Silicon:** `push_to_ecr.sh` forces `--platform linux/amd64` via `docker buildx`. Make sure buildx is available in your Docker install.
-
-### Setup
+## Quick start
 
 ```bash
 git clone https://github.com/areebms/embedding-analytics.git
 cd embedding-analytics
-cp .env.example .env
-```
-
-```
-AWS_REGION=
-AWS_ACCESS_KEY_ID=
-AWS_SECRET_ACCESS_KEY=
-AWS_URI_PREFIX=        # e.g. 123456789.dkr.ecr.us-east-1.amazonaws.com
-AWS_ECR_REPO=
-LAMBDA_ROLE_ARN=
-S3_BUCKET=
-PIPELINE_TABLE=
-REDIS_URL=             # e.g. redis://localhost:6379
-REDIS_PREFIX=
-PRODUCTION_DOMAIN=     # Your frontend URL — for CORS
-```
-
-```bash
+cp .env.example .env   # fill in AWS creds, S3 bucket, DynamoDB tables
 docker-compose build
 ```
 
-### Run the pipeline
-
-`--platform-name` must be `gutenberg` (the only supported platform). Indexes follow `gutenberg-{id}`.
-
+Run the pipeline:
 ```bash
-# Book 3300 = Wealth of Nations
 docker-compose run lambda-scrape python main.py --platform-name gutenberg --platform-id 3300
 docker-compose run lambda-tokenize python main.py --platform-name gutenberg --platform-id 3300
-docker-compose run lambda-train-kvectors python main.py --platform-name gutenberg --platform-id 3300
-docker-compose run lambda-train-kvector python main.py --platform-name gutenberg --platform-id 3300
-docker-compose run lambda-aggregate-data python main.py --platform-name gutenberg --platform-id 3300
+docker-compose run lambda-train-kvector python main.py --platform-name gutenberg --platform-id 3300 --seed 1
+docker-compose run lambda-train-kvector python main.py --platform-name gutenberg --platform-id 3300 --seed 2
+docker-compose run lambda-align-kvectors python main.py --platform-name gutenberg --platform-id 3300
+docker-compose run lambda-publish python main.py --platform-name gutenberg --platform-id 3300
 ```
 
-Every stage checks DynamoDB first and skips work that's already done.
+More seeds = tighter confidence intervals. Every stage is idempotent.
 
-### Run the API locally
-
-The API container has a `local` Dockerfile target that runs uvicorn with hot reload. `app.py` and `main.py` are volume-mounted — edit without rebuilding.
-
+Start the API:
 ```bash
-docker-compose up lambda-api
-# → http://localhost:8000
+docker-compose up lambda-api    # → http://localhost:8000
 ```
 
-> Redis responses are cached indefinitely. If you reprocess a book, flush Redis or you'll get stale results.
-
-### Deploy
-
-`push_to_ecr.sh` takes service names as arguments. It builds for `linux/amd64`, runs a smoke test against book 60411 with your `.env` credentials, pushes to ECR, then creates or updates the Lambda function automatically.
-
+Deploy:
 ```bash
 cd infra
-
-# One or many at a time
-./push_to_ecr.sh scrape tokenize train-kvector train-kvectors aggregate-data api
+./push_to_ecr.sh scrape tokenize train-kvector align-kvectors publish api
 ```
 
-To change ensemble size, set `KVECTORS_TRAINED` on the `train-kvectors` Lambda function. To change memory or timeouts, edit `services.yaml` before deploying.
+**→ [Full setup guide](docs/pipeline.md#getting-started)** — env vars, prerequisites, Apple Silicon notes, Redis config.
 
 ---
 
-## Repo Layout
+## Repo layout
 
 ```
 embedding-analytics/
 ├── functions/
 │   ├── scrape/             # Gutenberg scraper
-│   ├── tokenize/           # spaCy lemmatization
-│   ├── train-kvector/      # Word2Vec worker
-│   ├── train-kvectors/     # Ensemble orchestrator
-│   ├── aggregate-data/     # Procrustes + variance
-│   └── api/                # FastAPI (2 endpoints)
+│   ├── tokenize/           # spaCy + NLTK lemmatization
+│   ├── train-kvector/      # Word2Vec worker (one model per seed)
+│   ├── align-kvectors/     # Generalized Procrustes alignment
+│   ├── publish/            # Flatten S3 artifacts → DynamoDB Term Table
+│   └── api/                # FastAPI + Mangum (2 endpoints)
 ├── shared/
-│   ├── aws.py              # S3, DynamoDB, Lambda helpers
+│   ├── aws.py              # S3, DynamoDB (Pipeline + Term tables), helpers
 │   └── commons.py          # CLI arg parsing
 ├── infra/
 │   ├── push_to_ecr.sh      # Build + deploy script
-│   └── services.yaml       # Lambda config
+│   └── services.yaml       # Lambda config (memory, timeouts)
 ├── docker-compose.yml
 └── .env.example
 ```
@@ -268,9 +150,8 @@ embedding-analytics/
 
 ## What's next
 
-- [ ] Stream sentence iteration — avoid loading full corpora into RAM
 - [ ] Step Functions orchestration for multi-corpus pipelines
-- [ ] Transformer ensemble support
+- [ ] Expose the training pipeline as callable endpoints if traffic warrants it
 
 ---
 

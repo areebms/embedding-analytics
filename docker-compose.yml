@@ -1,43 +1,71 @@
 services:
   lambda-scrape:
     image: ${AWS_URI_PREFIX}/${AWS_ECR_REPO}/lambda-scrape:0.1
+    env_file:
+    - .env
     build:
       context: .
       dockerfile: functions/scrape/Dockerfile
+      target: local
       args:
         AWS_URI_PREFIX: ${AWS_URI_PREFIX}
 
   lambda-tokenize:
     image: ${AWS_URI_PREFIX}/${AWS_ECR_REPO}/lambda-tokenize:0.1
+    env_file:
+    - .env
     build:
       context: .
       dockerfile: functions/tokenize/Dockerfile
+      target: local
       args:
         AWS_URI_PREFIX: ${AWS_URI_PREFIX}
+    volumes:
+      - ./functions/tokenize/src/app.py:/var/task/app.py
+      - ./functions/tokenize/src/main.py:/var/task/main.py
+      - ./functions/tokenize/src/ignored_nouns.txt:/var/task/ignored_nouns.txt
 
   lambda-train-kvector:
     image: ${AWS_URI_PREFIX}/${AWS_ECR_REPO}/lambda-train-kvector:0.1
+    env_file:
+    - .env
     build:
       context: .
+      target: local
       dockerfile: functions/train-kvector/Dockerfile
       args:
         AWS_URI_PREFIX: ${AWS_URI_PREFIX}
-  
-  lambda-train-kvectors:
-    image: ${AWS_URI_PREFIX}/${AWS_ECR_REPO}/lambda-train-kvectors:0.1
-    build:
-      context: .
-      dockerfile: functions/train-kvectors/Dockerfile
-      args:
-        AWS_URI_PREFIX: ${AWS_URI_PREFIX}
+    volumes:
+      - ./functions/train-kvector/src/app.py:/var/task/app.py
+      - ./functions/train-kvector/src/main.py:/var/task/main.py
 
-  lambda-aggregate-data:
-    image: ${AWS_URI_PREFIX}/${AWS_ECR_REPO}/lambda-aggregate-data:0.1
+  lambda-align-kvectors:
+    image: ${AWS_URI_PREFIX}/${AWS_ECR_REPO}/lambda-align-kvectors:0.1
+    env_file:
+    - .env
     build:
       context: .
-      dockerfile: functions/aggregate-data/Dockerfile
+      target: local
+      dockerfile: functions/align-kvectors/Dockerfile
       args:
         AWS_URI_PREFIX: ${AWS_URI_PREFIX}
+    volumes:
+      - ./functions/align-kvectors/src/app.py:/var/task/app.py
+      - ./functions/align-kvectors/src/main.py:/var/task/main.py
+
+  lambda-publish:
+    image: ${AWS_URI_PREFIX}/${AWS_ECR_REPO}/lambda-publish:0.1
+    env_file:
+    - .env
+    build:
+      context: .
+      target: local
+      dockerfile: functions/publish/Dockerfile
+      args:
+        AWS_URI_PREFIX: ${AWS_URI_PREFIX}
+    volumes:
+      - ./functions/publish/src/app.py:/var/task/app.py
+      - ./functions/publish/src/main.py:/var/task/main.py
 
   lambda-api:
     image: ${AWS_URI_PREFIX}/${AWS_ECR_REPO}/lambda-api:0.1

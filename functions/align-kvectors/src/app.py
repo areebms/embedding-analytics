@@ -1,7 +1,7 @@
 import json
 import logging
 
-from main import train_and_upload_kvector
+from main import align_kvectors
 from shared.aws import extract_index
 
 
@@ -15,12 +15,12 @@ def handler(event, context):
     if not index:
         logger.warning("Generate model request missing index")
         return {"statusCode": 400, "body": json.dumps({"error": "index is required"})}
-    
-    seed = event.get("seed")
 
-    if seed is None:
-        logger.warning("Generate model request missing seed")
-        return {"statusCode": 400, "body": json.dumps({"error": "seed is required"})}
+    passed, attempted = align_kvectors(index)
 
-    train_and_upload_kvector(index, seed)
-    return {"statusCode": 200, "body": json.dumps({"status": "ok", "index": index, "seed": seed})}
+    return {
+        "statusCode": 200,
+        "body": json.dumps(
+            {"index": index, "attempted": attempted, "initiated": passed}
+        ),
+    }

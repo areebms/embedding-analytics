@@ -23,7 +23,7 @@ aws ecr get-login-password --region "$REGION" \
 
 for SERVICE in "$*"; do
   FUNCTION="$(yq e ".services.$SERVICE.function_name" "$FILE")"
-  FUNCTION_NAME="$LAMBDA_PREFIX$FUNCTION"
+  FUNCTION_NAME="$LAMBDA_PREFIX-$FUNCTION"
   IMAGE="$(yq e ".services.$SERVICE.image" "$FILE")"
   MEMORY="$(yq e ".services.$SERVICE.memory // $DEFAULT_MEMORY" "$FILE")"
   TIMEOUT="$(yq e ".services.$SERVICE.timeout // $DEFAULT_TIMEOUT" "$FILE")"

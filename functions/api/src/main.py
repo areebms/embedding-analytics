@@ -1,43 +1,61 @@
-from __future__ import annotations
+import numpy as np
 
-import os
+T_CRIT_95 = [
+    0,
+    12.706,
+    4.303,
+    3.182,
+    2.776,
+    2.571,
+    2.447,
+    2.365,
+    2.306,
+    2.262,
+    2.228,
+    2.201,
+    2.179,
+    2.160,
+    2.145,
+    2.131,
+    2.120,
+    2.110,
+    2.101,
+    2.093,
+    2.086,
+    2.080,
+    2.074,
+    2.069,
+    2.064,
+    2.060,
+    2.056,
+    2.052,
+    2.048,
+    2.045,
+    2.042,
+]
 
-from gensim.models import KeyedVectors
 
-from shared.aws import (
-    get_session,
-    load_file_from_s3,
-    get_keys_with_prefix,
-)
+def extract_vectors(buffers):
+    return np.stack(
+        [
+            np.frombuffer(bytes(buffer), dtype=np.float16).astype(np.float64)
+            for buffer in buffers
+        ]
+    )
 
 
-class KeyedVectorGroup:
+def normalize_vector_bytes(buffers):
+    vectors = extract_vectors(buffers)
+    return vectors / np.linalg.norm(vectors, axis=1, keepdims=True)
 
-    def __init__(self, index):
-        self.s3_prefix = f"kvectors/{index}"
-        self.keyed_vectors_stack = []
-        self.centroid = None
-        self.label = index.split("-")[1]
-        self.term_stability_data = {}
 
-    def fetch_keyed_vectors_stack(self, session):
-        model_keys = get_keys_with_prefix(session, f"{self.s3_prefix}/aligned/")
-        for key in sorted(model_keys):
-            self.keyed_vectors_stack.append(self.load_keyed_vector_from_s3(key))
-
-    @staticmethod
-    def load_keyed_vector_from_s3(session, s3_key):
-        local_path = load_file_from_s3(session, s3_key)
-        try:
-            return KeyedVectors.load(local_path)
-        finally:
-            os.unlink(local_path)
-
-    def fetch_centroid_data(self, session):
-        self.centroid = self.load_keyed_vector_from_s3(
-            session, f"{self.s3_prefix}/centroid.model"
-        )
-
-    def fetch_precalculated_data(self):
-        session = get_session()
-        self.fetch_centroid_data(session)
+def get_confidence_intervals(primary_vectors, item_vectors):
+    cosine_similarities = np.sum(primary_vectors * item_vectors, axis=1)
+    n = len(cosine_similarities)
+    cosine_similarity = float(np.mean(cosine_similarities))
+    if n > 1:
+        t_crit = T_CRIT_95[n - 1] if n - 1 < len(T_CRIT_95) else 1.96
+        ci_half = float(t_crit * np.std(cosine_similarities, ddof=1) / np.sqrt(n))
+    else:
+        ci_half = 0.0
+    return cosine_similarity, ci_half

@@ -20,7 +20,7 @@ def test_perform_alignment_centroid_vecattrs(alignment_result):
 
 
 def test_gradient_descent_alignment_raises_exception(kvector_stack):
-    from main import gradient_descent_alignment
+    from procrustes_utils import gradient_descent_alignment
 
     terms = list(kvector_stack[0].key_to_index)
 
@@ -28,12 +28,12 @@ def test_gradient_descent_alignment_raises_exception(kvector_stack):
         gradient_descent_alignment(terms, kvector_stack, max_iterations=0)
 
 
-def test_gradient_descent_alignment_raises_exception(kvector_stack):
-    from main import gradient_descent_alignment
+def test_gradient_descent_alignment_converges(kvector_stack):
+    from procrustes_utils import gradient_descent_alignment
 
     terms = list(kvector_stack[0].key_to_index)
 
-    _, mean_disparity, iteration = gradient_descent_alignment(terms, kvector_stack, max_iterations=10)
+    _,_, mean_disparity, iteration = gradient_descent_alignment(terms, kvector_stack, max_iterations=10)
 
     assert mean_disparity == pytest.approx(0.039, 0.1)
     assert iteration == 5

@@ -2,6 +2,7 @@ import copy
 import os
 from pathlib import Path
 
+import numpy as np
 import pytest
 from dotenv import load_dotenv
 from gensim.models import KeyedVectors
@@ -35,6 +36,15 @@ def kvector_stack(s3_test_data_dir):
 
 @pytest.fixture(scope="session")
 def alignment_result(kvector_stack):
-    from main import perform_alignment
+    from procrustes_utils import gradient_descent_alignment, build_centroid_kvector
 
-    return perform_alignment(copy.deepcopy(kvector_stack))
+    stack = copy.deepcopy(kvector_stack)
+    terms = list(stack[0].key_to_index)
+
+    centroid_vectors, residuals, mean_disparity, _ = gradient_descent_alignment(
+        terms, stack
+    )
+    counts = np.array([stack[0].get_vecattr(t, "count") for t in terms])
+    centroid = build_centroid_kvector(terms, counts, residuals, centroid_vectors)
+
+    return mean_disparity, centroid

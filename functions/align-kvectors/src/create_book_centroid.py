@@ -4,7 +4,6 @@ from decimal import Decimal
 import numpy as np
 
 from shared.aws import get_session, get_pipeline_table
-from shared.commons import get_index
 from procrustes_utils import (
     rotate,
     load_corpus_centroid,
@@ -67,7 +66,7 @@ def align_kvectors(index):
 
     s3_kvectors = S3Kvectors(session, index)
 
-    file_names, kvector_stack = s3_kvectors.load()
+    file_names, kvector_stack = s3_kvectors.load("collected")
 
     if not kvector_stack:
         print(f"No models found for {index}.")
@@ -87,7 +86,7 @@ def align_kvectors(index):
 
     corpus_disparity = align_to_corpus_centroid(centroid, kvector_stack, session)
 
-    s3_kvectors.upload(centroid, kvector_stack, file_names)
+    s3_kvectors.upload("aligned", centroid, kvector_stack, file_names)
 
     updates = {
         "mean_disparity": Decimal(str(mean_disparity)),
@@ -101,4 +100,20 @@ def align_kvectors(index):
 
 
 if __name__ == "__main__":
-    align_kvectors(get_index())
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+    )
+
+    session = get_session()
+    table = get_pipeline_table()
+
+    book_ids = sorted(
+        [
+            item["platform_data"]
+            for item in table.get_all_entries(["platform_data"])
+        ]
+    )
+    logger.info("Aligning %d books: %s", len(book_ids), book_ids)
+
+    for idx in book_ids:
+        align_kvectors(idx)

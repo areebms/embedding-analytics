@@ -53,8 +53,6 @@ services:
       - ./functions/align-kvectors/src/create_corpus_centroid.py:/var/task/create_corpus_centroid.py
       - ./functions/align-kvectors/src/create_book_centroid.py:/var/task/create_book_centroid.py
       - ./functions/align-kvectors/src/procrustes_utils.py:/var/task/procrustes_utils.py
-      - ./functions/align-kvectors/src/rotate_books_to_corpus.py:/var/task/rotate_books_to_corpus.py
-
 
   lambda-publish:
     image: ${AWS_URI_PREFIX}/${AWS_ECR_REPO}/lambda-publish:0.1

@@ -26,7 +26,7 @@ def build_corpus_centroid(session, book_ids):
     kvector_stack = [load_book_centroid(session, idx) for idx in book_ids]
     terms, book_counts = zip(*get_book_counts(kvector_stack).most_common())
     terms = list(terms)
-    book_counts = np.array(book_counts) - 1
+    book_counts = np.array([0 if count == 1 else 1 for count in book_counts]) # TODO: Revisit when corpus increases
 
     centroid_vectors, residuals, mean_disparity, iterations = (
         gradient_descent_alignment(terms, kvector_stack, counts=book_counts)

@@ -16,6 +16,7 @@ MIN_GRADIENT = 0.0001
 VECTOR_SIZE = 200
 
 logger = logging.getLogger(__name__)
+logging.getLogger("gensim").setLevel(logging.WARNING)
 
 
 def load_corpus_centroid(session=None) -> Optional[KeyedVectors]:
@@ -254,7 +255,7 @@ def gradient_descent_alignment(
 
 def load_book_centroid(session, index) -> KeyedVectors:
     loader = S3Loader(session)
-    with loader.load_file(f"kvectors/{index}/centroid.model") as (_, local_path):
+    with loader.load_file(f"kvectors/{index}/corpus_aligned/centroid.model") as (_, local_path):
         return KeyedVectors.load(local_path)
 
 
@@ -275,8 +276,8 @@ def build_centroid_kvector(terms, counts, residuals, centroid_vectors):
 
     logger.info(
         "mean r_squared: %s - breakdown: %s",
-        mean(r_squares),
-        [(int(k), len(v), mean(v)) for k, v in sorted(r_squared_by_count.items())],
+        round(mean(r_squares), 5),
+        [(int(k), len(v), round(mean(v), 3)) for k, v in sorted(r_squared_by_count.items())],
     )
 
     for i, term in enumerate(terms):
@@ -302,26 +303,26 @@ class S3Kvectors:
         self.session = session
         self.book_index = index
 
-    def load(self, subdir="collected"):
+    def load(self, subprefix):
         file_names = []
         kvector_stack = []
 
         for key, tmp_path in S3Loader(self.session).yield_s3_files(
-            f"kvectors/{self.book_index}/{subdir}/", ".model"
+            f"kvectors/{self.book_index}/{subprefix}/", ".model"
         ):
             kvector_stack.append(KeyedVectors.load(tmp_path))
             file_names.append(key.split("/")[-1])
 
         return file_names, kvector_stack
 
-    def upload(self, centroid, kvectors, file_names):
+    def upload(self, subprefix, centroid, kvectors, file_names):
         for i in range(len(kvectors)):
             upload_kvector(
                 self.session,
                 kvectors[i],
-                f"kvectors/{self.book_index}/aligned/{file_names[i]}",
+                f"kvectors/{self.book_index}/{subprefix}/{file_names[i]}",
             )
 
         upload_kvector(
-            self.session, centroid, f"kvectors/{self.book_index}/centroid.model"
+            self.session, centroid, f"kvectors/{self.book_index}/{subprefix}/centroid.model"
         )

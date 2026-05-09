@@ -25,12 +25,12 @@ def handler(event, context):
             "body": json.dumps({"index": index, "skipped": True}),
         }
 
-    return {"statusCode": 200, "body": json.dumps(result)}
+    return {"index": index}
 
 
 def build_corpus_handler(event, context): # Note being Used.
     """Build corpus centroid from all aligned books."""
-    from build_corpus_centroid import build_corpus_centroid
+    from create_corpus_centroid import build_corpus_centroid
     from shared.aws import get_session, get_pipeline_table
 
     logger.info("Build corpus centroid request received", extra={"event": event})
@@ -63,28 +63,4 @@ def build_corpus_handler(event, context): # Note being Used.
     return {
         "statusCode": 200,
         "body": json.dumps({"book_ids": book_ids}),
-    }
-
-
-def rotate_book_handler(event, context): # Not being Used.
-    """Rotate a single book into the corpus frame."""
-    from rotate_books_to_corpus import rotate_book_to_corpus
-    from shared.aws import get_session, get_pipeline_table
-
-    logger.info("Rotate book to corpus request received", extra={"event": event})
-
-    index = event.get("index")
-    if not index:
-        return {
-            "statusCode": 400,
-            "body": json.dumps({"error": "index is required"}),
-        }
-
-    session = get_session()
-    table = get_pipeline_table()
-    rotate_book_to_corpus(session, table, index)
-
-    return {
-        "statusCode": 200,
-        "body": json.dumps({"index": index, "corpus_aligned": True}),
     }

@@ -255,7 +255,7 @@ def gradient_descent_alignment(
 
 def load_book_centroid(session, index) -> KeyedVectors:
     loader = S3Loader(session)
-    with loader.load_file(f"kvectors/{index}/corpus_aligned/centroid.model") as (_, local_path):
+    with loader.load_file(f"kvectors/{index}/aligned/centroid.model") as (_, local_path):
         return KeyedVectors.load(local_path)
 
 

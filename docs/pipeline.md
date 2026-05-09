@@ -1,6 +1,6 @@
 # Pipeline Documentation
 
-Six containerized Lambda functions, each a single stage. Artifacts flow through S3 during training; the `publish` stage flattens everything into DynamoDB for fast API reads.
+Six containerized Lambda functions, each a single stage. The per-book pipeline is orchestrated by AWS Step Functions. Artifacts flow through S3 during training; the `publish` stage flattens everything into DynamoDB for fast API reads.
 
 | Stage | Input | Output |
 |---|---|---|
@@ -10,6 +10,27 @@ Six containerized Lambda functions, each a single stage. Artifacts flow through 
 | `align-kvectors` | N raw models | Procrustes-aligned models + centroid → S3 |
 | `publish` | Aligned models + tokens | Term vectors, POS tags, counts → DynamoDB |
 | `api` | HTTP request | Similarity + confidence intervals as JSON |
+
+A separate **corpus pipeline** (`create_corpus_centroid.py`) runs outside the per-book Step Function to build a cross-book alignment frame from 2+ aligned books.
+
+---
+
+## Step Function orchestration
+
+The per-book pipeline runs as an AWS Step Function state machine:
+
+```
+scrape → tokenize → train-kvectors (Map, N seeds in parallel) → align-kvectors → publish
+```
+
+Input:
+```json
+{ "index": "gutenberg-3300", "seeds": [1, 2, 3, 4, 5] }
+```
+
+The `train-kvectors` step fans out via a Map state, running one `train-kvector` Lambda per seed in parallel. The `seeds` array is carried through earlier steps via Step Function output transforms (the Lambda handlers don't need to know about seeds).
+
+The state machine definition lives at `infra/step-function.template.json` and uses `${AWS_REGION}`, `${AWS_ACCOUNT_ID}`, and `${LAMBDA_PREFIX}` for environment-specific values.
 
 ---
 
@@ -44,7 +65,7 @@ Skips re-tokenizing if all three output keys already exist.
 ---
 
 ## lambda-train-kvector
-`functions/train-kvector/` — Gensim
+`functions/train-kvector/` -- Gensim
 
 Trains one Word2Vec model with an explicit seed for reproducibility. Filters lemmas to alphabetic tokens longer than 3 characters. Each invocation produces one model file named `{seed}-{timestamp}-{randint}.model` under `kvectors/{index}/collected/` in S3.
 
@@ -65,7 +86,13 @@ Trains one Word2Vec model with an explicit seed for reproducibility. Filters lem
 ## lambda-align-kvectors
 `functions/align-kvectors/` — NumPy, SciPy
 
-Implements Generalized Procrustes Analysis to align all trained models into a shared vector space and compute per-term stability metrics.
+Implements Generalized Procrustes Analysis at two levels.
+
+**Per-book alignment** (`create_book_centroid.py`): Aligns all seed models into a shared vector space, builds a centroid with per-term stability metrics, and optionally rotates to the corpus frame if a corpus centroid exists.
+
+**Cross-book alignment** (`create_corpus_centroid.py`): Aligns book centroids into a shared corpus frame for cross-book comparison. Runs as a CLI command outside the Step Function, requires 2+ aligned books. Uses unit-normalized vectors and uniform weights. Terms are filtered to those appearing in at least 2 books.
+
+Shared alignment primitives (Procrustes rotation, S3 I/O helpers) live in `procrustes_utils.py`.
 
 **→ [Full alignment math](alignment.md)** — Procrustes rotation, convergence, disparity metrics, R².
 
@@ -122,48 +149,54 @@ Terms where the only POS tag is adverb (`R`) are excluded from results.
 
 ### Prerequisites
 - Docker + Docker Compose
-- AWS CLI (Lambda, S3, ECR, DynamoDB permissions)
-- [`yq`](https://github.com/mikefarah/yq) — `push_to_ecr.sh` uses it to parse `services.yaml`
-- Redis — optional, used by the API for response caching
+- AWS CLI (Lambda, S3, ECR, DynamoDB, Step Functions permissions)
+- [`yq`](https://github.com/mikefarah/yq) -- `deploy_lambdas.sh` uses it to parse `services.yaml`
+- [`envsubst`](https://www.gnu.org/software/gettext/) -- `deploy_step_function.sh` uses it to render the state machine template
+- Redis -- optional, used by the API for response caching
 
-> **Apple Silicon:** `push_to_ecr.sh` forces `--platform linux/amd64` via `docker buildx`. Make sure buildx is available in your Docker install.
+> **Apple Silicon:** `deploy_lambdas.sh` forces `--platform linux/amd64` via `docker buildx`. Make sure buildx is available in your Docker install.
 
 ### Environment variables
 
 ```
 AWS_REGION=
+AWS_ACCOUNT_ID=
 AWS_ACCESS_KEY_ID=
 AWS_SECRET_ACCESS_KEY=
-AWS_URI_PREFIX=        # e.g. 123456789.dkr.ecr.us-east-1.amazonaws.com
 AWS_ECR_REPO=
 LAMBDA_ROLE_ARN=
 LAMBDA_PREFIX=
+STEP_FUNCTION_ROLE_ARN=
 S3_BUCKET=
 PIPELINE_TABLE=        # DynamoDB table for pipeline state
 TERM_TABLE=            # DynamoDB table for term vectors
 REDIS_URL=             # e.g. redis://localhost:6379 (optional)
 REDIS_PREFIX=
-PRODUCTION_DOMAIN=     # Your frontend URL — for CORS
+PRODUCTION_DOMAIN=     # Your frontend URL, for CORS
 ```
 
 ### Running locally
 
-The API container has a `local` Dockerfile target that runs uvicorn with hot reload. `app.py` and `main.py` are volume-mounted — edit without rebuilding.
+The pipeline containers have a `local` Dockerfile target that drops the Lambda entrypoint. Source files are volume-mounted, so you can edit without rebuilding.
 
 ```bash
-docker-compose up lambda-api
-# → http://localhost:8000
+docker compose up lambda-api    # → http://localhost:8000
 ```
 
 > Redis responses are cached indefinitely. If you reprocess a book, flush Redis or you'll get stale results.
 
 ### Deploying
 
-`push_to_ecr.sh` takes service names as arguments. It builds for `linux/amd64`, runs a smoke test, pushes to ECR, then creates or updates the Lambda function automatically.
+**Lambdas:** `deploy_lambdas.sh` takes service names as arguments. It builds for `linux/amd64`, runs tests if found, pushes to ECR, then creates or updates the Lambda function. Skips the update if the image and configuration haven't changed.
 
 ```bash
-cd infra
-./push_to_ecr.sh scrape tokenize train-kvector align-kvectors publish api
+./infra/deploy_lambdas.sh scrape tokenize train-kvector align-kvectors publish api
+```
+
+**Step Function:** `deploy_step_function.sh` renders the template with environment variables and creates or updates the state machine.
+
+```bash
+./infra/deploy_step_function.sh
 ```
 
 To change memory or timeouts, edit `services.yaml` before deploying.

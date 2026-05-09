@@ -22,6 +22,10 @@ Trains **ensembles of Word2Vec models** on Project Gutenberg texts, aligns them 
 
 ```mermaid
 graph TD
+    subgraph Orchestration
+        SF[Step Functions]
+    end
+
     subgraph API
         direction LR
         UI[React] <--> FAPI[FastAPI]
@@ -34,18 +38,27 @@ graph TD
         S3[(S3)]
     end
 
-    subgraph DP [Data Pipeline]
+    subgraph DP [Per-Book Pipeline]
         direction LR
         SCR[Scrape] --> TOK[Tokenize] --> TRN["Train (×N seeds)"] --> ALN[Align] --> PUB[Publish]
     end
 
+    subgraph CP [Corpus Pipeline]
+        direction LR
+        BCC[Build Corpus Centroid]
+    end
+
+    SF --> DP
     FAPI -.-> RED
     FAPI <--> DDB
     PUB --> DDB
     DP --> S3
+    CP --> S3
 ```
 
-Six containerized Lambda functions on Python 3.13. S3 stores intermediate artifacts during training. DynamoDB stores final term-level vectors (float16) and metadata for fast API reads. Redis caching is optional.
+Six containerized Lambda functions on Python 3.13, orchestrated by AWS Step Functions for the per-book pipeline. S3 stores intermediate artifacts during training. DynamoDB stores final term-level vectors (float16) and metadata for fast API reads. Redis caching is optional.
+
+The pipeline has two levels of alignment: **within-book** GPA aligns seed models into a per-book centroid, and **cross-book** GPA aligns book centroids into a shared corpus frame for cross-book comparison.
 
 **→ [Detailed pipeline documentation](docs/pipeline.md)** — per-stage inputs, outputs, configs, and design decisions.
 
@@ -95,33 +108,38 @@ Tight CI = ensemble agreed. Wide CI = treat with skepticism.
 git clone https://github.com/areebms/embedding-analytics.git
 cd embedding-analytics
 cp .env.example .env   # fill in AWS creds, S3 bucket, DynamoDB tables
-docker-compose build
+docker compose build
 ```
 
-Run the pipeline:
+Run the per-book pipeline:
 ```bash
-docker-compose run lambda-scrape python main.py --platform-name gutenberg --platform-id 3300
-docker-compose run lambda-tokenize python main.py --platform-name gutenberg --platform-id 3300
-docker-compose run lambda-train-kvector python main.py --platform-name gutenberg --platform-id 3300 --seed 1
-docker-compose run lambda-train-kvector python main.py --platform-name gutenberg --platform-id 3300 --seed 2
-docker-compose run lambda-align-kvectors python main.py --platform-name gutenberg --platform-id 3300
-docker-compose run lambda-publish python main.py --platform-name gutenberg --platform-id 3300
+docker compose run lambda-scrape python main.py --platform gutenberg --id 3300
+docker compose run lambda-tokenize python main.py --platform gutenberg --id 3300
+docker compose run lambda-train-kvector python main.py --platform gutenberg --id 3300 --seed 1
+docker compose run lambda-train-kvector python main.py --platform gutenberg --id 3300 --seed 2
+docker compose run lambda-align-kvectors python create_book_centroid.py
+docker compose run lambda-publish python main.py --platform gutenberg --id 3300
+```
+
+Build the corpus centroid:
+```bash
+docker compose run lambda-align-kvectors python create_corpus_centroid.py
 ```
 
 More seeds = tighter confidence intervals. Every stage is idempotent.
 
 Start the API:
 ```bash
-docker-compose up lambda-api    # → http://localhost:8000
+docker compose up lambda-api    # → http://localhost:8000
 ```
 
 Deploy:
 ```bash
-cd infra
-./push_to_ecr.sh scrape tokenize train-kvector align-kvectors publish api
+./infra/deploy_lambdas.sh scrape tokenize train-kvector align-kvectors publish api
+./infra/deploy_step_function.sh
 ```
 
-**→ [Full setup guide](docs/pipeline.md#getting-started)** — env vars, prerequisites, Apple Silicon notes, Redis config.
+**→ [Full setup guide](docs/pipeline.md#getting-started)** -- env vars, prerequisites, Apple Silicon notes, Redis config.
 
 ---
 
@@ -130,18 +148,23 @@ cd infra
 ```
 embedding-analytics/
 ├── functions/
-│   ├── scrape/             # Gutenberg scraper
-│   ├── tokenize/           # spaCy + NLTK lemmatization
-│   ├── train-kvector/      # Word2Vec worker (one model per seed)
-│   ├── align-kvectors/     # Generalized Procrustes alignment
-│   ├── publish/            # Flatten S3 artifacts → DynamoDB Term Table
-│   └── api/                # FastAPI + Mangum (2 endpoints)
+│   ├── scrape/                # Gutenberg scraper
+│   ├── tokenize/              # spaCy + NLTK lemmatization
+│   ├── train-kvector/         # Word2Vec worker (one model per seed)
+│   ├── align-kvectors/        # Generalized Procrustes alignment
+│   │   ├── create_book_centroid.py    # Within-book GPA
+│   │   ├── create_corpus_centroid.py  # Cross-book GPA
+│   │   └── procrustes_utils.py        # Shared alignment primitives
+│   ├── publish/               # Flatten S3 artifacts → DynamoDB Term Table
+│   └── api/                   # FastAPI + Mangum (2 endpoints)
 ├── shared/
-│   ├── aws.py              # S3, DynamoDB (Pipeline + Term tables), helpers
-│   └── commons.py          # CLI arg parsing
+│   ├── aws.py                 # S3, DynamoDB (Pipeline + Term tables), helpers
+│   └── commons.py             # CLI arg parsing
 ├── infra/
-│   ├── push_to_ecr.sh      # Build + deploy script
-│   └── services.yaml       # Lambda config (memory, timeouts)
+│   ├── deploy_lambdas.sh      # Build + deploy Lambda functions
+│   ├── deploy_step_function.sh # Deploy Step Function state machine
+│   ├── services.yaml          # Lambda config (memory, timeouts)
+│   └── step-function.template.json  # State machine definition
 ├── docker-compose.yml
 └── .env.example
 ```
@@ -150,7 +173,9 @@ embedding-analytics/
 
 ## What's next
 
-- [ ] Step Functions orchestration for multi-corpus pipelines
+- [ ] Pinecone vector database for top-K similarity queries and lower API latency
+- [ ] Diachronic similarity chart (semantic drift of a term across books)
+- [ ] Cross-book comparison endpoints using the corpus-aligned frame
 - [ ] Expose the training pipeline as callable endpoints if traffic warrants it
 
 ---

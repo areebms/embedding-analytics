@@ -1,4 +1,3 @@
-import json
 import logging
 
 from main import tokenize
@@ -14,16 +13,10 @@ def handler(event, context):
     index = extract_index(event)
     if not index:
         logger.warning("Tokenize request missing index")
-        return {
-            "statusCode": 400,
-            "body": json.dumps({"error": "index is required"}),
-        }
+        raise ValueError("index is required")
 
     logger.info("Starting tokenize", extra={"index": index})
     tokenize(index)
     logger.info("Tokenize completed", extra={"index": index})
 
-    return {
-        "statusCode": 200,
-        "body": json.dumps({"status": "ok", "index": index}),
-    }
+    return {"index": index}

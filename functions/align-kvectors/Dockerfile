@@ -7,9 +7,4 @@ RUN pip install --no-cache-dir -r /requirements.txt -t ${LAMBDA_TASK_ROOT}
 COPY ./shared shared
 COPY functions/align-kvectors/src/ .
 
-
-FROM base AS local
-ENTRYPOINT []
-
-FROM base AS lambda
 CMD ["app.handler"]

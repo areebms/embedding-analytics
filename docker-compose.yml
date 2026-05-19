@@ -1,6 +1,6 @@
 services:
   lambda-scrape:
-    image: ${AWS_URI_PREFIX}/${AWS_ECR_REPO}/lambda-scrape:0.1
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${AWS_ECR_REPO}/lambda-scrape:0.1
     env_file:
     - .env
     build:
@@ -8,10 +8,10 @@ services:
       dockerfile: functions/scrape/Dockerfile
       target: local
       args:
-        AWS_URI_PREFIX: ${AWS_URI_PREFIX}
+        AWS_URI_PREFIX: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
 
   lambda-tokenize:
-    image: ${AWS_URI_PREFIX}/${AWS_ECR_REPO}/lambda-tokenize:0.1
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${AWS_ECR_REPO}/lambda-tokenize:0.1
     env_file:
     - .env
     build:
@@ -19,14 +19,14 @@ services:
       dockerfile: functions/tokenize/Dockerfile
       target: local
       args:
-        AWS_URI_PREFIX: ${AWS_URI_PREFIX}
+        AWS_URI_PREFIX: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
     volumes:
       - ./functions/tokenize/src/app.py:/var/task/app.py
       - ./functions/tokenize/src/main.py:/var/task/main.py
       - ./functions/tokenize/src/ignored_nouns.txt:/var/task/ignored_nouns.txt
 
   lambda-train-kvector:
-    image: ${AWS_URI_PREFIX}/${AWS_ECR_REPO}/lambda-train-kvector:0.1
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${AWS_ECR_REPO}/lambda-train-kvector:0.1
     env_file:
     - .env
     build:
@@ -34,27 +34,28 @@ services:
       target: local
       dockerfile: functions/train-kvector/Dockerfile
       args:
-        AWS_URI_PREFIX: ${AWS_URI_PREFIX}
+        AWS_URI_PREFIX: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
     volumes:
       - ./functions/train-kvector/src/app.py:/var/task/app.py
       - ./functions/train-kvector/src/main.py:/var/task/main.py
 
   lambda-align-kvectors:
-    image: ${AWS_URI_PREFIX}/${AWS_ECR_REPO}/lambda-align-kvectors:0.1
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${AWS_ECR_REPO}/lambda-align-kvectors:0.1
     env_file:
     - .env
     build:
       context: .
-      target: local
       dockerfile: functions/align-kvectors/Dockerfile
       args:
-        AWS_URI_PREFIX: ${AWS_URI_PREFIX}
+        AWS_URI_PREFIX: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
     volumes:
       - ./functions/align-kvectors/src/app.py:/var/task/app.py
-      - ./functions/align-kvectors/src/main.py:/var/task/main.py
+      - ./functions/align-kvectors/src/create_corpus_centroid.py:/var/task/create_corpus_centroid.py
+      - ./functions/align-kvectors/src/create_book_centroid.py:/var/task/create_book_centroid.py
+      - ./functions/align-kvectors/src/procrustes_utils.py:/var/task/procrustes_utils.py
 
   lambda-publish:
-    image: ${AWS_URI_PREFIX}/${AWS_ECR_REPO}/lambda-publish:0.1
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${AWS_ECR_REPO}/lambda-publish:0.1
     env_file:
     - .env
     build:
@@ -62,13 +63,13 @@ services:
       target: local
       dockerfile: functions/publish/Dockerfile
       args:
-        AWS_URI_PREFIX: ${AWS_URI_PREFIX}
+        AWS_URI_PREFIX: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
     volumes:
       - ./functions/publish/src/app.py:/var/task/app.py
       - ./functions/publish/src/main.py:/var/task/main.py
 
   lambda-api:
-    image: ${AWS_URI_PREFIX}/${AWS_ECR_REPO}/lambda-api:0.1
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${AWS_ECR_REPO}/lambda-api:0.1
     env_file:
     - .env
     build:
@@ -76,9 +77,14 @@ services:
       dockerfile: functions/api/Dockerfile
       target: local
       args:
-        AWS_URI_PREFIX: ${AWS_URI_PREFIX}
+        AWS_URI_PREFIX: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
     volumes:
       - ./functions/api/src/app.py:/var/task/app.py
-      - ./functions/api/src/main.py:/var/task/main.py
+      - ./functions/api/src/constants.py:/var/task/constants.py
+      - ./functions/api/src/dependencies.py:/var/task/dependencies.py
+      - ./functions/api/src/routers.py:/var/task/routers.py
+      - ./functions/api/src/schemas.py:/var/task/schemas.py
+      - ./functions/api/src/services.py:/var/task/services.py
+      - ./functions/api/src/describe_services.py:/var/task/describe_services.py
     ports:
     - "8000:8000"

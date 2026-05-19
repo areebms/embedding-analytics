@@ -24,7 +24,7 @@ The domain is classical political economy, but the architecture maps directly to
 
 ## What the product does
 
-A standard Word2Vec interface returns nearest neighbors for a single term. This system supports compositional queries with vector arithmetic.
+A standard Word2Vec interface returns nearest neighbours for a single term. This system supports compositional queries with vector arithmetic.
 
 A single term like `capital` can return results from multiple meanings. Adding a second term narrows the context:
 
@@ -45,7 +45,7 @@ The backend evaluates that expression against each aligned model in the ensemble
 Users can also type plain English:
 
 ```text
-terms related to labour but more productive than unproductive
+productive vs unproductive labour
 ```
 
 The backend converts that into a validated expression tree, resolves every term against the corpus vocabulary, and returns the structured expression for the frontend to render and edit.
@@ -208,7 +208,7 @@ Converts plain English into a validated vector expression. Uses an LLM for expre
 Request:
 
 ```json
-{ "message": "terms related to labour but more productive than unproductive" }
+{ "message": "productive vs unproductive labour" }
 ```
 
 Response:

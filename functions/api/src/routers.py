@@ -3,7 +3,13 @@ from fastapi import HTTPException, APIRouter
 
 from dependencies import cache
 from services import get_confidence_intervals, normalize_vector_bytes, evaluate_tree
-from schemas import SimilarityQuery, SimilarityResult
+from describe_services import process_chat_query, TermResolutionError
+from schemas import (
+    SimilarityRequest,
+    SimilarityResult,
+    ParseChatRequest,
+    ParseChatResponse,
+)
 from shared.aws import get_pipeline_table, TermTable, get_session
 
 router = APIRouter()
@@ -66,7 +72,7 @@ def terms():
 
 @router.post("/similarity/{book_id}", response_model=list[SimilarityResult])
 @cache(expire=None)
-def similarity(book_id: str, query: SimilarityQuery):
+def similarity(book_id: str, query: SimilarityRequest):
     platform_data = f"gutenberg-{book_id}"
     table = TermTable(get_session())
 
@@ -101,3 +107,27 @@ def similarity(book_id: str, query: SimilarityQuery):
             )
         )
     return table_data
+
+
+@router.post("/parse-describe", response_model=ParseChatResponse)
+def parse_chat(req: ParseChatRequest):
+    try:
+        expression, terms, substitutions = process_chat_query(req.message)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except TermResolutionError as e:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": str(e),
+                "term": e.term,
+                "candidates": e.candidates,
+            },
+        )
+    return ParseChatResponse(
+        expression=expression,
+        terms=terms,
+        substitutions=[
+            {"original": s.original, "resolved": s.resolved} for s in substitutions
+        ],
+    )

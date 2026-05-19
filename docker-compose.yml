@@ -80,9 +80,11 @@ services:
         AWS_URI_PREFIX: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
     volumes:
       - ./functions/api/src/app.py:/var/task/app.py
+      - ./functions/api/src/constants.py:/var/task/constants.py
       - ./functions/api/src/dependencies.py:/var/task/dependencies.py
       - ./functions/api/src/routers.py:/var/task/routers.py
       - ./functions/api/src/schemas.py:/var/task/schemas.py
       - ./functions/api/src/services.py:/var/task/services.py
+      - ./functions/api/src/describe_services.py:/var/task/describe_services.py
     ports:
     - "8000:8000"

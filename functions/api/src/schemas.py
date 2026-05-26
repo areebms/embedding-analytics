@@ -1,6 +1,6 @@
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class TermNode(BaseModel):
@@ -47,3 +47,36 @@ class ParseChatResponse(BaseModel):
     expression: str
     terms: list[str]
     substitutions: list[SubstitutionResult]
+
+
+class DiachronicRequest(BaseModel):
+    tree: TermNode | OpNode
+    ref_book_ids: Annotated[list[int], Field(min_length=1)]
+
+
+class DiachronicResult(BaseModel):
+    id: int
+    similarity: float
+    similarity_ci: tuple[float, float]
+    n: int
+
+
+class BookResponse(BaseModel):
+    id: int
+    label: str
+    author: str
+    title: str
+    published_year: int
+ 
+    @model_validator(mode="before")
+    @classmethod
+    def from_entry(cls, data: dict) -> dict:
+        if "platform_data" in data:
+            data["id"] = int(data.pop("platform_data").split("-")[-1])
+            data["label"] = f"{data['author'].split(',')[0]} ({data['published_year']})"
+        return data
+
+
+class TermResponse(BaseModel):
+    term: str
+    books: list[str]

@@ -29,24 +29,41 @@ deploy_service() {
     local SMOKE_CMD="$(yq e ".services.$SERVICE.smoke_cmd // \"\"" "$SERVICES_FILE")"
 
     local FULL_TAG="$AWS_URI_PREFIX/$AWS_ECR_REPO/$IMAGE:$TAG"
+    local TEST_TAG="$IMAGE:test-$TAG"  # local-only, never pushed
     local ECR_REPO="$AWS_ECR_REPO/$IMAGE"
     local DOCKERFILE="functions/$FUNCTION/Dockerfile"
 
     echo
     echo "=== $SERVICE (fn=$FUNCTION_NAME img=$IMAGE mem=$MEMORY timeout=$TIMEOUT) ==="
 
-    # run tests if found.
+    # Tests run inside the Docker image, using the 'test' stage of the
+    # multi-stage Dockerfile. This gates the deploy: a non-zero exit
+    # here aborts before any production image is built or pushed.
     if [ -d "functions/$FUNCTION/tests" ]; then
-        echo "Running tests for $FUNCTION"
-        pytest "functions/$FUNCTION" -v
+        echo "Building test image for $FUNCTION"
+        docker buildx build \
+            --platform linux/amd64 \
+            --provenance=false \
+            --sbom=false \
+            --target test \
+            --load \
+            -t "$TEST_TAG" \
+            -f "$DOCKERFILE" .
+
+        echo "Running tests inside $TEST_TAG"
+        # --env-file mounts the project .env so tests that need any
+        # values (REDIS_PREFIX, table names) see them.
+        docker run --rm --env-file .env "$TEST_TAG"
     fi
 
-    local DIGEST
+    # Production image. --no-cache because the test image just exercised
+    # the layers and we want the production build to be clean.
     docker buildx build \
         --platform linux/amd64 \
         --provenance=false \
         --sbom=false \
         --no-cache \
+        --target lambda \
         --load \
         -t "$FULL_TAG" \
         -f "$DOCKERFILE" .
@@ -58,6 +75,7 @@ deploy_service() {
 
     docker push "$FULL_TAG"
 
+    local DIGEST
     DIGEST="$(aws ecr describe-images --region "$AWS_REGION" \
         --repository-name "$ECR_REPO" --image-ids "imageTag=$TAG" \
         --query 'imageDetails[0].imageDigest' --output text)"

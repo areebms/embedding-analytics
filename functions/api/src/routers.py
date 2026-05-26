@@ -4,28 +4,40 @@ from fastapi import HTTPException, APIRouter
 from dependencies import cache
 from services import get_confidence_intervals, normalize_vector_bytes, evaluate_tree
 from describe_services import process_chat_query, TermResolutionError
+from diachronic_services import (
+    get_reference_centroid,
+    compute_diachronic_similarity,
+)
 from schemas import (
     SimilarityRequest,
     SimilarityResult,
     ParseChatRequest,
     ParseChatResponse,
+    DiachronicRequest,
+    DiachronicResult,
+    BookResponse
 )
 from shared.aws import get_pipeline_table, TermTable, get_session
 
 router = APIRouter()
 
 
-@router.get("/books")
+def _aligned_book_ids() -> set[int]:
+    """Gutenberg IDs of books that have been corpus-aligned."""
+    return {
+        int(item["platform_data"].split("-")[-1])
+        for item in get_pipeline_table().get_all_entries(
+            ["platform_data", "s3_prefix_models"]
+        )
+        if "s3_prefix_models" in item
+    }
+
+
+@router.get("/books", response_model=list[BookResponse])
 @cache(expire=None)
 def books():
     return [
-        {
-            "id": int(item["platform_data"].split("-")[-1]),
-            "label": f"{item['author'].split(',')[0]} ({item['published_year']})",
-            "author": item["author"],
-            "title": item["title"],
-            "published_year": item["published_year"],
-        }
+        BookResponse.model_validate(item)
         for item in get_pipeline_table().get_all_entries(
             [
                 "platform_data",
@@ -37,6 +49,7 @@ def books():
         )
         if "s3_prefix_models" in item
     ]
+
 
 
 @router.get("/terms")
@@ -107,6 +120,47 @@ def similarity(book_id: str, query: SimilarityRequest):
             )
         )
     return table_data
+
+
+@router.post(
+    "/diachronic-similarity/{book_id}",
+    response_model=DiachronicResult,
+)
+@cache(expire=300)
+async def diachronic_similarity(book_id: int, query: DiachronicRequest):
+    aligned_ids = _aligned_book_ids()
+    invalid = [rid for rid in query.ref_book_ids if rid not in aligned_ids]
+    if invalid:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Reference books not corpus-aligned: {invalid}",
+        )
+    if book_id not in aligned_ids:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Book {book_id} is not corpus-aligned",
+        )
+
+    table = TermTable(get_session())
+
+    try:
+        reference = await get_reference_centroid(
+            query.tree, query.ref_book_ids, table
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    result = compute_diachronic_similarity(query.tree, book_id, reference, table)
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Expression cannot be evaluated for book {book_id} "
+                f"(missing terms)"
+            ),
+        )
+
+    return result
 
 
 @router.post("/parse-describe", response_model=ParseChatResponse)

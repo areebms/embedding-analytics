@@ -86,5 +86,6 @@ services:
       - ./functions/api/src/schemas.py:/var/task/schemas.py
       - ./functions/api/src/services.py:/var/task/services.py
       - ./functions/api/src/describe_services.py:/var/task/describe_services.py
+      - ./functions/api/src/diachronic_services.py:/var/task/diachronic_services.py
     ports:
     - "8000:8000"

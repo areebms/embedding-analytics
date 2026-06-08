@@ -11,7 +11,8 @@ from fastapi_cache.backends.redis import RedisBackend
 from mangum import Mangum
 from redis import asyncio as aioredis
 
-from routers import router
+from app.search.routers import router as search_router
+from app.list.routers import router as list_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,7 +34,7 @@ async def lifespan(app: FastAPI):
         # Initialize global cache to use Redis
         FastAPICache.init(RedisBackend(redis), prefix=REDIS_PREFIX)
         yield
-        await redis.close()
+        await redis.aclose()
     else:
         yield
 
@@ -81,7 +82,8 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
-app.include_router(router)
+app.include_router(search_router)
+app.include_router(list_router)
 
 
 handler = Mangum(app, lifespan="on")

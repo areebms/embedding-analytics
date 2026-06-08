@@ -1,13 +1,16 @@
 import re
 import os
 import logging
+from collections import deque
 from dataclasses import dataclass
 from difflib import get_close_matches
 from functools import lru_cache
 
+from openai import OpenAI
+
 from shared.aws import TermTable, get_pipeline_table, get_session
-from constants import PARSE_SYSTEM_PROMPT, FALLBACK_PROMPT
-from schemas import OpNode, TermNode
+from app.search.constants import PARSE_SYSTEM_PROMPT, FALLBACK_PROMPT
+from app.search.schemas.search_expr import OpNode, TermNode
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +18,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Vocabulary
 # ---------------------------------------------------------------------------
+
 
 @lru_cache(maxsize=1)
 def get_vocabulary() -> tuple[set[str], list[str]]:
@@ -47,9 +51,8 @@ def get_vocabulary() -> tuple[set[str], list[str]]:
 # Expression serialization
 # ---------------------------------------------------------------------------
 
-def serialize_expression(
-    tree: TermNode | OpNode, *, strip_outer: bool = False
-) -> str:
+
+def serialize_expression(tree: TermNode | OpNode, *, strip_outer: bool = False) -> str:
     """Convert a TermNode/OpNode tree back into an expression string.
 
     Every binary operation is wrapped in parentheses.
@@ -71,11 +74,11 @@ def serialize_expression(
 # Expression parsing
 # ---------------------------------------------------------------------------
 
-_TOKEN_PATTERN = re.compile(r"[()+-]|[^\s()+-]+")
+TOKEN_PATTERN = re.compile(r"[()+-]|[^\s()+-]+")
 
 
 def _tokenize(expression: str) -> list[str]:
-    return _TOKEN_PATTERN.findall(expression)
+    return TOKEN_PATTERN.findall(expression)
 
 
 def parse_expression(raw: str) -> TermNode | OpNode | None:
@@ -83,54 +86,34 @@ def parse_expression(raw: str) -> TermNode | OpNode | None:
 
     Returns None on parse failure.
     """
-    if not isinstance(raw, str):
+    if not isinstance(raw, str) or not raw.strip():
         return None
 
-    expression = raw.strip()
-    if not expression:
-        return None
+    q: deque[str] = deque(_tokenize(raw.strip()))
 
-    tokens = _tokenize(expression)
-    cursor = 0
-
-    def peek() -> str | None:
-        return tokens[cursor] if cursor < len(tokens) else None
-
-    def take() -> str | None:
-        nonlocal cursor
-        if cursor >= len(tokens):
-            return None
-        token = tokens[cursor]
-        cursor += 1
-        return token
-
-    def primary() -> TermNode | OpNode | None:
-        token = take()
+    def get_operand() -> TermNode | OpNode | None:
+        token = q.popleft() if q else None
         if token is None or token in ("+", "-", ")"):
             return None
-
         if token == "(":
             node = binary_expression()
-            if node is None or take() != ")":
+            if node is None or (q.popleft() if q else None) != ")":
                 return None
             return node
-
         return TermNode(term=token)
 
     def binary_expression() -> TermNode | OpNode | None:
-        left = primary()
-
-        while left and peek() in ("+", "-"):
-            operator = take()
-            right = primary()
-            if right is None:
+        lef_operand = get_operand()
+        while lef_operand and q and q[0] in ("+", "-"):
+            op = q.popleft()
+            right_operand = get_operand()
+            if right_operand is None:
                 return None
-            left = OpNode(op=operator, args=[left, right])
-
-        return left
+            lef_operand = OpNode(op=op, args=[lef_operand, right_operand])
+        return lef_operand
 
     tree = binary_expression()
-    return tree if tree and cursor == len(tokens) else None
+    return tree if tree and not q else None
 
 
 def extract_terms(tree: TermNode | OpNode) -> list[str]:
@@ -153,6 +136,7 @@ def extract_terms(tree: TermNode | OpNode) -> list[str]:
 # Term resolution (vocabulary-level)
 # ---------------------------------------------------------------------------
 
+
 class TermResolutionError(Exception):
     """Raised when a term cannot be resolved to any vocabulary entry."""
 
@@ -166,19 +150,9 @@ class TermResolutionError(Exception):
             )
         else:
             msg = (
-                f"No matching term found for '{term}'. "
-                f"No similar terms in vocabulary."
+                f"No matching term found for '{term}'. No similar terms in vocabulary."
             )
         super().__init__(msg)
-
-
-def _get_openai_client():
-    from openai import OpenAI
-
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        raise ValueError("Natural language parsing is not configured")
-    return OpenAI(api_key=api_key)
 
 
 def resolve_vocabulary_term(term: str) -> str:
@@ -205,17 +179,19 @@ def resolve_vocabulary_term(term: str) -> str:
         fallback = [w for w in vocab_list if term and w[0] == term[0]]
         raise TermResolutionError(term, fallback[:5])
 
-    client = _get_openai_client()
+    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         max_tokens=20,
         temperature=0,
-        messages=[{
-            "role": "user",
-            "content": FALLBACK_PROMPT.format(
-                term=term, candidates=", ".join(candidates)
-            ),
-        }],
+        messages=[
+            {
+                "role": "user",
+                "content": FALLBACK_PROMPT.format(
+                    term=term, candidates=", ".join(candidates)
+                ),
+            }
+        ],
     )
 
     result = response.choices[0].message.content.strip().lower()
@@ -228,6 +204,7 @@ def resolve_vocabulary_term(term: str) -> str:
 # ---------------------------------------------------------------------------
 # Tree resolution
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class Substitution:
@@ -264,9 +241,10 @@ def autocorrect_term_tree(
 # Chat pipeline (steps 2-4)
 # ---------------------------------------------------------------------------
 
+
 def llm_generate_expression(message: str) -> str:
     """Call gpt-4o-mini to convert natural language into an expression string."""
-    client = _get_openai_client()
+    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
@@ -279,7 +257,7 @@ def llm_generate_expression(message: str) -> str:
     return response.choices[0].message.content.strip()
 
 
-def process_chat_query(
+def process_describe_query(
     message: str,
 ) -> tuple[str, list[str], list[Substitution]]:
     """End-to-end: natural language in, resolved expression out.

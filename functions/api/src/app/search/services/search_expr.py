@@ -1,8 +1,12 @@
 import numpy as np
 
-from shared.aws import TermTable
-from constants import T_CRIT_95
-from schemas import OpNode, TermNode
+from app.search.constants import T_CRIT_95
+from app.search.schemas.search_expr import OpNode, TermNode
+from shared.aws import TermTable, get_session
+
+
+def get_term_table():
+    return TermTable(get_session())
 
 
 def extract_vectors(buffers):

@@ -32,18 +32,3 @@ class SimilarityResult(BaseModel):
     count: int
     similarity: float
     similarity_ci: tuple[float, float]
-
-
-class ParseChatRequest(BaseModel):
-    message: str
-
-
-class SubstitutionResult(BaseModel):
-    original: str
-    resolved: str
-
-
-class ParseChatResponse(BaseModel):
-    expression: str
-    terms: list[str]
-    substitutions: list[SubstitutionResult]

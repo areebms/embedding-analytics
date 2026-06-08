@@ -24,10 +24,11 @@ echo "Rebuilding $TASK_DIR..."
 
 sudo mkdir -p "$TASK_DIR"
 
-# Wipe previous Python file links and known package/test links so
-# this script is safe to re-run when files are removed or renamed.
-sudo rm -f "$TASK_DIR"/*.py
-sudo rm -f "$TASK_DIR/shared" "$TASK_DIR/tests" "$TASK_DIR/pytest.ini"
+# Wipe all symlinks in /var/task so re-runs are clean when files are
+# added, removed, or renamed. Uses bash -L test; no external find needed.
+for link in "$TASK_DIR"/*; do
+    [ -L "$link" ] && sudo rm -f "$link"
+done
 
 # Link each .py file in functions/api/src/ as a sibling of /var/task.
 # `ln -sfn` is force + no-dereference, so it overwrites cleanly if a
@@ -37,9 +38,15 @@ for f in "$SRC_DIR"/*.py; do
     name="$(basename "$f")"
     sudo ln -sfn "$f" "$TASK_DIR/$name"
 done
+
+# Link each package directory in functions/api/src/ (e.g. app/) so
+# `from app.search.routers import ...` resolves under /var/task.
+for d in "$SRC_DIR"/*/; do
+    name="$(basename "$d")"
+    sudo ln -sfn "$d" "$TASK_DIR/$name"
+done
 shopt -u nullglob
 
-# Link shared as a directory, so `from shared.aws import ...` works.
 sudo ln -sfn "$SHARED_DIR" "$TASK_DIR/shared"
 
 # Link tests and pytest.ini so `cd /var/task && pytest` works

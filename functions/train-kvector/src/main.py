@@ -6,7 +6,9 @@ from random import randint
 
 from gensim.models import Word2Vec
 
-from shared.aws import get_pipeline_table, get_session, upload_file, yield_sentences_from_s3
+from shared.session import get_session
+from shared.s3 import upload_file, yield_sentences_from_s3
+from shared.tables.pipeline import get_pipeline_table
 from shared.commons import get_index
 
 VECTOR_SIZE = 200

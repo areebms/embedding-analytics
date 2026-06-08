@@ -155,15 +155,6 @@ This makes the CI a practical quality signal for contrast queries, telling the u
 
 ---
 
-## Diachronic comparison
-
-The corpus spans the late 18th to mid-19th century: Steuart, Smith, Ricardo, Mill, Bastiat. Once book centroids are aligned into a shared corpus frame, the same query can be evaluated across authors. If a term's neighborhood shifts systematically from earlier to later books, that is evidence of semantic drift.
-
-This connects to the diachronic embeddings literature, particularly Hamilton, Leskovec, and Jurafsky's HistWords project, which applies the same train-align-compare methodology to historical corpora. This project applies that methodology to a specific intellectual tradition, making drift findings historically interpretable.
-
-The cross-book alignment is what makes the comparison valid. Without it, per-author vector spaces would share no common coordinate system.
-
----
 
 ## Design decisions
 

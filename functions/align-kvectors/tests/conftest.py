@@ -7,7 +7,7 @@ import pytest
 from dotenv import load_dotenv
 from gensim.models import KeyedVectors
 
-from shared.aws import get_session
+from shared.session import get_session
 
 
 load_dotenv(Path(__file__).parents[3] / ".env")

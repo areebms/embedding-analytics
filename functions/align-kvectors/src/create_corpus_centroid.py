@@ -3,7 +3,8 @@ from collections import Counter
 
 import numpy as np
 
-from shared.aws import get_pipeline_table, get_session
+from shared.tables.pipeline import get_pipeline_table
+from shared.session import get_session
 from procrustes_utils import (
     CORPUS_CENTROID_KEY,
     load_book_centroid,

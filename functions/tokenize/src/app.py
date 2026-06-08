@@ -1,7 +1,7 @@
 import logging
 
 from main import tokenize
-from shared.aws import extract_index
+from shared.lambda_event import extract_index
 
 
 logger = logging.getLogger(__name__)

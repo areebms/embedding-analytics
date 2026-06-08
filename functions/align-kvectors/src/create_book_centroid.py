@@ -3,7 +3,8 @@ from decimal import Decimal
 
 import numpy as np
 
-from shared.aws import get_session, get_pipeline_table
+from shared.session import get_session
+from shared.tables.pipeline import get_pipeline_table
 from procrustes_utils import (
     rotate,
     load_corpus_centroid,

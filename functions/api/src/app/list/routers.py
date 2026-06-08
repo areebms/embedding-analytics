@@ -1,8 +1,9 @@
 from fastapi import APIRouter
 
 from app.core.dependencies import cache
-from app.list.services import generate_book_data, get_term_table
+from app.list.services import generate_book_data
 from app.list.schemas import BookResponse, TermResponse
+from shared.tables.book_terms import get_book_term_table
 
 router = APIRouter()
 
@@ -28,7 +29,7 @@ def terms():
         book_ids.append(item["platform_data"])
 
     term_books = {}
-    term_table = get_term_table()
+    term_table = get_book_term_table()
     for book_id in book_ids:
         for item in term_table.get_entries(book_id, fields=["term", "tags"]):
             if item.get("tags") == {"R"}:

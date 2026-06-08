@@ -8,7 +8,8 @@ from scipy.linalg import orthogonal_procrustes
 from statistics import mean
 from gensim.models import KeyedVectors
 
-from shared.aws import S3Loader, get_session, upload_file
+from shared.s3 import S3Loader, upload_file
+from shared.session import get_session
 
 CORPUS_CENTROID_KEY = "kvectors/corpus_centroid.model"
 MAX_ITERATIONS = 40

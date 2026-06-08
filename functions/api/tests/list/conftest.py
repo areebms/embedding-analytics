@@ -8,11 +8,14 @@ Mocking philosophy:
 - evaluate_tree and the CI math run for real against the app's full router.
 """
 
+import os
 import copy
 from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
+
+os.environ.pop("REDIS_URL", None)
 
 
 # -- Helpers -----------------------------------------------------------------
@@ -62,7 +65,7 @@ def mock_pipeline_table():
 
 @pytest.fixture
 def mock_term_table():
-    """TermTable mock. Tests configure get_entries as needed."""
+    """BookTermTable mock. Tests configure get_entries as needed."""
     table = MagicMock()
     table.get_entry.return_value = None
     table.get_entries.return_value = []
@@ -73,7 +76,7 @@ def mock_term_table():
 def patch_tables(monkeypatch, mock_pipeline_table, mock_term_table):
     """Patch list-route storage entry points."""
     monkeypatch.setattr("app.list.services.get_pipeline_table", lambda: mock_pipeline_table)
-    monkeypatch.setattr("app.list.routers.get_term_table", lambda: mock_term_table)
+    monkeypatch.setattr("app.list.routers.get_book_term_table", lambda: mock_term_table)
     return mock_pipeline_table, mock_term_table
 
 

@@ -1,4 +1,4 @@
-from shared.aws import TermTable, get_pipeline_table, get_session
+from shared.tables.pipeline import get_pipeline_table
 
 
 def generate_book_data(fields):
@@ -8,6 +8,4 @@ def generate_book_data(fields):
         item.pop("s3_prefix_models")
         yield item
 
-def get_term_table():
-    return TermTable(get_session())
 

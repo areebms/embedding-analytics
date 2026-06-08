@@ -1,7 +1,7 @@
 """Tests for POST /similarity/{book_id}.
 
 Flow under test:
-1. evaluate_tree resolves the query tree against TermTable per-seed bytes.
+1. evaluate_tree resolves the query tree against BookTermTable per-seed bytes.
 2. Every non-R term in the book is scored against the query via cosine CI.
 3. Results returned as list[SimilarityResult].
 """

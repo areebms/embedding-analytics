@@ -8,9 +8,10 @@ from functools import lru_cache
 
 from openai import OpenAI
 
-from shared.aws import TermTable, get_pipeline_table, get_session
 from app.search.constants import PARSE_SYSTEM_PROMPT, FALLBACK_PROMPT
 from app.search.schemas.search_expr import OpNode, TermNode
+from shared.tables.pipeline import get_pipeline_table
+from shared.tables.book_terms import get_book_term_table
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,7 @@ def get_vocabulary() -> tuple[set[str], list[str]]:
     ]
 
     terms: set[str] = set()
-    term_table = TermTable(get_session())
+    term_table = get_book_term_table()
     for book_id in book_ids:
         for item in term_table.get_entries(book_id, fields=["term", "tags"]):
             if item.get("tags") == {"R"}:
@@ -103,14 +104,14 @@ def parse_expression(raw: str) -> TermNode | OpNode | None:
         return TermNode(term=token)
 
     def binary_expression() -> TermNode | OpNode | None:
-        lef_operand = get_operand()
-        while lef_operand and q and q[0] in ("+", "-"):
+        left_operand = get_operand()
+        while left_operand and q and q[0] in ("+", "-"):
             op = q.popleft()
             right_operand = get_operand()
             if right_operand is None:
                 return None
-            lef_operand = OpNode(op=op, args=[lef_operand, right_operand])
-        return lef_operand
+            left_operand = OpNode(op=op, args=[left_operand, right_operand])
+        return left_operand
 
     tree = binary_expression()
     return tree if tree and not q else None

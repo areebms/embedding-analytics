@@ -39,7 +39,6 @@ for f in "$SRC_DIR"/*.py; do
 done
 shopt -u nullglob
 
-# Link shared as a directory, so `from shared.aws import ...` works.
 sudo ln -sfn "$SHARED_DIR" "$TASK_DIR/shared"
 
 # Link tests and pytest.ini so `cd /var/task && pytest` works

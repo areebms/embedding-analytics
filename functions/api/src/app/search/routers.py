@@ -5,12 +5,12 @@ from app.core.dependencies import cache
 from app.search.schemas.search_expr import SimilarityRequest, SimilarityResult
 from app.search.schemas.describe import ParseDescribeRequest, ParseDescribeResponse
 from app.search.services.search_expr import (
-    get_term_table,
     normalize_vector_bytes,
     get_confidence_intervals,
     evaluate_tree,
 )
 from app.search.services.describe import process_describe_query, TermResolutionError
+from shared.tables.book_terms import get_book_term_table
 
 router = APIRouter()
 
@@ -19,7 +19,7 @@ router = APIRouter()
 @cache(expire=None)
 def search_expr(book_id: str, query: SimilarityRequest):
     platform_data = f"gutenberg-{book_id}"
-    table = get_term_table()
+    table = get_book_term_table()
 
     try:
         query_vectors = evaluate_tree(query.tree, table, platform_data)

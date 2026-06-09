@@ -4,7 +4,9 @@ from pydantic import BaseModel, ConfigDict, field_validator
 
 
 class PineconeMetadata(BaseModel):
-    book_id : str
+    book_id: str
+    pos: List[str]
+    count: int
 
 
 class PineconeEntry(BaseModel):
@@ -19,6 +21,3 @@ class PineconeEntry(BaseModel):
         if len(val) != 200:
             raise ValueError("Length must equal 200")
         return val
-    
-
-

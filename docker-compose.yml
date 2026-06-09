@@ -66,7 +66,8 @@ services:
         AWS_URI_PREFIX: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
     volumes:
       - ./functions/publish/src/app.py:/var/task/app.py
-      - ./functions/publish/src/main.py:/var/task/main.py
+      - ./functions/publish/src/publish_to_api.py:/var/task/publish_to_api.py
+      - ./functions/publish/src/publish_utils.py:/var/task/publish_utils.py
 
   lambda-api:
     image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${AWS_ECR_REPO}/lambda-api:0.1

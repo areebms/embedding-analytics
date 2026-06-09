@@ -41,3 +41,19 @@ class BaseTable:
         if fields is not None:
             params["ProjectionExpression"] = ", ".join(fields)
         return self.table.get_item(**params).get("Item")
+
+    def batch_get_entries(self, keys, fields=None):
+        if not keys:
+            return []
+        projection = {
+            "ProjectionExpression": ", ".join(f"#{field}" for field in fields),
+            "ExpressionAttributeNames": {f"#{field}": field for field in fields},
+        } if fields else {}
+        items = []
+        for start in range(0, len(keys), 100):
+            request = {self.table.name: {"Keys": keys[start : start + 100], **projection}}
+            while request:
+                response = self.dynamodb.batch_get_item(RequestItems=request)
+                items.extend(response["Responses"].get(self.table.name, []))
+                request = response.get("UnprocessedKeys") or None
+        return items

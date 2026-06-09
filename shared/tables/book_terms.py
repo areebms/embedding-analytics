@@ -50,3 +50,6 @@ class BookTermTable(BaseTable):
                 break
             params["ExclusiveStartKey"] = response["LastEvaluatedKey"]
         return items
+
+    def batch_get_entries(self, terms, platform_data, fields=None):
+        return super().batch_get_entries([{"term": term, "platform_data": platform_data} for term in terms], fields)

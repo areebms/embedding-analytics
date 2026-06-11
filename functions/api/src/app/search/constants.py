@@ -62,7 +62,8 @@ PARSE_SYSTEM_PROMPT = (
     "- Multi-word economic terms are combinations: join their component words "
     "with +. Use the adjective form where appropriate "
     '(e.g. "use value" -> useful + value)\n'
-    "- Respond with only the expression string, no other text"
+    "- Respond with only the expression string, no other text\n"
+    "- Do not use the same word twice"
 )
 
 FALLBACK_PROMPT = (

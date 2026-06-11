@@ -28,4 +28,4 @@ CMD ["python", "-m", "uvicorn", "main:app", "--reload", "--host", "0.0.0.0", "--
 
 
 FROM base AS lambda
-CMD ["app.handler"]
+CMD ["main.handler"]

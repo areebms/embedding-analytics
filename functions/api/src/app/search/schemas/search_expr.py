@@ -24,11 +24,26 @@ OpNode.model_rebuild()
 
 class SimilarityRequest(BaseModel):
     tree: TermNode | OpNode
+    top_k: int = Field(100, ge=1, le=500)
 
 
 class SimilarityResult(BaseModel):
     term: str
-    pos: set[str]
     count: int
+    similarity: float
+
+
+class SimilarityResponse(BaseModel):
+    results: list[SimilarityResult]
+    query_vectors: list[list[float]]  # normalized per-seed query vectors
+
+
+class ConfidenceRequest(BaseModel):
+    terms: list[str]
+    query_vectors: list[list[float]]
+
+
+class ConfidenceResult(BaseModel):
+    term: str
     similarity: float
     similarity_ci: tuple[float, float]

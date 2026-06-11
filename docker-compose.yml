@@ -80,7 +80,7 @@ services:
       args:
         AWS_URI_PREFIX: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
     volumes:
-      - ./functions/api/src/app:/var/task/app
-      - ./functions/api/src/main.py:/var/task/main.py
+      - ./functions/api/src:/var/task
+      - ./shared:/var/task/shared
     ports:
     - "8000:8000"

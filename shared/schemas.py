@@ -6,7 +6,8 @@ from pydantic import BaseModel, ConfigDict, field_validator
 class PineconeMetadata(BaseModel):
     book_id: str
     pos: List[str]
-    count: int
+    vector_count: int
+    pos_count: int
 
 
 class PineconeEntry(BaseModel):

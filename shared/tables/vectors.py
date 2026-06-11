@@ -60,7 +60,8 @@ class PineconeTable:
                     metadata={
                         "book_id": item["book_id"],
                         "pos": item["pos"],
-                        "count": item["count"],
+                        "pos_count" : len(item["pos"]),
+                        "vector_count": item["count"],
                     },
                 ).model_dump()
             )
@@ -105,7 +106,7 @@ class PineconeTable:
             vector=query_vector.astype(np.float32).tolist(),
             top_k=top_k,
             namespace=NAMESPACE,
-            filter={"book_id": {"$eq": book_id}},
+            filter={"book_id": {"$eq": book_id}, "$or": [{"pos_count": {"$ne": 1}}, {"pos": {"$nin": ["R"]}}]},
             include_metadata=True,
         ).get("matches", [])
 
@@ -115,7 +116,7 @@ class PineconeTable:
                 "book_id": book_id,
                 "score": float(match["score"]),
                 "pos": match["metadata"]["pos"],
-                "count": int(match["metadata"]["count"]),
+                "count": int(match["metadata"]["vector_count"]),
             }
             for match in matches
         ]

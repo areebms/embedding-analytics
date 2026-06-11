@@ -1,8 +1,9 @@
 import numpy as np
 
-from shared.aws import TermTable
-from constants import T_CRIT_95
-from schemas import OpNode, TermNode
+from app.search.constants import T_CRIT_95
+from app.search.schemas.search_expr import OpNode, TermNode
+from shared.tables.book_terms import BookTermTable
+
 
 
 def extract_vectors(buffers):
@@ -31,7 +32,7 @@ def get_confidence_intervals(query_vectors, item_vectors):
     return cosine_similarity, ci_half
 
 
-def get_term_vectors(term: str, table: TermTable, platform_data: str) -> np.ndarray:
+def get_term_vectors(term: str, table: BookTermTable, platform_data: str) -> np.ndarray:
     """Resolve a term to its per-seed vectors (n_seeds, dim), normalized."""
     entry = table.get_entry(term, platform_data, ["vectors"])
     if entry is None:
@@ -41,7 +42,7 @@ def get_term_vectors(term: str, table: TermTable, platform_data: str) -> np.ndar
 
 def evaluate_tree(
     node: "TermNode | OpNode",
-    table: TermTable,
+    table: BookTermTable,
     platform_data: str,
 ) -> np.ndarray:
     if isinstance(node, TermNode):

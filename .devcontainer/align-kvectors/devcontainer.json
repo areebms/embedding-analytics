@@ -1,0 +1,44 @@
+{
+  "name": "embedding-analytics: align-kvectors",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "../.."
+  },
+  "workspaceFolder": "/workspace",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-python.debugpy",
+        "charliermarsh.ruff"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/var/lang/bin/python",
+        "python.testing.pytestEnabled": true,
+        "python.testing.pytestArgs": [
+          "functions/align-kvectors"
+        ],
+        "python.terminal.activateEnvironment": false,
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "terminal.integrated.cwd": "/var/task",
+        "python.analysis.extraPaths": [
+          "/var/task"
+        ]
+      }
+    }
+  },
+  "runArgs": [
+    "--env-file",
+    "${localWorkspaceFolder}/.env"
+  ],
+  "mounts": [
+    "source=${localEnv:HOME}/.aws,target=/home/vscode/.aws,type=bind,readonly"
+  ],
+  "postCreateCommand": "bash .devcontainer/align-kvectors/postCreate.sh",
+  "remoteUser": "vscode",
+  "containerEnv": {
+    "PYTHONPATH": "/var/task"
+  }
+}

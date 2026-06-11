@@ -1,8 +1,8 @@
 import json
 import logging
 
-from main import publish
-from shared.aws import extract_index
+from publish_utils import publish
+from shared.lambda_event import extract_index
 
 
 logger = logging.getLogger(__name__)
@@ -17,6 +17,7 @@ def handler(event, context):
         return {"statusCode": 400, "body": json.dumps({"error": "index is required"})}
 
     publish(index)
+    logger.info("Publish handler completed successfully for %s", index)
 
     return {
         "statusCode": 200,

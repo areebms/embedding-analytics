@@ -1,7 +1,9 @@
 import json
 import os
 
-from shared.aws import get_pipeline_table, upload_object, get_session
+from shared.session import get_session
+from shared.s3 import upload_object
+from shared.tables.pipeline import get_pipeline_table
 from shared.commons import get_index
 from retrieve import get_html, get_text, get_metadata
 

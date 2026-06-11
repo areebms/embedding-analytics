@@ -1,7 +1,7 @@
 import json
 import logging
 
-from shared.aws import extract_index
+from shared.lambda_event import extract_index
 
 
 logger = logging.getLogger(__name__)
@@ -28,10 +28,11 @@ def handler(event, context):
     return {"index": index}
 
 
-def build_corpus_handler(event, context): # Note being Used.
+def build_corpus_handler(event, context): # Not being Used.
     """Build corpus centroid from all aligned books."""
     from create_corpus_centroid import build_corpus_centroid
-    from shared.aws import get_session, get_pipeline_table
+    from shared.session import get_session
+    from shared.tables.pipeline import get_pipeline_table
 
     logger.info("Build corpus centroid request received", extra={"event": event})
 

@@ -14,15 +14,12 @@ The pipeline demonstrates several production backend patterns:
 - **DynamoDB as a denormalized serving layer** for term vectors and metadata
 - **Idempotent stages** that skip completed work on retry or rerun
 - **Per-service resource tuning** with stage-specific memory and timeout configuration
-- **Separate batch job** for corpus-level alignment outside the per-book pipeline
 
 High-level flow:
 
 ```text
 scrape --> tokenize --> train-kvector Map(N seeds) --> align-kvectors --> publish --> api
 ```
-
-A separate corpus job builds a shared cross-book alignment frame once two or more books have completed the per-book pipeline.
 
 ---
 
@@ -143,11 +140,7 @@ Alignment solves a core Word2Vec reliability problem: independently trained mode
 
 ### Per-book alignment
 
-`create_book_centroid.py` aligns all seeded models for a single book into a shared vector space, builds a per-book centroid with per-term stability metrics (disparity, variance, R-squared), and optionally rotates into the corpus frame if one exists.
-
-### Cross-book alignment
-
-`create_corpus_centroid.py` aligns completed book centroids into a shared corpus frame for cross-author comparison. Runs outside the per-book Step Function and requires 2+ completed books. Uses unit-normalized vectors and uniform weights, with single-book terms excluded from the rotation via zero weight but retained in the vocabulary for downstream lookup.
+`create_book_centroid.py` aligns all seeded models for a single book into a shared vector space and builds a per-book centroid with per-term stability metrics (disparity, variance, R-squared).
 
 Shared alignment primitives live in `procrustes_utils.py`.
 

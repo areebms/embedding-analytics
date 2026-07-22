@@ -16,20 +16,21 @@ from app.search.services.search_expr import (
     get_confidence_intervals,
     evaluate_tree,
 )
+from shared.commons import BookIndex
 from shared.tables.book_terms import get_book_term_table
 from shared.tables.vectors import get_pinecone_table
 
 router = APIRouter()
 
 
-@router.post("/similar-terms/quick/{book_id}", response_model=SimilarityResponse)
+@router.post("/similar-terms/quick/{source_book_id}", response_model=SimilarityResponse)
 @cache(expire=None)
-def search_expr(book_id: str, query: SimilarityRequest):
-    platform_data = f"gutenberg-{book_id}"
+def search_expr(source_book_id: int, query: SimilarityRequest):
+    book_id = BookIndex(source_book_id)
     table = get_book_term_table()
 
     try:
-        query_vectors = evaluate_tree(query.tree, table, platform_data)
+        query_vectors = evaluate_tree(query.tree, table, book_id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -38,7 +39,7 @@ def search_expr(book_id: str, query: SimilarityRequest):
         return SimilarityResponse(results=[], query_vectors=query_vectors.tolist())
 
     matches = get_pinecone_table().query_book(
-        platform_data, query_centroid, top_k=query.top_k
+        book_id, query_centroid, top_k=query.top_k
     )
 
     results = []
@@ -54,17 +55,17 @@ def search_expr(book_id: str, query: SimilarityRequest):
 
 
 @router.post(
-    "/similar-terms/detailed/{book_id}/", response_model=list[ConfidenceResult]
+    "/similar-terms/detailed/{source_book_id}/", response_model=list[ConfidenceResult]
 )
 @cache(expire=None)
-def search_confidence(book_id: str, query: ConfidenceRequest):
-    platform_data = f"gutenberg-{book_id}"
+def search_confidence(source_book_id: int, query: ConfidenceRequest):
+    book_id = BookIndex(source_book_id)
     table = get_book_term_table()
 
     query_vectors = np.asarray(query.query_vectors, dtype=np.float64)
 
     entries = table.batch_get_entries(
-        query.terms, platform_data, fields=["term", "vectors"]
+        query.terms, book_id, fields=["term", "vectors"]
     )
     vectors_by_term = {entry["term"]: entry["vectors"] for entry in entries}
 

@@ -9,7 +9,6 @@ from gensim.models import KeyedVectors
 
 from shared.session import get_session
 
-
 load_dotenv(Path(__file__).parents[3] / ".env")
 
 
@@ -41,10 +40,10 @@ def alignment_result(kvector_stack):
     stack = copy.deepcopy(kvector_stack)
     terms = list(stack[0].key_to_index)
 
-    centroid_vectors, residuals, mean_disparity, _ = gradient_descent_alignment(
+    centroid_vectors, residuals, mean_book_disparity, _ = gradient_descent_alignment(
         terms, stack
     )
     counts = np.array([stack[0].get_vecattr(t, "count") for t in terms])
     centroid = build_centroid_kvector(terms, counts, residuals, centroid_vectors)
 
-    return mean_disparity, centroid
+    return mean_book_disparity, centroid

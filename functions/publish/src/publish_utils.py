@@ -46,9 +46,6 @@ class BookCentroidData:
     def get_pinecone_vector(self, term) -> np.ndarray:
         return np.array(self.centroid_kvector[term], dtype=np.float32)
 
-    def get_dynamodb_vector(self, term):
-        return np.array(self.centroid_kvector[term], dtype=np.float16).tobytes()
-
     def get_count(self, term) -> int:
         return int(self.centroid_kvector.get_vecattr(term, "count"))
 

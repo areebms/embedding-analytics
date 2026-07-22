@@ -135,8 +135,6 @@ scrape --> tokenize --> train-kvector Map(N seeds) --> align-kvectors --> publis
 
 Every stage is idempotent: failed or repeated runs skip already-completed work and resume safely. Republishing a book also removes terms that no longer exist in the new model from Pinecone and the corpus vocabulary.
 
-A separate corpus-alignment job builds a cross-book frame from 2+ completed books, enabling cross-author comparison.
-
 More detail: [`docs/pipeline.md`](docs/pipeline.md)
 
 ---
@@ -273,7 +271,7 @@ More detail: [`docs/describe.md`](docs/describe.md)
 
 A single Word2Vec model trained on a small corpus is unreliable. This backend trains multiple seeded models, aligns them with Generalized Procrustes Analysis, and evaluates every query across the full ensemble to produce 95% confidence intervals.
 
-The alignment pipeline operates at two levels: within-book GPA aligns seed models into a per-book centroid, and cross-book GPA aligns book centroids into a shared corpus frame for cross-author comparison.
+Within-book GPA aligns the seed models for each book into a per-book centroid with per-term stability metrics.
 
 The result is a reliability signal that a standard embedding tool does not provide: tight CI means the relationship was stable across training runs, wide CI means treat with skepticism.
 
@@ -313,12 +311,6 @@ docker compose run lambda-publish python publish_to_api.py
 
 `create_book_centroid.py` and `publish_to_api.py` iterate over every book in the pipeline table; both are idempotent, and publish prunes terms that no longer exist after retraining.
 
-Build the cross-book corpus frame:
-
-```bash
-docker compose run lambda-align-kvectors python create_corpus_centroid.py
-```
-
 Per-service VS Code devcontainers for the API, alignment, and publish services live in `.devcontainer/`.
 
 ---
@@ -345,7 +337,6 @@ embedding-analytics/
 │   ├── align-kvectors/
 │   │   ├── src/
 │   │   │   ├── create_book_centroid.py
-│   │   │   ├── create_corpus_centroid.py
 │   │   │   └── procrustes_utils.py
 │   │   └── tests/
 │   ├── publish/

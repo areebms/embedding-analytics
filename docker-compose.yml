@@ -50,7 +50,6 @@ services:
         AWS_URI_PREFIX: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
     volumes:
       - ./functions/align-kvectors/src/app.py:/var/task/app.py
-      - ./functions/align-kvectors/src/create_corpus_centroid.py:/var/task/create_corpus_centroid.py
       - ./functions/align-kvectors/src/create_book_centroid.py:/var/task/create_book_centroid.py
       - ./functions/align-kvectors/src/procrustes_utils.py:/var/task/procrustes_utils.py
 

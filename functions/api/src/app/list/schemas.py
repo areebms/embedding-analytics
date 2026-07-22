@@ -1,5 +1,7 @@
 from pydantic import BaseModel, model_validator
 
+from shared.commons import BookIndex
+
 
 class BookResponse(BaseModel):
     id: int
@@ -12,7 +14,7 @@ class BookResponse(BaseModel):
     @classmethod
     def from_entry(cls, data: dict) -> dict:
         if "platform_data" in data:
-            data["id"] = int(data.pop("platform_data").split("-")[-1])
+            data["id"] = BookIndex.parse(data.pop("platform_data")).source_id
             data["label"] = f"{data['author'].split(',')[0]} ({data['published_year']})"
         return data
 

@@ -77,17 +77,19 @@ def test_parse_describe_unparseable_returns_400(client, monkeypatch, patch_table
     assert response.status_code == 400
 
 
-def test_parse_describe_unresolvable_returns_422(client, monkeypatch, patch_tables):
+def test_parse_describe_unresolvable_returns_404(client, monkeypatch, patch_tables):
     _, term_table = patch_tables
     _set_vocabulary(term_table, ["labour"])
 
     monkeypatch.setattr("app.search.services.describe.OpenAI", mocked_openai("xyzzy"))
     response = client.post("/parse-describe", json={"message": "show me xyzzy"})
 
-    assert response.status_code == 422
-    detail = response.json()["detail"]
-    assert detail["term"] == "xyzzy"
-    assert "candidates" in detail
+    # A finding, not a failure: 404 keeps it off request-validation's 422.
+    assert response.status_code == 404
+    body = response.json()
+    assert body["reason"] == "term_resolution"
+    assert body["term"] == "xyzzy"
+    assert "candidates" in body
 
 
 def test_parse_describe_missing_message_returns_422(client):

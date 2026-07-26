@@ -2,6 +2,7 @@ import numpy as np
 from fastapi import HTTPException, APIRouter
 
 from app.core.dependencies import cache
+from app.core.logging import add_to_log
 from app.search.schemas.search_expr import (
     SimilarityRequest,
     SimilarityResult,
@@ -10,7 +11,7 @@ from app.search.schemas.search_expr import (
     ConfidenceResult,
 )
 from app.search.schemas.describe import ParseDescribeRequest, ParseDescribeResponse
-from app.search.services.describe import process_describe_query, TermResolutionError
+from app.search.services.describe import process_describe_query
 from app.search.services.search_expr import (
     normalize_vector_bytes,
     get_confidence_intervals,
@@ -26,6 +27,7 @@ router = APIRouter()
 @router.post("/similar-terms/quick/{source_book_id}", response_model=SimilarityResponse)
 @cache(expire=None)
 def search_expr(source_book_id: int, query: SimilarityRequest):
+    add_to_log(query=query.tree.model_dump())
     book_id = BookIndex(source_book_id)
     table = get_book_term_table()
 
@@ -59,6 +61,7 @@ def search_expr(source_book_id: int, query: SimilarityRequest):
 )
 @cache(expire=None)
 def search_confidence(source_book_id: int, query: ConfidenceRequest):
+    add_to_log(query=query.terms)
     book_id = BookIndex(source_book_id)
     table = get_book_term_table()
 
@@ -92,19 +95,13 @@ def search_confidence(source_book_id: int, query: ConfidenceRequest):
 
 @router.post("/parse-describe", response_model=ParseDescribeResponse)
 def parse_describe(req: ParseDescribeRequest):
+    add_to_log(query=req.message)
+    # TermResolutionError propagates to its global handler (a 404 finding with
+    # "did you mean" candidates); only a genuine parse failure is a 400 here.
     try:
         expression, terms, substitutions = process_describe_query(req.message)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except TermResolutionError as e:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "message": str(e),
-                "term": e.term,
-                "candidates": e.candidates,
-            },
-        )
     return ParseDescribeResponse(
         expression=expression,
         terms=terms,

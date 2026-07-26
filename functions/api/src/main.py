@@ -1,16 +1,16 @@
-import json
 import logging
 import os
-import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi_cache import FastAPICache
 from fastapi_cache.backends.redis import RedisBackend
 from mangum import Mangum
 from redis import asyncio as aioredis
 
+from app.core.logging import RequestLoggingMiddleware
+from app.search.errors import add_exception_handlers
 from app.search.routers import router as search_router
 from app.list.routers import router as list_router
 
@@ -41,39 +41,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    start = time.perf_counter()
-
-    # Log similarity queries before the cache layer intercepts them,
-    # so we see every request regardless of cache hit/miss.
-    if request.method == "POST" and request.url.path.startswith("/similarity/"):
-        body_bytes = await request.body()
-        try:
-            body = json.loads(body_bytes)
-            book_id = request.url.path.removeprefix("/similarity/")
-            logger.info("similarity book_id=%s query=%r", book_id, body.get("query"))
-        except Exception:
-            pass
-
-        # Reconstruct the request so the endpoint can still read the body.
-        async def receive():
-            return {"type": "http.request", "body": body_bytes}
-
-        request = Request(request.scope, receive)
-
-    response = await call_next(request)
-    duration_ms = (time.perf_counter() - start) * 1000
-    logger.info(
-        "%s %s status=%d duration_ms=%.1f",
-        request.method,
-        request.url.path,
-        response.status_code,
-        duration_ms,
-    )
-    return response
-
+app.add_middleware(RequestLoggingMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -84,6 +52,6 @@ app.add_middleware(
 )
 app.include_router(search_router)
 app.include_router(list_router)
-
+add_exception_handlers(app)
 
 handler = Mangum(app, lifespan="on")

@@ -1,6 +1,5 @@
 import re
 import os
-import logging
 from collections import deque
 from dataclasses import dataclass
 from difflib import get_close_matches
@@ -8,12 +7,12 @@ from functools import lru_cache
 
 from openai import OpenAI
 
+from app.core.logging import add_to_log
 from app.search.constants import PARSE_SYSTEM_PROMPT, FALLBACK_PROMPT
+from app.search.errors import TermResolutionError
 from app.search.schemas.search_expr import OpNode, TermNode
 from shared.tables.pipeline import get_pipeline_table
 from shared.tables.book_terms import get_book_term_table
-
-logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -44,7 +43,7 @@ def get_vocabulary() -> tuple[set[str], list[str]]:
             terms.add(item["term"])
 
     sorted_terms = sorted(terms)
-    logger.info("Loaded vocabulary: %d terms", len(sorted_terms))
+    add_to_log(vocab_terms=len(sorted_terms))
     return terms, sorted_terms
 
 
@@ -136,24 +135,6 @@ def extract_terms(tree: TermNode | OpNode) -> list[str]:
 # ---------------------------------------------------------------------------
 # Term resolution (vocabulary-level)
 # ---------------------------------------------------------------------------
-
-
-class TermResolutionError(Exception):
-    """Raised when a term cannot be resolved to any vocabulary entry."""
-
-    def __init__(self, term: str, candidates: list[str]):
-        self.term = term
-        self.candidates = candidates
-        if candidates:
-            msg = (
-                f"No matching term found for '{term}'. "
-                f"Did you mean: {', '.join(candidates)}?"
-            )
-        else:
-            msg = (
-                f"No matching term found for '{term}'. No similar terms in vocabulary."
-            )
-        super().__init__(msg)
 
 
 def resolve_vocabulary_term(term: str) -> str:

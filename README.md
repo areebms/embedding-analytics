@@ -1,8 +1,8 @@
 # Embedding Analytics: Backend
 
-Six containerized Python microservices on AWS Lambda, orchestrated by Step Functions, serving a FastAPI API backed by DynamoDB, Pinecone, and Redis.
+Six containerized Python microservices on AWS Lambda, orchestrated by Step Functions, serving a FastAPI API backed by DynamoDB and Redis.
 
-The system trains Word2Vec model ensembles, aligns them via Generalized Procrustes Analysis, and serves similarity results with 95% confidence intervals through a two-phase retrieval design: Pinecone approximate nearest-neighbor ranking followed by ensemble confidence scoring over per-seed vectors in DynamoDB. Natural-language queries are translated into validated expression trees through an LLM pipeline with deterministic guardrails.
+The system trains Word2Vec model ensembles, aligns them via Generalized Procrustes Analysis, and scores queries across the ensemble rather than a single model, reporting every value with a 95% confidence interval. Natural-language queries are translated into validated expression trees through an LLM pipeline with deterministic guardrails.
 
 **Live demo:** https://www.embedding-analytics.com
 **Frontend repo:** https://github.com/areebms/embedding-analytics-frontend
@@ -13,7 +13,6 @@ The system trains Word2Vec model ensembles, aligns them via Generalized Procrust
 
 - **Microservices pipeline:** Six independent, containerized Lambda stages for scraping, tokenization, model training, vector alignment, publishing, and API serving
 - **Fan-out orchestration:** Step Functions Map state trains N seeded models in parallel, converging into a single alignment stage
-- **Two-phase vector serving:** A fast Pinecone top-K query ranks candidate terms against centroid vectors; a second phase computes 95% confidence intervals across the full per-seed ensemble in DynamoDB, bounded to only the terms the user will see
 - **Dual serving layer:** S3 holds intermediate artifacts during training; a publish stage fans results out to DynamoDB (per-seed ensemble vectors, term metadata) and Pinecone (indexed centroid vectors), pruning deprecated terms on republish
 - **LLM integration with guardrails:** OpenAI-powered natural-language parsing bounded by recursive descent validation, tiered vocabulary resolution, and structured error recovery
 - **Ensemble confidence scoring:** Queries are evaluated across every aligned model independently, producing 95% confidence intervals instead of single-point similarity scores
@@ -92,7 +91,6 @@ graph TD
     PUB --> DDB
     PUB --> PC
     FAPI <--> DDB
-    FAPI <--> PC
     FAPI -. optional .-> RED
     Corpus --> S3
 ```
@@ -105,7 +103,7 @@ graph TD
 |---|---|
 | API | Python 3.13, FastAPI, Mangum, Pydantic |
 | AI/ML | Gensim Word2Vec, NumPy, SciPy, OpenAI API |
-| Vector search | Pinecone (centroid index, metadata filtering) |
+| Vector index | Pinecone (centroid index, written by `publish`) |
 | Cloud | AWS Lambda, Step Functions, S3, DynamoDB, ECR |
 | Caching | Redis, fastapi-cache |
 | NLP/Data | spaCy, NLTK, WordNet, BeautifulSoup |
@@ -125,7 +123,7 @@ Six containerized Lambda services, each a single stage with its own memory and t
 | `train-kvector` | Trains one seeded Word2Vec model | `.model` artifact in S3 |
 | `align-kvectors` | Aligns seed models into a shared vector space via GPA | Rotated models + centroid in S3 |
 | `publish` | Fans out to the serving layer | Per-seed vectors + metadata in DynamoDB, centroid vectors in Pinecone |
-| `api` | Serves books, terms, similarity, and NL parse endpoints | JSON responses via Lambda Function URL |
+| `api` | Serves books, terms, and NL parse endpoints | JSON responses via Lambda Function URL |
 
 Step Function flow:
 
@@ -181,67 +179,6 @@ Returns the cross-book vocabulary. Terms must appear in at least two books. Adve
   }
 ]
 ```
-
-### `POST /similar-terms/quick/{book_id}`
-
-Phase one of similarity serving. Accepts a recursive expression tree (Pydantic-validated), evaluates it against every aligned seed model, averages the per-seed results into a query centroid, and runs a Pinecone top-K search (default 100, max 500) filtered to the requested book and excluding adverb-only terms.
-
-Returns ranked results plus the per-seed query vectors, so the second phase can reuse them without re-evaluating the expression.
-
-```json
-{
-  "tree": {
-    "op": "+",
-    "args": [
-      { "term": "labour" },
-      {
-        "op": "-",
-        "args": [
-          { "term": "productive" },
-          { "term": "unproductive" }
-        ]
-      }
-    ]
-  },
-  "top_k": 100
-}
-```
-
-Response:
-
-```json
-{
-  "results": [
-    { "term": "capital", "count": 942, "similarity": 0.354 }
-  ],
-  "query_vectors": [[0.012, -0.044, "..."]]
-}
-```
-
-### `POST /similar-terms/detailed/{book_id}/`
-
-Phase two. Accepts the term list and per-seed query vectors from the quick phase, batch-fetches each term's per-seed aligned vectors from DynamoDB, and returns mean cosine similarity with a 95% confidence interval computed across the ensemble via t-distribution.
-
-```json
-{
-  "terms": ["capital", "machine"],
-  "query_vectors": [[0.012, -0.044, "..."]]
-}
-```
-
-Response:
-
-```json
-[
-  {
-    "term": "capital",
-    "similarity": 0.354,
-    "similarity_ci": [0.312, 0.396]
-  }
-]
-```
-
-Splitting the endpoints keeps the expensive part cheap: ranking the whole vocabulary happens in one indexed Pinecone query, and the heavier per-seed ensemble math is bounded to the top-K terms the user will actually see.
 
 ### `POST /parse-describe`
 
@@ -350,7 +287,7 @@ embedding-analytics/
 │       │   └── app/
 │       │       ├── core/           # shared dependencies (cache)
 │       │       ├── list/           # /books, /terms
-│       │       └── search/         # /similar-terms/*, /parse-describe
+│       │       └── search/         # /parse-describe
 │       └── tests/                  # pytest, 85% coverage gate
 ├── shared/
 │   ├── tables/                     # storage clients
@@ -384,7 +321,6 @@ embedding-analytics/
 ## What this demonstrates
 
 - Designing and deploying a multi-stage serverless data pipeline on AWS (Lambda, Step Functions, S3, DynamoDB)
-- Integrating a managed vector database (Pinecone) as a low-latency ranking layer in front of an ensemble scoring layer
 - Python API development with FastAPI, Pydantic schemas, recursive evaluation, and structured error handling
 - LLM integration with deterministic validation boundaries and tiered fallback resolution
 - Ensemble-based confidence scoring as a production reliability pattern for vector search

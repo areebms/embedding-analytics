@@ -5,7 +5,7 @@ Mocking philosophy:
   in app.list.routers and app.list.services.
 - FastAPICache backend is left uninitialized (REDIS_URL unset),
   so the dependencies.cache shim becomes a no-op.
-- evaluate_tree and the CI math run for real against the app's full router.
+- The list routes run for real against the app's full router.
 """
 
 import os

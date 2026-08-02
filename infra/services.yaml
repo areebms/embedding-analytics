@@ -34,3 +34,4 @@ services:
   api:
     function_name: api
     image: lambda-api
+    memory: 1024

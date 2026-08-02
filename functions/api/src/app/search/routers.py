@@ -1,25 +1,38 @@
-from fastapi import HTTPException, APIRouter
+from fastapi import APIRouter, HTTPException
 
 from app.core.logging import add_to_log
-from app.search.schemas.describe import ParseDescribeRequest, ParseDescribeResponse
+from app.core.routing import post_route
+from app.search.schemas.describe import (
+    ParseDescribeRequest,
+    ParseDescribeResponse,
+    SubstitutionResponse,
+)
+from app.search.schemas.errors import TermResolutionResponse
 from app.search.services.describe import process_describe_query
 
 router = APIRouter()
 
 
-@router.post("/parse-describe", response_model=ParseDescribeResponse)
-def parse_describe(req: ParseDescribeRequest):
-    add_to_log(query=req.message)
-    # TermResolutionError propagates to its global handler (a 404 finding with
-    # "did you mean" candidates); only a genuine parse failure is a 400 here.
+@post_route(
+    router,
+    "/parse-describe",
+    response_model=ParseDescribeResponse,
+    responses={
+        400: {"description": "The LLM output could not be parsed into an expression."},
+        404: TermResolutionResponse,
+    },
+)
+def parse_describe(request: ParseDescribeRequest):
+    add_to_log(query=request.message)
     try:
-        expression, terms, substitutions = process_describe_query(req.message)
+        expression, terms, substitutions = process_describe_query(request.message)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return ParseDescribeResponse(
         expression=expression,
         terms=terms,
         substitutions=[
-            {"original": s.original, "resolved": s.resolved} for s in substitutions
+            SubstitutionResponse(original=s.original, resolved=s.resolved)
+            for s in substitutions
         ],
     )

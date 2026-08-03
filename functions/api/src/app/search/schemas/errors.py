@@ -1,18 +1,28 @@
-"""
-Response models for the search endpoints' error bodies, declared per-route via
-`responses=` so they land in the OpenAPI schema and the generated client. The
-handlers in app.search.errors construct and dump these models, so each model is
-the single source of truth for its body shape and `reason` -- the served body
-can't drift from the documented one.
-
-Each is a finding the client renders, sharing one shape: a flat 404 body with a
-`reason` Literal, so the frontend treats them as one discriminated union.
-Request/parse failures keep their own codes (422, 400).
-"""
 
 from typing import ClassVar, Literal
 
 from pydantic import BaseModel
+
+
+class ExpressionAbsentResponse(BaseModel):
+    openapi_description: ClassVar[str] = (
+        "One or more terms in the expression don't exist in the pinned book, "
+        "so there's nothing to chart."
+    )
+
+    reason: Literal["expression_absent"] = "expression_absent"
+    book_id: int
+    terms: list[str]
+
+
+class QueryInTooFewBooksResponse(BaseModel):
+
+    openapi_description: ClassVar[str] = (
+        "Fewer than two of the requested books carry the query."
+    )
+
+    reason: Literal["query_in_too_few_books"] = "query_in_too_few_books"
+    book_id: int | None = None  # the pinned book, null when unpinned
 
 
 class TermResolutionResponse(BaseModel):

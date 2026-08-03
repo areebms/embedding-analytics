@@ -1,10 +1,58 @@
+from collections.abc import Iterable
+
 from fastapi import Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.core.logging import add_to_log
-from app.search.schemas.errors import TermResolutionResponse
+from app.search.schemas.errors import (
+    ExpressionAbsentResponse,
+    QueryInTooFewBooksResponse,
+    TermResolutionResponse,
+)
+from shared.commons import BookIndex
+
+
+class MissingTermsError(ValueError):
+
+    def __init__(self, terms: Iterable[str], book_id: BookIndex):
+        self.terms = sorted(terms)
+        self.book_id = book_id
+        plural = "terms" if len(self.terms) > 1 else "term"
+        super().__init__(f"Unknown {plural}: {', '.join(self.terms)}")
+
+
+class NoLocalNearestTermsError(ValueError):
+
+    def __init__(self, a_book_id: BookIndex, b_book_id: BookIndex, n: int):
+        self.a_book_id = a_book_id
+        self.b_book_id = b_book_id
+        self.n = n
+        super().__init__(
+            f"no local neighbourhood between {a_book_id} and {b_book_id}: "
+            f"{n} shared terms"
+        )
+
+
+class ExpressionAbsentError(ValueError):
+
+    def __init__(self, book_id: BookIndex, terms: Iterable[str]):
+        self.book_id = book_id
+        self.terms = sorted(terms)
+        plural = "terms" if len(self.terms) > 1 else "term"
+        super().__init__(
+            f"pinned book {book_id.source_id} is missing {plural}: "
+            f"{', '.join(self.terms)}"
+        )
+
+
+class QueryInTooFewBooksError(ValueError):
+
+    def __init__(self, num_books: int, book_id: BookIndex | None = None):
+        self.book_id = book_id  # the pinned book, None when unpinned
+        where = "the corpus" if book_id is None else f"book {book_id.source_id}"
+        super().__init__(f"too few books ({num_books}) to compare against {where}")
 
 
 class TermResolutionError(Exception):
@@ -25,9 +73,32 @@ class TermResolutionError(Exception):
         super().__init__(msg)
 
 
+async def expression_absent_handler(request: Request, exc: ExpressionAbsentError):
+
+    add_to_log(error=f"{type(exc).__name__}: {exc}")
+    return JSONResponse(
+        status_code=404,
+        content=ExpressionAbsentResponse(
+            book_id=exc.book_id.source_id, terms=exc.terms
+        ).model_dump(),
+    )
+
+
+async def query_in_too_few_books_handler(
+    request: Request, exc: QueryInTooFewBooksError
+):
+
+    add_to_log(error=f"{type(exc).__name__}: {exc}")
+    return JSONResponse(
+        status_code=404,
+        content=QueryInTooFewBooksResponse(
+            book_id=None if exc.book_id is None else exc.book_id.source_id,
+        ).model_dump(),
+    )
+
+
 async def term_resolution_handler(request: Request, exc: TermResolutionError):
-    # A finding with "did you mean" candidates. 404 (not 422) keeps it off
-    # request-validation's code so the two never collide in the client.
+
     add_to_log(error=f"{type(exc).__name__}: {exc}")
     return JSONResponse(
         status_code=404,
@@ -38,11 +109,7 @@ async def term_resolution_handler(request: Request, exc: TermResolutionError):
 
 
 async def request_validation_handler(request: Request, exc: RequestValidationError):
-    # Not a finding: FastAPI's own 422 is served unchanged. The handler exists
-    # only so the canonical log line carries the payload that failed to
-    # validate -- otherwise a 422 logs as a bare status with no trace of what
-    # the client sent. `exc.body` is None when the error is in a query or path
-    # param rather than a body.
+
     add_to_log(query=exc.body, error="validation")
     return await request_validation_exception_handler(request, exc)
 
@@ -50,3 +117,5 @@ async def request_validation_handler(request: Request, exc: RequestValidationErr
 def add_exception_handlers(app):
     app.add_exception_handler(RequestValidationError, request_validation_handler)
     app.add_exception_handler(TermResolutionError, term_resolution_handler)
+    app.add_exception_handler(ExpressionAbsentError, expression_absent_handler)
+    app.add_exception_handler(QueryInTooFewBooksError, query_in_too_few_books_handler)

@@ -1,20 +1,13 @@
-"""Fixtures for search-route tests (/parse-describe).
-
-Mocking philosophy:
-- get_term_table, get_pipeline_table, BookTermTable, and get_session are patched
-  at the import boundary in app.search.services.describe.
-- FastAPICache backend is left uninitialized (REDIS_URL unset),
-  so the dependencies.cache shim becomes a no-op.
-- OpenAI client in services.describe is replaced with a tiny stub.
-- The parser runs for real against synthetic byte vectors built by
-  make_term_entry.
-"""
 import os
 from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
+
+from app.search.dependencies import get_books_term_cache
+from app.search.services.semantic_drift import BooksTermCache
+from shared.tables.book_terms import get_book_term_table
 
 os.environ.pop("REDIS_URL", None)
 
@@ -42,7 +35,7 @@ def make_term_entry(
 
 
 def set_term_table(term_table, entries_by_term, book_id="gutenberg-1"):
-    """Configure get_entry and batch_get_entries."""
+    """Configure get_entry and batch_get_entries for a single-book test."""
 
     def get_entry(term, platform_data, fields=None):
         if platform_data == book_id and term in entries_by_term:
@@ -86,6 +79,17 @@ def mock_term_table():
 
 
 @pytest.fixture
+def mock_books_cache(mock_term_table):
+    """The term-matrix cache for one test.
+
+    In production this outlives the request, so overriding it per test is what
+    keeps one test's books out of the next -- and tests that want a cold cache
+    mid-test clear this instance rather than a module global.
+    """
+    return BooksTermCache(mock_term_table)
+
+
+@pytest.fixture
 def patch_openai(monkeypatch):
     """Replace OpenAI with a stub."""
     import app.search.services.describe as describe_services
@@ -99,11 +103,19 @@ def patch_openai(monkeypatch):
 
 
 @pytest.fixture
-def patch_tables(monkeypatch, mock_pipeline_table, mock_term_table):
+def patch_tables(monkeypatch, mock_pipeline_table, mock_term_table, mock_books_cache):
     """Patch search-route storage entry points."""
+    from main import app
+
+    app.dependency_overrides[get_book_term_table] = lambda: mock_term_table
+    app.dependency_overrides[get_books_term_cache] = lambda: mock_books_cache
     monkeypatch.setattr("app.search.services.describe.get_pipeline_table", lambda: mock_pipeline_table)
     monkeypatch.setattr("app.search.services.describe.get_book_term_table", lambda: mock_term_table)
-    return mock_pipeline_table, mock_term_table
+    yield mock_pipeline_table, mock_term_table
+    # Pop rather than clear(): the list-route fixtures register their own
+    # overrides on this same app object.
+    app.dependency_overrides.pop(get_book_term_table, None)
+    app.dependency_overrides.pop(get_books_term_cache, None)
 
 
 @pytest.fixture

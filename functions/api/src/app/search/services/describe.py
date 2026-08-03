@@ -4,20 +4,17 @@ from collections import deque
 from dataclasses import dataclass
 from difflib import get_close_matches
 from functools import lru_cache
+from typing import Literal
 
 from openai import OpenAI
 
 from app.core.logging import add_to_log
+from app.search.services.utils import extract_terms, serialize_expression
 from app.search.constants import PARSE_SYSTEM_PROMPT, FALLBACK_PROMPT
+from app.search.schemas.semantic_drift import OpNode, TermNode
 from app.search.errors import TermResolutionError
-from app.search.schemas.search_expr import OpNode, TermNode
 from shared.tables.pipeline import get_pipeline_table
 from shared.tables.book_terms import get_book_term_table
-
-
-# ---------------------------------------------------------------------------
-# Vocabulary
-# ---------------------------------------------------------------------------
 
 
 @lru_cache(maxsize=1)
@@ -45,29 +42,6 @@ def get_vocabulary() -> tuple[set[str], list[str]]:
     sorted_terms = sorted(terms)
     add_to_log(vocab_terms=len(sorted_terms))
     return terms, sorted_terms
-
-
-# ---------------------------------------------------------------------------
-# Expression serialization
-# ---------------------------------------------------------------------------
-
-
-def serialize_expression(tree: TermNode | OpNode, *, strip_outer: bool = False) -> str:
-    """Convert a TermNode/OpNode tree back into an expression string.
-
-    Every binary operation is wrapped in parentheses.
-    If strip_outer is True, the outermost parentheses are removed.
-    """
-    if isinstance(tree, TermNode):
-        return tree.term
-
-    if isinstance(tree, OpNode):
-        left = serialize_expression(tree.args[0])
-        right = serialize_expression(tree.args[1])
-        result = f"({left} {tree.op} {right})"
-        return result[1:-1] if strip_outer else result
-
-    raise TypeError(f"Expected TermNode or OpNode, got {type(tree).__name__}")
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +79,7 @@ def parse_expression(raw: str) -> TermNode | OpNode | None:
     def binary_expression() -> TermNode | OpNode | None:
         left_operand = get_operand()
         while left_operand and q and q[0] in ("+", "-"):
-            op = q.popleft()
+            op: Literal["+", "-"] = "+" if q.popleft() == "+" else "-"
             right_operand = get_operand()
             if right_operand is None:
                 return None
@@ -114,27 +88,6 @@ def parse_expression(raw: str) -> TermNode | OpNode | None:
 
     tree = binary_expression()
     return tree if tree and not q else None
-
-
-def extract_terms(tree: TermNode | OpNode) -> list[str]:
-    """Extract all term strings from a parsed tree."""
-    terms: list[str] = []
-    stack: list[TermNode | OpNode] = [tree]
-
-    while stack:
-        node = stack.pop()
-        if isinstance(node, TermNode):
-            terms.append(node.term)
-        elif isinstance(node, OpNode):
-            for i in range(len(node.args) - 1, -1, -1):
-                stack.append(node.args[i])
-
-    return terms
-
-
-# ---------------------------------------------------------------------------
-# Term resolution (vocabulary-level)
-# ---------------------------------------------------------------------------
 
 
 def resolve_vocabulary_term(term: str) -> str:
@@ -150,12 +103,10 @@ def resolve_vocabulary_term(term: str) -> str:
     if term in vocab:
         return term
 
-    # Step 1: high-confidence fuzzy match (free)
     close = get_close_matches(term, vocab_list, n=1, cutoff=0.6)
     if close:
         return close[0]
 
-    # Step 2: LLM fallback with narrowed candidates
     candidates = get_close_matches(term, vocab_list, n=20, cutoff=0.3)
     if not candidates:
         fallback = [w for w in vocab_list if term and w[0] == term[0]]
@@ -176,16 +127,11 @@ def resolve_vocabulary_term(term: str) -> str:
         ],
     )
 
-    result = response.choices[0].message.content.strip().lower()
-    if result in vocab:
-        return result
+    content = response.choices[0].message.content
+    if content and content.strip().lower() in vocab:
+        return content.strip().lower()
 
     raise TermResolutionError(term, candidates[:5])
-
-
-# ---------------------------------------------------------------------------
-# Tree resolution
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -219,11 +165,6 @@ def autocorrect_term_tree(
     return resolved_tree, substitutions
 
 
-# ---------------------------------------------------------------------------
-# Chat pipeline (steps 2-4)
-# ---------------------------------------------------------------------------
-
-
 def llm_generate_expression(message: str) -> str:
     """Call gpt-4o-mini to convert natural language into an expression string."""
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
@@ -236,7 +177,8 @@ def llm_generate_expression(message: str) -> str:
         temperature=0,
         max_tokens=200,
     )
-    return response.choices[0].message.content.strip()
+    content = response.choices[0].message.content
+    return (content or "").strip()
 
 
 def process_describe_query(
@@ -250,17 +192,14 @@ def process_describe_query(
         ValueError: if the LLM output cannot be parsed.
         TermResolutionError: if any term cannot be resolved.
     """
-    # Step 2: LLM generates expression string
     raw_expression = llm_generate_expression(message)
 
-    # Step 3: parse into tree
     tree = parse_expression(raw_expression)
     if tree is None:
         raise ValueError(
             f"Failed to parse LLM output into a valid expression: '{raw_expression}'"
         )
 
-    # Step 4: resolve terms and rebuild
     resolved_tree, substitutions = autocorrect_term_tree(tree)
 
     expression = serialize_expression(resolved_tree, strip_outer=True)

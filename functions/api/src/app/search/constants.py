@@ -1,3 +1,5 @@
+import re
+
 T_CRIT_95 = [
     0,
     12.706,
@@ -72,3 +74,9 @@ FALLBACK_PROMPT = (
     "or respond with NONE if nothing fits.\n\n"
     "Candidates: {candidates}"
 )
+
+MIN_MATCHING_BOOKS = 2
+NUM_LOCAL_NEAREST_TERMS = 75  # See docs/anchor-selection-literature-review.md.
+MIN_LOCAL_NEAREST_TERMS = 2
+NEAREST_TERM_COUNT = 10
+BARE_TERM_PATTERN = re.compile(r"[^\s()+-]+")

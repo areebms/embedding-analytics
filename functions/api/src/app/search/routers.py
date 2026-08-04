@@ -1,10 +1,14 @@
+import time
+
 from fastapi import APIRouter, HTTPException
 from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 
+from app.core.dependencies import BooksMetadataCacheDep
 from app.core.logging import add_to_log
 from app.core.routing import post_route
-from app.search.dependencies import BooksTermCacheDep
+from app.core.services import BooksMetadataCache
+from app.search.dependencies import BooksSimilarityCacheDep, BooksTermCacheDep
 from app.search.errors import ExpressionAbsentError, QueryInTooFewBooksError
 from app.search.schemas.describe import (
     ParseDescribeRequest,
@@ -27,6 +31,7 @@ from app.search.schemas.semantic_drift import (
 from app.search.services.describe import process_describe_query
 from app.search.services.semantic_drift import (
     MIN_MATCHING_BOOKS,
+    BooksSimilarityCache,
     BooksTermCache,
     SearchExpr,
     get_local_mean_similarities,
@@ -46,10 +51,12 @@ router = APIRouter()
         404: TermResolutionResponse,
     },
 )
-def parse_describe(request: ParseDescribeRequest):
+def parse_describe(request: ParseDescribeRequest, books_metadata_cache: BooksMetadataCacheDep):
     add_to_log(query=request.message)
     try:
-        expression, terms, substitutions = process_describe_query(request.message)
+        expression, terms, substitutions = process_describe_query(
+            request.message, tuple(books_metadata_cache.book_ids)
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return ParseDescribeResponse(
@@ -71,8 +78,15 @@ def parse_describe(request: ParseDescribeRequest):
         422: {"description": "Malformed request -- e.g. a repeated book_id."},
     },
 )
-def semantic_drift(request: SemanticDriftRequestBody, books_cache: BooksTermCacheDep):
-    return get_semantic_drift(request, books_cache)
+def semantic_drift(
+    request: SemanticDriftRequestBody,
+    books_term_cache: BooksTermCacheDep,
+    books_similarity_cache: BooksSimilarityCacheDep,
+    books_metadata_cache: BooksMetadataCacheDep,
+):
+    return get_semantic_drift(
+        request, books_term_cache, books_similarity_cache, books_metadata_cache
+    )
 
 
 @post_route(
@@ -88,7 +102,7 @@ def semantic_drift(request: SemanticDriftRequestBody, books_cache: BooksTermCach
             ),
         },
         422: {
-            "description": "Malformed request: a repeated book_id, or the pinned "
+            "description": "Malformed request: a repeated book_id, or the selected "
             "book named among its own targets."
         },
     },
@@ -96,14 +110,24 @@ def semantic_drift(request: SemanticDriftRequestBody, books_cache: BooksTermCach
 def comparative_semantic_drift(
     source_book_id: int,
     request: SemanticDriftRequestBody,
-    books_cache: BooksTermCacheDep,
+    books_term_cache: BooksTermCacheDep,
+    books_similarity_cache: BooksSimilarityCacheDep,
+    books_metadata_cache: BooksMetadataCacheDep,
 ):
-    return get_semantic_drift(request, books_cache, source_book_id)
+    return get_semantic_drift(
+        request,
+        books_term_cache,
+        books_similarity_cache,
+        books_metadata_cache,
+        source_book_id,
+    )
 
 
 def get_semantic_drift(
     body: SemanticDriftRequestBody,
-    books_cache: BooksTermCache,
+    books_term_cache: BooksTermCache,
+    books_similarity_cache: BooksSimilarityCache,
+    books_metadata_cache: BooksMetadataCache,
     source_book_id: int | None = None,
 ) -> SemanticDriftResponse:
 
@@ -124,30 +148,55 @@ def get_semantic_drift(
     )
 
     if selected_book_id is not None:
-        missing_terms = books_cache.load_book(selected_book_id).missing_terms(
+        missing_terms = books_term_cache.load_book(selected_book_id).missing_terms(
             search_expr.terms
         )
         if missing_terms:
             raise ExpressionAbsentError(selected_book_id, missing_terms)
 
-    books_cache.warm_cache(book_ids)
+    started = time.perf_counter()
+    books_term_cache.warm_cache(book_ids)
+    warmed_at = time.perf_counter()
 
-    valid_book_ids = books_cache.get_books_with_search_query(book_ids, search_expr)
+    valid_book_ids = books_term_cache.get_books_with_search_query(book_ids, search_expr)
 
     if len(valid_book_ids) < MIN_MATCHING_BOOKS:
         raise QueryInTooFewBooksError(len(valid_book_ids), selected_book_id)
 
     nearest_terms = get_nearest_terms(
-        books_cache, valid_book_ids, search_expr, selected_book_id=selected_book_id
+        books_similarity_cache,
+        valid_book_ids,
+        search_expr,
+        selected_book_id=selected_book_id,
+        sort=request.sort,
+        book_years=books_metadata_cache.book_years,
     )
 
-    plotted_terms = set(search_expr.terms) | set(nearest_terms)
-    missing_terms_by_book = books_cache.get_missing_terms_by_book(book_ids, plotted_terms)
+    ranked_at = time.perf_counter()
 
+    measured_terms = set(search_expr.terms) | set(nearest_terms)
+    missing_terms_by_book = books_term_cache.get_missing_terms_by_book(
+        book_ids, measured_terms
+    )
+
+    exprs = [search_expr, *map(SearchExpr.from_query, nearest_terms)]
+    books_similarity_cache.warm_cache(
+        book_ids if selected_book_id is None else [*book_ids, selected_book_id],
+        exprs,
+    )
     expr_book_data = [
-        get_local_mean_similarities(books_cache, expr, book_ids, selected_book_id)
-        for expr in [search_expr, *map(SearchExpr.from_query, nearest_terms)]
+        get_local_mean_similarities(
+            books_similarity_cache, expr, book_ids, selected_book_id
+        )
+        for expr in exprs
     ]
+
+    add_to_log(
+        warm_ms=round((warmed_at - started) * 1000, 1),
+        nearest_terms_ms=round((ranked_at - warmed_at) * 1000, 1),
+        similarities_ms=round((time.perf_counter() - ranked_at) * 1000, 1),
+        scored_terms=len(exprs),
+    )
 
     expr_data = ExprData(
         expr=search_expr.serialized, terms=search_expr.terms, books=expr_book_data[0]

@@ -30,8 +30,8 @@ class NoLocalNearestTermsError(ValueError):
         self.b_book_id = b_book_id
         self.n = n
         super().__init__(
-            f"no local neighbourhood between {a_book_id} and {b_book_id}: "
-            f"{n} shared terms"
+            f"too few shared local nearest terms between {a_book_id} and "
+            f"{b_book_id}: {n} shared terms"
         )
 
 
@@ -42,7 +42,7 @@ class ExpressionAbsentError(ValueError):
         self.terms = sorted(terms)
         plural = "terms" if len(self.terms) > 1 else "term"
         super().__init__(
-            f"pinned book {book_id.source_id} is missing {plural}: "
+            f"selected book {book_id.source_id} is missing {plural}: "
             f"{', '.join(self.terms)}"
         )
 
@@ -50,7 +50,7 @@ class ExpressionAbsentError(ValueError):
 class QueryInTooFewBooksError(ValueError):
 
     def __init__(self, num_books: int, book_id: BookIndex | None = None):
-        self.book_id = book_id  # the pinned book, None when unpinned
+        self.book_id = book_id  # the selected book, None when none was selected
         where = "the corpus" if book_id is None else f"book {book_id.source_id}"
         super().__init__(f"too few books ({num_books}) to compare against {where}")
 

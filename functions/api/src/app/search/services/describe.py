@@ -13,24 +13,16 @@ from app.search.services.utils import extract_terms, serialize_expression
 from app.search.constants import PARSE_SYSTEM_PROMPT, FALLBACK_PROMPT
 from app.search.schemas.semantic_drift import OpNode, TermNode
 from app.search.errors import TermResolutionError
-from shared.tables.pipeline import get_pipeline_table
+from shared.commons import BookIndex
 from shared.tables.book_terms import get_book_term_table
 
 
 @lru_cache(maxsize=1)
-def get_vocabulary() -> tuple[set[str], list[str]]:
+def get_vocabulary(book_ids: tuple[BookIndex, ...]) -> tuple[set[str], list[str]]:
     """Load the term vocabulary from DynamoDB (same source as /terms).
 
     Cached for the lifetime of the Lambda instance.
     """
-    book_ids = [
-        item["platform_data"]
-        for item in get_pipeline_table().get_all_entries(
-            ["platform_data", "s3_prefix_models"]
-        )
-        if "s3_prefix_models" in item
-    ]
-
     terms: set[str] = set()
     term_table = get_book_term_table()
     for book_id in book_ids:
@@ -90,7 +82,7 @@ def parse_expression(raw: str) -> TermNode | OpNode | None:
     return tree if tree and not q else None
 
 
-def resolve_vocabulary_term(term: str) -> str:
+def resolve_vocabulary_term(term: str, book_ids: tuple[BookIndex, ...]) -> str:
     """Resolve a single term against the vocabulary.
 
     Returns the term unchanged if it exists, a fuzzy match if one is close
@@ -98,7 +90,7 @@ def resolve_vocabulary_term(term: str) -> str:
 
     Raises TermResolutionError if no resolution is possible.
     """
-    vocab, vocab_list = get_vocabulary()
+    vocab, vocab_list = get_vocabulary(book_ids)
 
     if term in vocab:
         return term
@@ -141,7 +133,7 @@ class Substitution:
 
 
 def autocorrect_term_tree(
-    tree: TermNode | OpNode,
+    tree: TermNode | OpNode, book_ids: tuple[BookIndex, ...]
 ) -> tuple[TermNode | OpNode, list[Substitution]]:
     """Walk the tree and resolve every term against the vocabulary.
 
@@ -152,7 +144,7 @@ def autocorrect_term_tree(
 
     def walk(node: TermNode | OpNode) -> TermNode | OpNode:
         if isinstance(node, TermNode):
-            resolved = resolve_vocabulary_term(node.term)
+            resolved = resolve_vocabulary_term(node.term, book_ids)
             if resolved != node.term:
                 substitutions.append(
                     Substitution(original=node.term, resolved=resolved)
@@ -182,7 +174,7 @@ def llm_generate_expression(message: str) -> str:
 
 
 def process_describe_query(
-    message: str,
+    message: str, book_ids: tuple[BookIndex, ...]
 ) -> tuple[str, list[str], list[Substitution]]:
     """End-to-end: natural language in, resolved expression out.
 
@@ -200,7 +192,7 @@ def process_describe_query(
             f"Failed to parse LLM output into a valid expression: '{raw_expression}'"
         )
 
-    resolved_tree, substitutions = autocorrect_term_tree(tree)
+    resolved_tree, substitutions = autocorrect_term_tree(tree, book_ids)
 
     expression = serialize_expression(resolved_tree, strip_outer=True)
     terms = extract_terms(resolved_tree)

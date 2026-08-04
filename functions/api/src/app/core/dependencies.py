@@ -1,13 +1,16 @@
 import os
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
-from typing import Any, cast
+from typing import Annotated, Any, cast
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi_cache import FastAPICache
 from fastapi_cache.backends.redis import RedisBackend
 from fastapi_cache.decorator import cache as fastapi_cache_decorator
 from redis import asyncio as aioredis
+
+from app.core.services import BooksMetadataCache
+from shared.tables.pipeline import PipelineTable, get_pipeline_table
 
 REDIS_URL = os.environ.get("REDIS_URL")
 
@@ -30,3 +33,19 @@ async def lifespan(app: FastAPI):
             await redis.aclose()
     else:
         yield
+
+
+PipelineTableDep = Annotated[PipelineTable, Depends(get_pipeline_table)]
+
+books_metadata_cache: BooksMetadataCache | None = None
+
+
+def get_books_metadata_cache(table: PipelineTableDep) -> BooksMetadataCache:
+
+    global books_metadata_cache
+    if books_metadata_cache is None or books_metadata_cache.table is not table:
+        books_metadata_cache = BooksMetadataCache(table)
+    return books_metadata_cache
+
+
+BooksMetadataCacheDep = Annotated[BooksMetadataCache, Depends(get_books_metadata_cache)]

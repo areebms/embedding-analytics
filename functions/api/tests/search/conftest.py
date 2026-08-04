@@ -5,11 +5,19 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
+from app.core.dependencies import get_books_metadata_cache
+from app.core.services import BooksMetadataCache
+from app.search.constants import NUM_LOCAL_NEAREST_TERMS
 from app.search.dependencies import get_books_term_cache
 from app.search.services.semantic_drift import BooksTermCache
 from shared.tables.book_terms import get_book_term_table
 
 os.environ.pop("REDIS_URL", None)
+
+NAMED_VOCAB = ["labour", "value", "wage", "rent", "stock", "price", "profit", "capital"]
+FILLER_VOCAB = [f"filler{n:03d}" for n in range(NUM_LOCAL_NEAREST_TERMS)]
+VOCAB = NAMED_VOCAB + FILLER_VOCAB
+
 
 # -- Helpers -----------------------------------------------------------------
 
@@ -32,6 +40,26 @@ def make_term_entry(
         "tags": tags if tags is not None else {"N"},
         "vectors": [bytes(arr16[i].tobytes()) for i in range(arr16.shape[0])],
     }
+
+
+def book_rows(book_seed, vocab=VOCAB, n_seeds=5):
+    return {
+        term: make_term_entry(term, n_seeds=n_seeds, seed=book_seed * 100 + i)
+        for i, term in enumerate(vocab)
+    }
+
+
+def set_multi_book_table(term_table, books):
+
+    def get_entries(book_id, fields=None):
+        return list(books.get(book_id.source_id, {}).values())
+
+    def batch_get_entries(terms, book_id, fields=None):
+        entries = books.get(book_id.source_id, {})
+        return [entries[t] for t in terms if t in entries]
+
+    term_table.get_entries.side_effect = get_entries
+    term_table.batch_get_entries.side_effect = batch_get_entries
 
 
 def set_term_table(term_table, entries_by_term, book_id="gutenberg-1"):
@@ -57,9 +85,6 @@ def set_term_table(term_table, entries_by_term, book_id="gutenberg-1"):
 @pytest.fixture
 def mock_pipeline_table():
     """Pipeline table stub with one aligned book.
-
-    get_vocabulary iterates book IDs from this table before querying terms,
-    so at least one entry with s3_prefix_models must be present.
     """
     table = MagicMock()
     table.get_all_entries.return_value = [
@@ -76,6 +101,12 @@ def mock_term_table():
     table.get_entries.return_value = []
     table.batch_get_entries.return_value = []
     return table
+
+
+@pytest.fixture
+def mock_books_metadata_cache(mock_pipeline_table):
+    """The pipeline-metadata cache for one test."""
+    return BooksMetadataCache(mock_pipeline_table)
 
 
 @pytest.fixture
@@ -103,19 +134,40 @@ def patch_openai(monkeypatch):
 
 
 @pytest.fixture
-def patch_tables(monkeypatch, mock_pipeline_table, mock_term_table, mock_books_cache):
+def patch_tables(
+    monkeypatch,
+    mock_pipeline_table,
+    mock_term_table,
+    mock_books_cache,
+    mock_books_metadata_cache,
+):
     """Patch search-route storage entry points."""
     from main import app
 
     app.dependency_overrides[get_book_term_table] = lambda: mock_term_table
     app.dependency_overrides[get_books_term_cache] = lambda: mock_books_cache
-    monkeypatch.setattr("app.search.services.describe.get_pipeline_table", lambda: mock_pipeline_table)
-    monkeypatch.setattr("app.search.services.describe.get_book_term_table", lambda: mock_term_table)
+    app.dependency_overrides[get_books_metadata_cache] = (
+        lambda: mock_books_metadata_cache
+    )
+    monkeypatch.setattr(
+        "app.search.services.describe.get_book_term_table", lambda: mock_term_table
+    )
     yield mock_pipeline_table, mock_term_table
     # Pop rather than clear(): the list-route fixtures register their own
     # overrides on this same app object.
     app.dependency_overrides.pop(get_book_term_table, None)
     app.dependency_overrides.pop(get_books_term_cache, None)
+    app.dependency_overrides.pop(get_books_metadata_cache, None)
+
+
+@pytest.fixture
+def term_table(patch_tables):
+    return patch_tables[1]
+
+
+@pytest.fixture
+def pipeline_table(patch_tables):
+    return patch_tables[0]
 
 
 @pytest.fixture

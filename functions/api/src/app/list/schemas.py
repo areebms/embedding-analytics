@@ -1,6 +1,6 @@
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel
 
-from shared.commons import BookIndex
+from app.core.services import BookMetadata
 
 
 class BookResponse(BaseModel):
@@ -10,13 +10,15 @@ class BookResponse(BaseModel):
     title: str
     published_year: int
 
-    @model_validator(mode="before")
     @classmethod
-    def from_entry(cls, data: dict) -> dict:
-        if "platform_data" in data:
-            data["id"] = BookIndex.parse(data.pop("platform_data")).source_id
-            data["label"] = f"{data['author'].split(',')[0]} ({data['published_year']})"
-        return data
+    def from_book_metadata(cls, data: BookMetadata) -> "BookResponse":
+        return cls(
+            id=data.book_id.source_id,
+            label=f"{data.author.split(',')[0]} ({data.published_year})",
+            author=data.author,
+            title=data.title,
+            published_year=data.published_year,
+        )
 
 
 class TermResponse(BaseModel):

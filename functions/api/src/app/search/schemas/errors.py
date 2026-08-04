@@ -3,11 +3,13 @@ from typing import ClassVar, Literal
 
 from pydantic import BaseModel
 
+from app.search.constants import MIN_MATCHING_BOOKS
+
 
 class ExpressionAbsentResponse(BaseModel):
     openapi_description: ClassVar[str] = (
-        "One or more terms in the expression don't exist in the pinned book, "
-        "so there's nothing to chart."
+        "One or more terms in the expression don't exist in the selected book, "
+        "so there is nothing to compare against."
     )
 
     reason: Literal["expression_absent"] = "expression_absent"
@@ -18,11 +20,11 @@ class ExpressionAbsentResponse(BaseModel):
 class QueryInTooFewBooksResponse(BaseModel):
 
     openapi_description: ClassVar[str] = (
-        "Fewer than two of the requested books carry the query."
+        f"Fewer than {MIN_MATCHING_BOOKS} of the requested books carry the query."
     )
 
     reason: Literal["query_in_too_few_books"] = "query_in_too_few_books"
-    book_id: int | None = None  # the pinned book, null when unpinned
+    book_id: int | None = None  # the selected book, null when none was selected
 
 
 class TermResolutionResponse(BaseModel):

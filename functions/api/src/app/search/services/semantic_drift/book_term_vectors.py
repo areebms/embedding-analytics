@@ -56,15 +56,39 @@ class BooksTermCache:
 
     def __init__(self, table: BookTermTable):
         self.table = table
-        self.cache: dict[BookIndex, BookTermVectors] = {}
+        self.books_term_vectors: dict[BookIndex, BookTermVectors] = {}
+        self.shared_terms_index: dict[
+            tuple[BookIndex, BookIndex], tuple[np.ndarray, np.ndarray]
+        ] = {}
 
     def __getitem__(self, book_id: BookIndex) -> BookTermVectors:
-        return self.cache[book_id]
+        return self.books_term_vectors[book_id]
+
+    def get_shared_term_indexes(
+        self, a_book_id: BookIndex, b_book_id: BookIndex
+    ) -> tuple[np.ndarray, np.ndarray]:
+
+        key = (a_book_id, b_book_id)
+        if key not in self.shared_terms_index:
+            a_terms, b_terms = self[a_book_id].terms, self[b_book_id].terms
+
+            if not len(a_terms) or not len(b_terms):
+                empty = np.empty(0, dtype=np.intp)
+                a_indexes = b_indexes = empty
+            else:
+                position = np.searchsorted(b_terms, a_terms)
+                matched = b_terms[np.minimum(position, len(b_terms) - 1)] == a_terms
+                a_indexes, b_indexes = np.flatnonzero(matched), position[matched]
+
+            self.shared_terms_index[key] = (a_indexes, b_indexes)
+            self.shared_terms_index[(b_book_id, a_book_id)] = (b_indexes, a_indexes)
+
+        return self.shared_terms_index[key]
 
     def load_book(self, book_id: BookIndex) -> BookTermVectors:
 
-        if book_id in self.cache:
-            return self.cache[book_id]
+        if book_id in self.books_term_vectors:
+            return self.books_term_vectors[book_id]
 
         terms, term_vectors = [], []
         for entry in self.table.get_entries(
@@ -91,10 +115,10 @@ class BooksTermCache:
                 )
             )
 
-        self.cache[book_id] = BookTermVectors(terms, term_vectors)
+        self.books_term_vectors[book_id] = BookTermVectors(terms, term_vectors)
 
         request_log.get({}).setdefault("cache_warmed", {})[str(book_id)] = len(terms)
-        return self.cache[book_id]
+        return self.books_term_vectors[book_id]
 
     def warm_cache(self, book_ids: Iterable[BookIndex]):
         """Load several books' term matrices concurrently."""
@@ -102,7 +126,7 @@ class BooksTermCache:
             futures = []
             pending: set[BookIndex] = set()
             for book_id in book_ids:
-                if book_id not in self.cache and book_id not in pending:
+                if book_id not in self.books_term_vectors and book_id not in pending:
                     pending.add(book_id)
                     futures.append(
                         pool.submit(
@@ -114,9 +138,16 @@ class BooksTermCache:
                 future.result()
 
     def get_books_with_search_query(self, book_ids, search_query):
-        return [book_id for book_id in book_ids if not self[book_id].missing_terms(search_query.terms)]
+        return [
+            book_id
+            for book_id in book_ids
+            if not self[book_id].missing_terms(search_query.terms)
+        ]
 
     def get_missing_terms_by_book(
         self, book_ids: Iterable[BookIndex], terms: Iterable[str]
     ) -> dict[BookIndex, set[str]]:
         return {book_id: self[book_id].missing_terms(terms) for book_id in book_ids}
+
+    def get_stored_book_ids(self):
+        return list(self.books_term_vectors)

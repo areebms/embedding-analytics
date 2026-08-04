@@ -75,8 +75,9 @@ FALLBACK_PROMPT = (
     "Candidates: {candidates}"
 )
 
-MIN_MATCHING_BOOKS = 2
-NUM_LOCAL_NEAREST_TERMS = 75  # See docs/anchor-selection-literature-review.md.
-MIN_LOCAL_NEAREST_TERMS = 2
+MIN_MATCHING_BOOKS = 4
+NUM_LOCAL_NEAREST_TERMS = 75
+MIN_LOCAL_NEAREST_TERMS = NUM_LOCAL_NEAREST_TERMS
 NEAREST_TERM_COUNT = 10
 BARE_TERM_PATTERN = re.compile(r"[^\s()+-]+")
+NUM_SIMILAR_TERMS = 100  # relevance floor before ranking by slope

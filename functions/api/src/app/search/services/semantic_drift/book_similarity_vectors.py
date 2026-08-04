@@ -1,0 +1,159 @@
+from __future__ import annotations
+
+from collections.abc import Iterable, Sequence
+
+import numpy as np
+
+from app.search.constants import MIN_LOCAL_NEAREST_TERMS, NUM_LOCAL_NEAREST_TERMS
+from app.search.errors import MissingTermsError, NoLocalNearestTermsError
+from app.search.services.semantic_drift.book_term_vectors import BooksTermCache
+from app.search.services.semantic_drift.local_mean_similarities import (
+    LocalCosineSimilarity,
+    SearchExpr,
+)
+from app.search.services.semantic_drift.utils import center_vectors, normalize_vectors
+from shared.commons import BookIndex
+
+
+class BookSimilarityVectors:
+
+    def __init__(
+        self,
+        books_term_cache: BooksTermCache,
+        book_id: BookIndex,
+        query: SearchExpr,
+        similarity_vectors: np.ndarray,
+    ):
+        self.book_id = book_id
+        self.query = query
+        self.books_term_cache = books_term_cache
+
+        is_valid = ~np.isin(books_term_cache[book_id].terms, query.terms)
+        self.masked_iloc = np.cumsum(is_valid) - 1
+
+        self.terms = books_term_cache[book_id].terms[is_valid]
+        self.similarity_vectors = similarity_vectors[:, is_valid]
+        self.is_valid = is_valid
+
+    @staticmethod
+    def get_similarity_vectors(query_vectors: np.ndarray, term_vectors: np.ndarray):
+        # return has shape (n_seeds, n_terms)
+        n_seeds = min(query_vectors.shape[0], term_vectors.shape[0])
+        return np.matmul(term_vectors[:n_seeds], query_vectors[:n_seeds, :, None])[
+            ..., 0
+        ]
+
+    def get_local_cosine_similarity(self, peer: BookSimilarityVectors):
+        # returns one value per seed
+
+        indexes, peer_indexes = self.books_term_cache.get_shared_term_indexes(
+            self.book_id, peer.book_id
+        )
+        local_indexes = self.is_valid[indexes] & peer.is_valid[peer_indexes]
+        shared_indexes = self.masked_iloc[indexes[local_indexes]]
+        shared_peer_indexes = peer.masked_iloc[peer_indexes[local_indexes]]
+
+        if len(shared_indexes) < MIN_LOCAL_NEAREST_TERMS:
+            raise NoLocalNearestTermsError(
+                self.book_id, peer.book_id, len(shared_indexes)
+            )
+
+        # vectors of terms closest to the expression.
+        shared_similarity_vectors = self.similarity_vectors[:, shared_indexes].mean(
+            axis=0
+        )
+        sorted_iloc = np.argsort(-shared_similarity_vectors)[:NUM_LOCAL_NEAREST_TERMS]
+
+        n_seeds = min(
+            self.similarity_vectors.shape[0], peer.similarity_vectors.shape[0]
+        )
+
+        # Similarity vectors for terms shared between books.
+        shared_book_vectors = self.similarity_vectors[:n_seeds][
+            :, shared_indexes[sorted_iloc]
+        ]
+        shared_peer_vectors = peer.similarity_vectors[:n_seeds][
+            :, shared_peer_indexes[sorted_iloc]
+        ]
+        local_similarity = np.sum(
+            normalize_vectors(center_vectors(shared_book_vectors))
+            * normalize_vectors(center_vectors(shared_peer_vectors)),
+            axis=1,
+        )
+        return LocalCosineSimilarity(local_similarity, len(sorted_iloc))
+
+
+class BooksSimilarityCache:
+
+    def __init__(self, books_term_cache: BooksTermCache):
+        self.books_term_cache = books_term_cache
+        self.book_similarity_vectors: dict[
+            tuple[BookIndex, str], BookSimilarityVectors
+        ] = {}
+
+    def __getitem__(self, key: tuple[BookIndex, str]) -> BookSimilarityVectors:
+        return self.book_similarity_vectors[key]
+
+    def load_book(
+        self, book_id: BookIndex, expr: SearchExpr
+    ) -> BookSimilarityVectors:
+
+        key = (book_id, expr.serialized)
+        if key in self.book_similarity_vectors:
+            return self.book_similarity_vectors[key]
+
+        book_term_vectors = self.books_term_cache[book_id]
+        missing = book_term_vectors.missing_terms(expr.terms)
+        if missing:
+            raise MissingTermsError(missing, book_id)
+
+        return self._store(
+            book_id,
+            expr,
+            BookSimilarityVectors.get_similarity_vectors(
+                book_term_vectors.get_expr_vectors(expr.tree),
+                book_term_vectors.term_vectors,
+            ),
+        )
+
+    def _store(
+        self, book_id: BookIndex, expr: SearchExpr, similarity_vectors: np.ndarray
+    ) -> BookSimilarityVectors:
+        key = (book_id, expr.serialized)
+        self.book_similarity_vectors[key] = BookSimilarityVectors(
+            self.books_term_cache, book_id, expr, similarity_vectors
+        )
+        return self.book_similarity_vectors[key]
+
+    def warm_cache(self, book_ids: Iterable[BookIndex], exprs: Sequence[SearchExpr]):
+        """One matmul per book across every expression, instead of one each."""
+
+        for book_id in book_ids:
+            book_exprs = [
+                expr
+                for expr in exprs
+                if (book_id, expr.serialized) not in self.book_similarity_vectors
+                and not self.books_term_cache[book_id].missing_terms(expr.terms)
+            ]
+            if not book_exprs:
+                continue
+
+            book_expr_vectors = np.stack(
+                [
+                    self.books_term_cache[book_id].get_expr_vectors(expr.tree)
+                    for expr in book_exprs
+                ],
+                axis=-1,
+            )
+            n_seeds = min(
+                book_expr_vectors.shape[0],
+                self.books_term_cache[book_id].term_vectors.shape[0],
+            )
+            # (n_seeds, n_terms, dim) @ (n_seeds, dim, n_exprs)
+            book_expr_similarities = np.matmul(
+                self.books_term_cache[book_id].term_vectors[:n_seeds],
+                book_expr_vectors[:n_seeds],
+            )
+
+            for index, expr in enumerate(book_exprs):
+                self._store(book_id, expr, book_expr_similarities[..., index])

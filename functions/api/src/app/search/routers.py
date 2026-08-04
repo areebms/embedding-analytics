@@ -51,7 +51,9 @@ router = APIRouter()
         404: TermResolutionResponse,
     },
 )
-def parse_describe(request: ParseDescribeRequest, books_metadata_cache: BooksMetadataCacheDep):
+def parse_describe(
+    request: ParseDescribeRequest, books_metadata_cache: BooksMetadataCacheDep
+):
     add_to_log(query=request.message)
     try:
         expression, terms, substitutions = process_describe_query(
@@ -174,12 +176,15 @@ def get_semantic_drift(
 
     ranked_at = time.perf_counter()
 
-    measured_terms = set(search_expr.terms) | set(nearest_terms)
     missing_terms_by_book = books_term_cache.get_missing_terms_by_book(
-        book_ids, measured_terms
+        book_ids,
+        set(search_expr.terms) | {nearest_term.term for nearest_term in nearest_terms},
     )
 
-    exprs = [search_expr, *map(SearchExpr.from_query, nearest_terms)]
+    exprs = [
+        search_expr,
+        *(SearchExpr.from_query(nearest_term.term) for nearest_term in nearest_terms),
+    ]
     books_similarity_cache.warm_cache(
         book_ids if selected_book_id is None else [*book_ids, selected_book_id],
         exprs,
@@ -203,13 +208,22 @@ def get_semantic_drift(
     )
 
     nearest_term_data = [
-        TermData(term=term, books=book_data)
-        for term, book_data in zip(nearest_terms, expr_book_data[1:])
+        TermData(
+            **nearest_term.model_dump(),
+            tags=books_term_cache.get_term_tags(valid_book_ids, nearest_term.term),
+            books=book_data,
+        )
+        for nearest_term, book_data in zip(nearest_terms, expr_book_data[1:])
     ]
 
     book_summaries = [
         BookSummary(
-            id=book_id.source_id, missing_terms=sorted(missing_terms_by_book[book_id])
+            id=book_id.source_id,
+            n_shared_terms=books_term_cache.get_n_shared_terms(
+                book_id,
+                valid_book_ids if selected_book_id is None else [selected_book_id],
+            ),
+            missing_terms=sorted(missing_terms_by_book[book_id]),
         )
         for book_id in book_ids
     ]

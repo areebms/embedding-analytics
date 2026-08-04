@@ -18,7 +18,11 @@ class BookTermVectors:
     DTYPE = np.float32  # the stored vectors are float16; float64 buys no precision
 
     def __init__(
-        self, terms: Sequence[str] | np.ndarray, term_vectors: list[np.ndarray]
+        self,
+        terms: Sequence[str] | np.ndarray,
+        term_vectors: list[np.ndarray],
+        term_counts: Sequence[int],
+        term_tags: Sequence[frozenset[str]],
     ):
         terms = np.array(terms, dtype=np.str_)
 
@@ -26,6 +30,8 @@ class BookTermVectors:
             self.terms = terms
             self.term_iloc: dict[str, int] = {}
             self.term_vectors = np.zeros((0, 0, 0), dtype=self.DTYPE)
+            self.term_counts = np.zeros(0, dtype=np.int64)
+            self.term_tags: list[frozenset[str]] = []
             return
 
         order = np.argsort(terms)
@@ -34,6 +40,19 @@ class BookTermVectors:
 
         n_seeds = min(term_vector.shape[0] for term_vector in term_vectors)
         self.term_vectors = np.stack([term_vectors[i][:n_seeds] for i in order], axis=1)
+
+        self.term_counts = np.asarray(term_counts, dtype=np.int64)[order]
+        self.term_tags = [term_tags[i] for i in order]
+
+    def get_term_count(self, term: str) -> int:
+        """Occurrences of the term in this book; 0 if the book does not use it."""
+        iloc = self.term_iloc.get(term)
+        return 0 if iloc is None else int(self.term_counts[iloc])
+
+    def get_term_tags(self, term: str) -> frozenset[str]:
+        """Part-of-speech codes this book tagged the term with."""
+        iloc = self.term_iloc.get(term)
+        return frozenset() if iloc is None else self.term_tags[iloc]
 
     def get_expr_vectors(self, node: TermNode | OpNode) -> np.ndarray:
 
@@ -90,9 +109,9 @@ class BooksTermCache:
         if book_id in self.books_term_vectors:
             return self.books_term_vectors[book_id]
 
-        terms, term_vectors = [], []
+        terms, term_vectors, term_counts, term_tags = [], [], [], []
         for entry in self.table.get_entries(
-            book_id, fields=["term", "tags", "vectors"]
+            book_id, fields=["term", "tags", "vectors", "count_"]
         ):
             if entry.get("tags") == self.ADVERB:
                 continue
@@ -101,6 +120,8 @@ class BooksTermCache:
                 continue
 
             terms.append(entry["term"])
+            term_counts.append(int(entry.get("count_", 0)))  # stored as a Decimal
+            term_tags.append(frozenset(entry.get("tags") or ()))
             term_vectors.append(
                 normalize_vectors(
                     np.stack(
@@ -115,7 +136,9 @@ class BooksTermCache:
                 )
             )
 
-        self.books_term_vectors[book_id] = BookTermVectors(terms, term_vectors)
+        self.books_term_vectors[book_id] = BookTermVectors(
+            terms, term_vectors, term_counts, term_tags
+        )
 
         request_log.get({}).setdefault("cache_warmed", {})[str(book_id)] = len(terms)
         return self.books_term_vectors[book_id]
@@ -148,6 +171,24 @@ class BooksTermCache:
         self, book_ids: Iterable[BookIndex], terms: Iterable[str]
     ) -> dict[BookIndex, set[str]]:
         return {book_id: self[book_id].missing_terms(terms) for book_id in book_ids}
+
+    def get_term_tags(self, book_ids: Iterable[BookIndex], term: str) -> list[str]:
+        tags: set[str] = set()
+        for book_id in book_ids:
+            tags |= self[book_id].get_term_tags(term)
+        return sorted(tags)
+
+    def get_n_shared_terms(
+        self, book_id: BookIndex, peer_ids: Iterable[BookIndex]
+    ) -> int:
+        return max(
+            (
+                len(self.get_shared_term_indexes(book_id, peer_id)[0])
+                for peer_id in peer_ids
+                if peer_id != book_id
+            ),
+            default=0,
+        )
 
     def get_stored_book_ids(self):
         return list(self.books_term_vectors)

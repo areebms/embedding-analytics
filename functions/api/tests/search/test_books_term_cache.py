@@ -127,7 +127,7 @@ def test_get_missing_terms_by_book_asks_only_the_books_named():
     books = _term_cache()
     for source_id in (1, 3):
         books.load_book(BookIndex(source_id))
-    books.books_term_vectors[BookIndex(2)] = BookTermVectors([], [])
+    books.books_term_vectors[BookIndex(2)] = BookTermVectors([], [], [], [])
 
     book_ids = [BookIndex(2), BookIndex(1)]
     assert books.get_missing_terms_by_book(book_ids, ["labour", "wage"]) == {
@@ -219,7 +219,7 @@ def test_shared_term_indexes_are_cached_both_ways_round():
 
 def test_shared_term_indexes_of_an_empty_book_are_empty():
     books = _two_books(VOCAB, VOCAB)
-    books.books_term_vectors[BookIndex(2)] = BookTermVectors([], [])
+    books.books_term_vectors[BookIndex(2)] = BookTermVectors([], [], [], [])
 
     book_indexes, peer_indexes = books.get_shared_term_indexes(
         BookIndex(1), BookIndex(2)

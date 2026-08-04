@@ -4,13 +4,10 @@ from collections.abc import Iterable, Sequence
 
 import numpy as np
 
-from app.search.constants import MIN_LOCAL_NEAREST_TERMS, NUM_LOCAL_NEAREST_TERMS
+from app.search.constants import NUM_LOCAL_NEAREST_TERMS
 from app.search.errors import MissingTermsError, NoLocalNearestTermsError
 from app.search.services.semantic_drift.book_term_vectors import BooksTermCache
-from app.search.services.semantic_drift.local_mean_similarities import (
-    LocalCosineSimilarity,
-    SearchExpr,
-)
+from app.search.services.semantic_drift.local_mean_similarities import SearchExpr
 from app.search.services.semantic_drift.utils import center_vectors, normalize_vectors
 from shared.commons import BookIndex
 
@@ -53,7 +50,7 @@ class BookSimilarityVectors:
         shared_indexes = self.masked_iloc[indexes[local_indexes]]
         shared_peer_indexes = peer.masked_iloc[peer_indexes[local_indexes]]
 
-        if len(shared_indexes) < MIN_LOCAL_NEAREST_TERMS:
+        if len(shared_indexes) < NUM_LOCAL_NEAREST_TERMS:
             raise NoLocalNearestTermsError(
                 self.book_id, peer.book_id, len(shared_indexes)
             )
@@ -80,7 +77,7 @@ class BookSimilarityVectors:
             * normalize_vectors(center_vectors(shared_peer_vectors)),
             axis=1,
         )
-        return LocalCosineSimilarity(local_similarity, len(sorted_iloc))
+        return local_similarity
 
 
 class BooksSimilarityCache:

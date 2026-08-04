@@ -87,6 +87,7 @@ class BookSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")  # see BookLocalMeanSimilarity
 
     id: int
+    n_shared_terms: int
     missing_terms: list[str] = Field(default_factory=list)
 
 
@@ -97,16 +98,27 @@ class BookLocalMeanSimilarity(BaseModel):
     book_id: int
     similarity: float
     similarity_ci: tuple[float, float]
+    similarity_sd: float
+    count: int
     n_seeds: int
-    min_local_terms: int
     n_books: int
 
 
-class TermData(BaseModel):
+class TermStats(BaseModel):
+    """A returned term and the statistics that put it there."""
 
     model_config = ConfigDict(extra="forbid")
 
     term: str
+    mean_similarity: float
+    n_books_with_term: int  # not n_books, which on a score means peers compared
+    slope: float
+    r_squared: float
+
+
+class TermData(TermStats):
+
+    tags: list[str]
     books: list[BookLocalMeanSimilarity]
 
 

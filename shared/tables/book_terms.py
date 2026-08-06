@@ -7,6 +7,8 @@ from shared.tables.base import BaseTable
 
 BOOK_TERM_TABLE = os.getenv("BOOK_TERM_TABLE")
 
+ADVERB_TAGS = {"R"}
+
 
 _book_term_table = None
 
@@ -52,4 +54,6 @@ class BookTermTable(BaseTable):
         return items
 
     def batch_get_entries(self, terms, platform_data, fields=None):
-        return super().batch_get_entries([{"term": term, "platform_data": platform_data} for term in terms], fields)
+        return super().batch_get_entries(
+            [{"term": term, "platform_data": platform_data} for term in terms], fields
+        )

@@ -5,41 +5,18 @@ from typing import Literal, NamedTuple
 import numpy as np
 
 from app.search.constants import (
-    BARE_TERM_PATTERN,
     MIN_MATCHING_BOOKS,
-    NUM_SIMILAR_TERMS,
     NEAREST_TERM_COUNT,
+    NUM_SIMILAR_TERMS,
     T_CRIT_95,
 )
-from app.search.errors import MissingTermsError, NoLocalNearestTermsError
-from app.search.schemas.semantic_drift import (
-    BookLocalMeanSimilarity,
-    OpNode,
-    TermNode,
-    TermStats,
+from app.search.errors import NoLocalNearestTermsError
+from app.search.schemas.semantic_drift import BookLocalMeanSimilarity, TermStats
+from app.search.services.semantic_drift.book_similarity_vectors import (
+    BooksSimilarityCache,
 )
-from app.search.services.utils import extract_terms, serialize_expression
+from app.search.services.semantic_drift.utils import SearchExpr
 from shared.commons import BookIndex
-
-
-class SearchExpr(NamedTuple):
-
-    tree: TermNode | OpNode
-    terms: list[str]
-    serialized: str
-
-    @classmethod
-    def from_query(cls, query: TermNode | OpNode | str) -> SearchExpr:
-        if isinstance(query, str):
-
-            if not BARE_TERM_PATTERN.fullmatch(query):
-                raise ValueError(f"expected a single bare term, got {query!r}")
-            query = TermNode(term=query)
-        return cls(
-            query,
-            extract_terms(query),
-            serialize_expression(query, strip_outer=True),
-        )
 
 
 class TrendFit(NamedTuple):
@@ -80,11 +57,11 @@ def get_trend_fits(
 
 
 def get_nearest_terms(
-    books_similarity_cache,
+    books_similarity_cache: BooksSimilarityCache,
     book_ids: list[BookIndex],
     query: SearchExpr,
     book_years: dict[BookIndex, int],
-    sort: Literal["mean_similarity", "slope"] = "mean_similarity",
+    sort: Literal["mean_similarity", "slope", "variance"] = "mean_similarity",
     *,
     selected_book_id: BookIndex | None = None,
 ) -> list[TermStats]:
@@ -98,69 +75,87 @@ def get_nearest_terms(
         [book_vectors.similarity_vectors.mean(axis=0) for book_vectors in books_vectors]
     )
 
-    terms, term_iloc = np.unique(all_terms, return_inverse=True)
-    total_similarity = np.bincount(term_iloc, weights=all_similarities)
+    # Every book's terms are already sorted, so the concatenation is one run per
+    # book, which a merge sort walks at about twice np.unique's quicksort pace.
+    order = np.argsort(all_terms, kind="stable")
+    sorted_terms = all_terms[order]
+    is_first = np.ones(len(all_terms), dtype=bool)
+    np.not_equal(sorted_terms[1:], sorted_terms[:-1], out=is_first[1:])
+
+    terms = sorted_terms[is_first]
+    term_iloc = np.empty(len(all_terms), dtype=np.intp)
+    term_iloc[order] = np.cumsum(is_first) - 1
+
     book_count = np.bincount(term_iloc)  # Terms are unique within a book
+    mean_similarity = np.bincount(term_iloc, weights=all_similarities) / book_count
+
+    # How much the books disagree about where the term sits, not about how far
+    # away it is: a term holding one cosine throughout still spreads if the
+    # terms nearest it move. Two-pass, because summing the squares
+    # themselves leaves float32 rounding behind instead. A term only one book
+    # carries spreads not at all.
+    deviation = all_similarities - mean_similarity[term_iloc]
+    variance = np.bincount(term_iloc, weights=deviation**2) / np.maximum(
+        book_count - 1, 1
+    )
 
     is_valid = (book_count >= MIN_MATCHING_BOOKS) & ~np.isin(terms, query.terms)
     if selected_book_id is not None:
+        # Both arrays are sorted, so this beats np.isin. The "" sentinel catches
+        # terms sorting past the book's last one, and no real term equals it.
         selected_terms = books_similarity_cache.books_term_cache[selected_book_id].terms
-        if len(selected_terms):
-            position = np.minimum(
-                np.searchsorted(selected_terms, terms), len(selected_terms) - 1
-            )
-            is_valid &= selected_terms[position] == terms
-        else:
-            is_valid[:] = False
+        position = np.searchsorted(selected_terms, terms)
+        is_valid &= np.append(selected_terms, "")[position] == terms
     valid_iloc = np.flatnonzero(is_valid)
 
-    mean_similarity = total_similarity[valid_iloc] / book_count[valid_iloc]
-    most_similar_iloc = valid_iloc[np.argsort(-mean_similarity, kind="stable")]
+    # Every sort ranks the same relevance-floored pool and differs only in the
+    # key. Sorted so that ties break alphabetically rather than by relevance rank.
+    most_similar_iloc = valid_iloc[
+        np.argsort(-mean_similarity[valid_iloc], kind="stable")
+    ]
+    pool_iloc = np.sort(most_similar_iloc[:NUM_SIMILAR_TERMS])
 
-    years = [book_years.get(book_vectors.book_id) for book_vectors in books_vectors]
+    # Fit the pool against publication year, in pool order. Undated books
+    # contribute no rows, and an unfittable term scores zero.
+    group = np.full(len(terms), -1)
+    group[pool_iloc] = np.arange(len(pool_iloc))
+    row_group = group[term_iloc]
+
+    # Undated books carry NaN, which drops their rows out of the fit below.
+    years = [
+        float(book_years.get(book_vectors.book_id, np.nan))
+        for book_vectors in books_vectors
+    ]
     n_terms_per_book = [len(book_vectors.terms) for book_vectors in books_vectors]
-    all_years = np.repeat([float(year or 0) for year in years], n_terms_per_book)
-    is_dated = np.repeat([year is not None for year in years], n_terms_per_book)
+    all_years = np.repeat(years, n_terms_per_book)
 
-    def fit_trends(target_iloc: np.ndarray) -> TrendFit:
-        """Fit each of `target_iloc`'s terms against publication year, in that
-        order. Undated books contribute no rows; an unfittable term scores zero."""
-
-        group = np.full(len(terms), -1)
-        group[target_iloc] = np.arange(len(target_iloc))
-        row_group = group[term_iloc]
-        is_fit_row = (row_group >= 0) & is_dated
-
-        return get_trend_fits(
-            row_group[is_fit_row],
-            all_years[is_fit_row],
-            all_similarities[is_fit_row],
-            len(target_iloc),
-        )
+    is_fit_row = (row_group >= 0) & ~np.isnan(all_years)
+    trend = get_trend_fits(
+        row_group[is_fit_row],
+        all_years[is_fit_row],
+        all_similarities[is_fit_row],
+        len(pool_iloc),
+    )
 
     if sort == "mean_similarity":
-        ranked_iloc = most_similar_iloc[:NEAREST_TERM_COUNT]
+        rank_by = mean_similarity[pool_iloc]
     elif sort == "slope":
-        # Sorted so that ties break alphabetically rather than by relevance rank.
-        pool_iloc = np.sort(most_similar_iloc[:NUM_SIMILAR_TERMS])
-        ranked_iloc = pool_iloc[
-            np.argsort(-np.abs(fit_trends(pool_iloc).score), kind="stable")[
-                :NEAREST_TERM_COUNT
-            ]
-        ]
+        rank_by = np.abs(trend.score)
+    elif sort == "variance":
+        rank_by = variance[pool_iloc]
     else:
         raise ValueError(f"unknown sort {sort!r}")
 
-    trend = fit_trends(ranked_iloc)
+    ranked = np.argsort(-rank_by, kind="stable")[:NEAREST_TERM_COUNT]
     return [
         TermStats(
             term=str(terms[iloc]),
-            mean_similarity=float(total_similarity[iloc] / book_count[iloc]),
+            mean_similarity=float(mean_similarity[iloc]),
             n_books_with_term=int(book_count[iloc]),
             slope=float(trend.slope[rank]),
             r_squared=float(trend.r_squared[rank]),
         )
-        for rank, iloc in enumerate(ranked_iloc)
+        for rank, iloc in zip(ranked, pool_iloc[ranked])
     ]
 
 
@@ -198,20 +193,13 @@ def get_local_mean_similarity_per_book(
 
 
 def get_local_mean_similarities(
-    books_similarity_cache,
+    books_similarity_cache: BooksSimilarityCache,
     expr: SearchExpr,
     book_ids: list[BookIndex],
     selected_book_id: BookIndex | None = None,
 ) -> list[BookLocalMeanSimilarity]:
 
-    books_similarity_vectors = []
-    for book_id in book_ids:
-        try:
-            books_similarity_vectors.append(
-                books_similarity_cache.load_book(book_id, expr)
-            )
-        except MissingTermsError:
-            continue
+    books_similarity_vectors = books_similarity_cache.load_books(book_ids, expr)
 
     if selected_book_id is None:
         peers = books_similarity_vectors

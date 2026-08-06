@@ -14,7 +14,7 @@ from app.search.constants import PARSE_SYSTEM_PROMPT, FALLBACK_PROMPT
 from app.search.schemas.semantic_drift import OpNode, TermNode
 from app.search.errors import TermResolutionError
 from shared.commons import BookIndex
-from shared.tables.book_terms import get_book_term_table
+from shared.tables.book_terms import ADVERB_TAGS, get_book_term_table
 
 
 @lru_cache(maxsize=1)
@@ -27,7 +27,7 @@ def get_vocabulary(book_ids: tuple[BookIndex, ...]) -> tuple[set[str], list[str]
     term_table = get_book_term_table()
     for book_id in book_ids:
         for item in term_table.get_entries(book_id, fields=["term", "tags"]):
-            if item.get("tags") == {"R"}:
+            if item.get("tags") == ADVERB_TAGS:
                 continue
             terms.add(item["term"])
 

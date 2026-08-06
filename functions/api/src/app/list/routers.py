@@ -2,7 +2,7 @@ from fastapi import APIRouter
 
 from app.core.dependencies import BooksMetadataCacheDep, cache
 from app.list.schemas import BookResponse, TermResponse
-from shared.tables.book_terms import get_book_term_table
+from shared.tables.book_terms import ADVERB_TAGS, get_book_term_table
 
 router = APIRouter()
 
@@ -23,15 +23,15 @@ def terms(books_metadata_cache: BooksMetadataCacheDep):
     "Used in the dropdown"
     term_books = {}
     term_table = get_book_term_table()
-    for book_id in books_metadata_cache.book_ids:
-        for item in term_table.get_entries(book_id, fields=["term", "tags"]):
-            if item.get("tags") == {"R"}:
+    for book_index in books_metadata_cache.book_ids:
+        for item in term_table.get_entries(book_index, fields=["term", "tags"]):
+            if item.get("tags") == ADVERB_TAGS:
                 continue
 
             if item["term"] not in term_books:
                 term_books[item["term"]] = []
 
-            term_books[item["term"]].append(book_id)
+            term_books[item["term"]].append(book_index.source_id)
 
     return [
         {"term": term, "books": books}

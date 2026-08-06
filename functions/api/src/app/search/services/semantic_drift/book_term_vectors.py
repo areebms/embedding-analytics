@@ -10,7 +10,7 @@ from app.core.logging import request_log
 from app.search.schemas.semantic_drift import OpNode, TermNode
 from app.search.services.semantic_drift.utils import normalize_vectors
 from shared.commons import BookIndex
-from shared.tables.book_terms import BookTermTable
+from shared.tables.book_terms import ADVERB_TAGS, BookTermTable
 
 
 class BookTermVectors:
@@ -70,7 +70,6 @@ class BookTermVectors:
 
 class BooksTermCache:
 
-    ADVERB = {"R"}
     MAX_LOAD_WORKERS = 8
 
     def __init__(self, table: BookTermTable):
@@ -113,7 +112,7 @@ class BooksTermCache:
         for entry in self.table.get_entries(
             book_id, fields=["term", "tags", "vectors", "count_"]
         ):
-            if entry.get("tags") == self.ADVERB:
+            if entry.get("tags") == ADVERB_TAGS:
                 continue
 
             if "vectors" not in entry:
@@ -160,7 +159,9 @@ class BooksTermCache:
             for future in futures:
                 future.result()
 
-    def get_books_with_search_query(self, book_ids, search_query):
+    def get_books_with_search_query(
+        self, book_ids: Iterable[BookIndex], search_query
+    ) -> list[BookIndex]:
         return [
             book_id
             for book_id in book_ids
@@ -189,6 +190,3 @@ class BooksTermCache:
             ),
             default=0,
         )
-
-    def get_stored_book_ids(self):
-        return list(self.books_term_vectors)

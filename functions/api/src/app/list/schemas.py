@@ -23,4 +23,4 @@ class BookResponse(BaseModel):
 
 class TermResponse(BaseModel):
     term: str
-    books: list[str]
+    books: list[int]

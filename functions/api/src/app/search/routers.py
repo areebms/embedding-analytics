@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from app.core.dependencies import BooksMetadataCacheDep
 from app.core.logging import add_to_log
 from app.core.routing import post_route
-from app.core.services import BooksMetadataCache
+from app.search.constants import MIN_BOOKS_WITH_TERM
 from app.search.dependencies import BooksSimilarityCacheDep, BooksTermCacheDep
 from app.search.errors import ExpressionAbsentError, QueryInTooFewBooksError
 from app.search.schemas.describe import (
@@ -30,12 +30,11 @@ from app.search.schemas.semantic_drift import (
 )
 from app.search.services.describe import process_describe_query
 from app.search.services.semantic_drift import (
-    MIN_MATCHING_BOOKS,
     BooksSimilarityCache,
     BooksTermCache,
     SearchExpr,
+    get_comparative_terms,
     get_local_mean_similarities,
-    get_nearest_terms,
 )
 from shared.commons import BookIndex
 
@@ -84,11 +83,8 @@ def semantic_drift(
     request: SemanticDriftRequestBody,
     books_term_cache: BooksTermCacheDep,
     books_similarity_cache: BooksSimilarityCacheDep,
-    books_metadata_cache: BooksMetadataCacheDep,
 ):
-    return get_semantic_drift(
-        request, books_term_cache, books_similarity_cache, books_metadata_cache
-    )
+    return get_semantic_drift(request, books_term_cache, books_similarity_cache)
 
 
 @post_route(
@@ -114,14 +110,9 @@ def comparative_semantic_drift(
     request: SemanticDriftRequestBody,
     books_term_cache: BooksTermCacheDep,
     books_similarity_cache: BooksSimilarityCacheDep,
-    books_metadata_cache: BooksMetadataCacheDep,
 ):
     return get_semantic_drift(
-        request,
-        books_term_cache,
-        books_similarity_cache,
-        books_metadata_cache,
-        source_book_id,
+        request, books_term_cache, books_similarity_cache, source_book_id
     )
 
 
@@ -129,7 +120,6 @@ def get_semantic_drift(
     body: SemanticDriftRequestBody,
     books_term_cache: BooksTermCache,
     books_similarity_cache: BooksSimilarityCache,
-    books_metadata_cache: BooksMetadataCache,
     source_book_id: int | None = None,
 ) -> SemanticDriftResponse:
 
@@ -162,28 +152,26 @@ def get_semantic_drift(
 
     valid_book_ids = books_term_cache.get_books_with_search_query(book_ids, search_expr)
 
-    if len(valid_book_ids) < MIN_MATCHING_BOOKS:
+    if len(valid_book_ids) < MIN_BOOKS_WITH_TERM:
         raise QueryInTooFewBooksError(len(valid_book_ids), selected_book_id)
 
-    nearest_terms = get_nearest_terms(
+    comparative_terms = get_comparative_terms(
         books_similarity_cache,
         valid_book_ids,
         search_expr,
         selected_book_id=selected_book_id,
-        sort=request.sort,
-        book_years=books_metadata_cache.book_years,
     )
 
     ranked_at = time.perf_counter()
 
     missing_terms_by_book = books_term_cache.get_missing_terms_by_book(
         book_ids,
-        set(search_expr.terms) | {nearest_term.term for nearest_term in nearest_terms},
+        set(search_expr.terms) | {comparative_term.term for comparative_term in comparative_terms},
     )
 
     exprs = [
         search_expr,
-        *(SearchExpr.from_query(nearest_term.term) for nearest_term in nearest_terms),
+        *(SearchExpr.from_query(comparative_term.term) for comparative_term in comparative_terms),
     ]
     books_similarity_cache.warm_cache(
         book_ids if selected_book_id is None else [*book_ids, selected_book_id],
@@ -208,12 +196,8 @@ def get_semantic_drift(
     )
 
     nearest_term_data = [
-        TermData(
-            **nearest_term.model_dump(),
-            tags=books_term_cache.get_term_tags(valid_book_ids, nearest_term.term),
-            books=book_data,
-        )
-        for nearest_term, book_data in zip(nearest_terms, expr_book_data[1:])
+        TermData(**comparative_term.model_dump(), books=book_data)
+        for comparative_term, book_data in zip(comparative_terms, expr_book_data[1:])
     ]
 
     book_summaries = [
@@ -229,5 +213,5 @@ def get_semantic_drift(
     ]
 
     return SemanticDriftResponse(
-        expr=expr_data, nearest_terms=nearest_term_data, books=book_summaries
+        expr=expr_data, comparative_terms=nearest_term_data, books=book_summaries
     )

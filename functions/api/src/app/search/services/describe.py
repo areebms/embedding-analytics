@@ -6,8 +6,6 @@ from difflib import get_close_matches
 from functools import lru_cache
 from typing import Literal
 
-from openai import OpenAI
-
 from app.core.logging import add_to_log
 from app.search.services.utils import extract_terms, serialize_expression
 from app.search.constants import PARSE_SYSTEM_PROMPT, FALLBACK_PROMPT
@@ -15,6 +13,12 @@ from app.search.schemas.semantic_drift import OpNode, TermNode
 from app.search.errors import TermResolutionError
 from shared.commons import BookIndex
 from shared.tables.book_terms import ADVERB_TAGS, get_book_term_table
+
+
+def get_openai_client():
+    from openai import OpenAI
+
+    return OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 
 @lru_cache(maxsize=1)
@@ -104,7 +108,7 @@ def resolve_vocabulary_term(term: str, book_ids: tuple[BookIndex, ...]) -> str:
         fallback = [w for w in vocab_list if term and w[0] == term[0]]
         raise TermResolutionError(term, fallback[:5])
 
-    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    client = get_openai_client()
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         max_tokens=20,
@@ -159,7 +163,7 @@ def autocorrect_term_tree(
 
 def llm_generate_expression(message: str) -> str:
     """Call gpt-4o-mini to convert natural language into an expression string."""
-    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    client = get_openai_client()
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[

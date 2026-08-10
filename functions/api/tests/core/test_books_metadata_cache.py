@@ -42,7 +42,7 @@ def test_cache_keeps_only_aligned_books(table):
 
 
 def test_cache_reads_the_year_as_an_int(table):
-    assert BooksMetadataCache(table).book_years == {BookIndex(1): 1776}
+    assert BooksMetadataCache(table).books_metadata[BookIndex(1)].published_year == 1776
 
 
 def test_cache_leaves_a_missing_year_none(table):
@@ -58,7 +58,6 @@ def test_cache_leaves_a_missing_year_none(table):
     )
 
     assert cache.books_metadata[BookIndex(1)].published_year is None
-    assert cache.book_years == {}
 
 
 def test_cache_scans_lazily_and_only_once(table):
@@ -68,7 +67,6 @@ def test_cache_scans_lazily_and_only_once(table):
     assert table.get_all_entries.call_count == 0
 
     cache.book_ids
-    cache.book_years
     cache.books_metadata
 
     assert table.get_all_entries.call_count == 1

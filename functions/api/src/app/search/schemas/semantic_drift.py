@@ -51,7 +51,6 @@ class SemanticDriftRequestBody(BaseModel):
 
     tree: ExprTree
     book_ids: list[int] = Field(min_length=1, max_length=16)
-    sort: Literal["mean_similarity", "slope"] = "mean_similarity"
 
     @field_validator("book_ids")
     @classmethod
@@ -84,7 +83,7 @@ class SemanticDriftRequest(SemanticDriftRequestBody):
 
 class BookSummary(BaseModel):
 
-    model_config = ConfigDict(extra="forbid")  # see BookLocalMeanSimilarity
+    model_config = ConfigDict(extra="forbid")
 
     id: int
     n_shared_terms: int
@@ -92,33 +91,32 @@ class BookSummary(BaseModel):
 
 
 class BookLocalMeanSimilarity(BaseModel):
+    """The mean of the local cosine similarities per peer for each book."""
 
     model_config = ConfigDict(extra="forbid")
 
     book_id: int
-    similarity: float
+    mean_similarity: float
     similarity_ci: tuple[float, float]
-    similarity_sd: float
     count: int
     n_seeds: int
     n_books: int
 
 
 class TermStats(BaseModel):
-    """A returned term and the statistics that put it there."""
 
     model_config = ConfigDict(extra="forbid")
 
     term: str
-    mean_similarity: float
-    n_books_with_term: int  # not n_books, which on a score means peers compared
-    slope: float
-    r_squared: float
+    stability: float
+    instability: float
+    n_books_in: int
+    n_books_as_top50: int
+    n_books_as_top100: int
 
 
 class TermData(TermStats):
 
-    tags: list[str]
     books: list[BookLocalMeanSimilarity]
 
 
@@ -134,5 +132,5 @@ class ExprData(BaseModel):
 class SemanticDriftResponse(BaseModel):
 
     expr: ExprData
-    nearest_terms: list[TermData]
+    comparative_terms: list[TermData]
     books: list[BookSummary]

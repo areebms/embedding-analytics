@@ -7,15 +7,27 @@ from fastapi.testclient import TestClient
 
 from app.core.dependencies import get_books_metadata_cache
 from app.core.services import BooksMetadataCache
-from app.search.constants import NUM_LOCAL_NEAREST_TERMS
+from app.search.constants import (
+    MAX_RANK_FOR_STABLE_TERM,
+    MAX_RANK_FOR_UNSTABLE_TERM,
+    NUM_NEAREST_TERMS_FOR_LOCAL_COSINE_SIMILARITY,
+    NUM_NEAREST_TERMS_FOR_SIMILARITY_CENTERING,
+)
 from app.search.dependencies import get_books_term_cache
 from app.search.services.semantic_drift import BooksTermCache
 from shared.tables.book_terms import get_book_term_table
 
 os.environ.pop("REDIS_URL", None)
 
+LOCAL_VOCAB_FLOOR = max(
+    NUM_NEAREST_TERMS_FOR_LOCAL_COSINE_SIMILARITY,
+    NUM_NEAREST_TERMS_FOR_SIMILARITY_CENTERING,
+    MAX_RANK_FOR_STABLE_TERM,
+    MAX_RANK_FOR_UNSTABLE_TERM,
+)
+
 NAMED_VOCAB = ["labour", "value", "wage", "rent", "stock", "price", "profit", "capital"]
-FILLER_VOCAB = [f"filler{n:03d}" for n in range(NUM_LOCAL_NEAREST_TERMS)]
+FILLER_VOCAB = [f"filler{n:03d}" for n in range(LOCAL_VOCAB_FLOOR)]
 VOCAB = NAMED_VOCAB + FILLER_VOCAB
 
 
@@ -129,7 +141,7 @@ def patch_openai(monkeypatch):
     client.chat.completions.create.return_value = MagicMock(
         choices=[MagicMock(message=MagicMock(content='"market"'))]
     )
-    monkeypatch.setattr(describe_services, "OpenAI", lambda **_: client)
+    monkeypatch.setattr(describe_services, "get_openai_client", lambda: client)
     return client
 
 
@@ -163,11 +175,6 @@ def patch_tables(
 @pytest.fixture
 def term_table(patch_tables):
     return patch_tables[1]
-
-
-@pytest.fixture
-def pipeline_table(patch_tables):
-    return patch_tables[0]
 
 
 @pytest.fixture

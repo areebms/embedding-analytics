@@ -1,13 +1,16 @@
 from __future__ import annotations
 
-from typing import Literal, NamedTuple
-
 import numpy as np
 
 from app.search.constants import (
-    MIN_MATCHING_BOOKS,
-    NEAREST_TERM_COUNT,
-    NUM_SIMILAR_TERMS,
+    MAX_RANK_FOR_STABLE_TERM,
+    MAX_RANK_FOR_UNSTABLE_TERM,
+    MIN_BOOKS_WITH_TERM,
+    MIN_BOOKS_WITH_TERM_IN_NEAREST_TERMS,
+    MIN_BOOKS_WITH_UNSTABLE_TERM_AS_TOP_50,
+    NUM_NEAREST_TERMS_FOR_SIMILARITY_CENTERING,
+    NUM_RELEVANT_TERMS_FOR_INSTABILITY,
+    NUM_TERMS_KEPT,
     T_CRIT_95,
 )
 from app.search.errors import NoLocalNearestTermsError
@@ -19,64 +22,38 @@ from app.search.services.semantic_drift.utils import SearchExpr
 from shared.commons import BookIndex
 
 
-class TrendFit(NamedTuple):
+def get_n_highest_similarities(similarities: np.ndarray, n: int) -> np.ndarray:
 
-    slope: np.ndarray
-    r_squared: np.ndarray
+    if not len(similarities):
+        return similarities
 
-    @property
-    def score(self) -> np.ndarray:
-        return self.slope * self.r_squared
+    n = min(n, len(similarities))
 
-
-def get_trend_fits(
-    group_iloc: np.ndarray,
-    years: np.ndarray,
-    similarities: np.ndarray,
-    n_groups: int,
-) -> TrendFit:
-    """Slope and r-squared of similarity-against-year, one pair per group."""
-
-    def group_sum(weights: np.ndarray | None = None) -> np.ndarray:
-        return np.bincount(group_iloc, weights=weights, minlength=n_groups)
-
-    x, y = years, similarities  # the usual least-squares naming.
-    n, sum_x, sum_y = group_sum(), group_sum(x), group_sum(y)
-
-    ss_xy = n * group_sum(x * y) - sum_x * sum_y
-    ss_xx = n * group_sum(x * x) - sum_x * sum_x
-    ss_yy = n * group_sum(y * y) - sum_y * sum_y
-
-    is_fit = (ss_xx != 0) & (ss_yy != 0)
-    slope = np.zeros(n_groups)
-    r_squared = np.zeros(n_groups)
-    slope[is_fit] = ss_xy[is_fit] / ss_xx[is_fit]
-    r_squared[is_fit] = ss_xy[is_fit] ** 2 / (ss_xx[is_fit] * ss_yy[is_fit])
-
-    return TrendFit(slope, r_squared)
+    return np.partition(similarities, -n)[-n:]
 
 
-def get_nearest_terms(
-    books_similarity_cache: BooksSimilarityCache,
-    book_ids: list[BookIndex],
-    query: SearchExpr,
-    book_years: dict[BookIndex, int],
-    sort: Literal["mean_similarity", "slope", "variance"] = "mean_similarity",
-    *,
-    selected_book_id: BookIndex | None = None,
-) -> list[TermStats]:
+def center_locally(similarities: np.ndarray, n: int) -> np.ndarray:
 
-    books_vectors = [
-        books_similarity_cache.load_book(book_id, query) for book_id in book_ids
-    ]
+    highest_similarities = get_n_highest_similarities(similarities, n)
 
-    all_terms = np.concatenate([book_vectors.terms for book_vectors in books_vectors])
-    all_similarities = np.concatenate(
-        [book_vectors.similarity_vectors.mean(axis=0) for book_vectors in books_vectors]
-    )
+    if not len(highest_similarities):
+        return similarities
 
-    # Every book's terms are already sorted, so the concatenation is one run per
-    # book, which a merge sort walks at about twice np.unique's quicksort pace.
+    return similarities - highest_similarities.mean()
+
+
+def get_is_local(similarities: np.ndarray, n: int) -> np.ndarray:
+
+    highest_similarities = get_n_highest_similarities(similarities, n)
+
+    if not len(highest_similarities):
+        return np.zeros(0, dtype=bool)
+
+    return similarities >= highest_similarities.min()
+
+
+def get_unique_terms(all_terms):
+    # faster equivalent of np.unique(all_terms, return_inverse=True)
     order = np.argsort(all_terms, kind="stable")
     sorted_terms = all_terms[order]
     is_first = np.ones(len(all_terms), dtype=bool)
@@ -85,78 +62,95 @@ def get_nearest_terms(
     terms = sorted_terms[is_first]
     term_iloc = np.empty(len(all_terms), dtype=np.intp)
     term_iloc[order] = np.cumsum(is_first) - 1
+    return terms, term_iloc
 
-    book_count = np.bincount(term_iloc)  # Terms are unique within a book
-    mean_similarity = np.bincount(term_iloc, weights=all_similarities) / book_count
 
-    # How much the books disagree about where the term sits, not about how far
-    # away it is: a term holding one cosine throughout still spreads if the
-    # terms nearest it move. Two-pass, because summing the squares
-    # themselves leaves float32 rounding behind instead. A term only one book
-    # carries spreads not at all.
-    deviation = all_similarities - mean_similarity[term_iloc]
-    variance = np.bincount(term_iloc, weights=deviation**2) / np.maximum(
-        book_count - 1, 1
+def get_comparative_terms(
+    books_similarity_cache: BooksSimilarityCache,
+    book_ids: list[BookIndex],
+    query: SearchExpr,
+    *,
+    selected_book_id: BookIndex | None = None,
+) -> list[TermStats]:
+
+    book_similarities_list = []
+    book_terms_list = []
+    book_similarities_centered_list = []
+    book_terms_is_in_top_50_list = []
+    book_terms_is_in_top_100_list = []
+
+    for book_id in book_ids:
+        book_similarity_vectors = books_similarity_cache.load_book(book_id, query)
+        book_similarities = book_similarity_vectors.mean_similarities
+        book_similarities_list.append(book_similarities)
+        book_terms_list.append(book_similarity_vectors.terms)
+        book_similarities_centered_list.append(
+            center_locally(
+                book_similarities, NUM_NEAREST_TERMS_FOR_SIMILARITY_CENTERING
+            )
+        )
+        book_terms_is_in_top_50_list.append(
+            get_is_local(book_similarities, MAX_RANK_FOR_STABLE_TERM)
+        )
+        book_terms_is_in_top_100_list.append(
+            get_is_local(book_similarities, MAX_RANK_FOR_UNSTABLE_TERM)
+        )
+
+    terms, term_iloc = get_unique_terms(np.concat(book_terms_list))
+    n_books_in = np.bincount(term_iloc)  # Terms are unique within a book
+
+    is_relevant_to_corpus = (n_books_in >= MIN_BOOKS_WITH_TERM) & ~np.isin(
+        terms, query.terms
     )
-
-    is_valid = (book_count >= MIN_MATCHING_BOOKS) & ~np.isin(terms, query.terms)
     if selected_book_id is not None:
-        # Both arrays are sorted, so this beats np.isin. The "" sentinel catches
-        # terms sorting past the book's last one, and no real term equals it.
         selected_terms = books_similarity_cache.books_term_cache[selected_book_id].terms
         position = np.searchsorted(selected_terms, terms)
-        is_valid &= np.append(selected_terms, "")[position] == terms
-    valid_iloc = np.flatnonzero(is_valid)
+        is_relevant_to_corpus &= np.append(selected_terms, "")[position] == terms
 
-    # Every sort ranks the same relevance-floored pool and differs only in the
-    # key. Sorted so that ties break alphabetically rather than by relevance rank.
-    most_similar_iloc = valid_iloc[
-        np.argsort(-mean_similarity[valid_iloc], kind="stable")
-    ]
-    pool_iloc = np.sort(most_similar_iloc[:NUM_SIMILAR_TERMS])
+    is_in_top_50 = np.concat(book_terms_is_in_top_50_list)
+    is_in_top_100 = np.concat(book_terms_is_in_top_100_list)
 
-    # Fit the pool against publication year, in pool order. Undated books
-    # contribute no rows, and an unfittable term scores zero.
-    group = np.full(len(terms), -1)
-    group[pool_iloc] = np.arange(len(pool_iloc))
-    row_group = group[term_iloc]
+    n_books_50 = np.bincount(term_iloc, weights=is_in_top_50).astype(np.intp)
+    n_books_100 = np.bincount(term_iloc, weights=is_in_top_100).astype(np.intp)
 
-    # Undated books carry NaN, which drops their rows out of the fit below.
-    years = [
-        float(book_years.get(book_vectors.book_id, np.nan))
-        for book_vectors in books_vectors
-    ]
-    n_terms_per_book = [len(book_vectors.terms) for book_vectors in books_vectors]
-    all_years = np.repeat(years, n_terms_per_book)
+    all_similarities = np.concat(book_similarities_centered_list)
+    mean_similarities = np.bincount(term_iloc, weights=all_similarities) / n_books_in
 
-    is_fit_row = (row_group >= 0) & ~np.isnan(all_years)
-    trend = get_trend_fits(
-        row_group[is_fit_row],
-        all_years[is_fit_row],
-        all_similarities[is_fit_row],
-        len(pool_iloc),
-    )
+    variance = np.bincount(
+        term_iloc, weights=(all_similarities - mean_similarities[term_iloc]) ** 2
+    ) / np.maximum(n_books_in - 1, 1)
 
-    if sort == "mean_similarity":
-        rank_by = mean_similarity[pool_iloc]
-    elif sort == "slope":
-        rank_by = np.abs(trend.score)
-    elif sort == "variance":
-        rank_by = variance[pool_iloc]
-    else:
-        raise ValueError(f"unknown sort {sort!r}")
-
-    ranked = np.argsort(-rank_by, kind="stable")[:NEAREST_TERM_COUNT]
-    return [
-        TermStats(
+    def make_term_stats(iloc: np.intp) -> TermStats:
+        return TermStats(
             term=str(terms[iloc]),
-            mean_similarity=float(mean_similarity[iloc]),
-            n_books_with_term=int(book_count[iloc]),
-            slope=float(trend.slope[rank]),
-            r_squared=float(trend.r_squared[rank]),
+            stability=float(mean_similarities[iloc]),
+            instability=float(variance[iloc]),
+            n_books_in=int(n_books_in[iloc]),
+            n_books_as_top50=int(n_books_50[iloc]),
+            n_books_as_top100=int(n_books_100[iloc]),
         )
-        for rank, iloc in zip(ranked, pool_iloc[ranked])
+
+    mean_iloc = np.flatnonzero(
+        is_relevant_to_corpus & (n_books_50 >= MIN_BOOKS_WITH_TERM_IN_NEAREST_TERMS)
+    )
+    mean_ranked = mean_iloc[np.argsort(-mean_similarities[mean_iloc], kind="stable")][
+        :NUM_TERMS_KEPT
     ]
+
+    variance_iloc = np.flatnonzero(
+        is_relevant_to_corpus
+        & (n_books_100 >= MIN_BOOKS_WITH_TERM_IN_NEAREST_TERMS)
+        & (n_books_50 >= MIN_BOOKS_WITH_UNSTABLE_TERM_AS_TOP_50)
+    )
+    most_similar_iloc = variance_iloc[
+        np.argsort(-mean_similarities[variance_iloc], kind="stable")
+    ]
+    pool_iloc = np.sort(most_similar_iloc[:NUM_RELEVANT_TERMS_FOR_INSTABILITY])
+    variance_ranked = pool_iloc[
+        np.argsort(-variance[pool_iloc], kind="stable")[:NUM_TERMS_KEPT]
+    ]
+
+    return [make_term_stats(iloc) for iloc in np.union1d(mean_ranked, variance_ranked)]
 
 
 def get_local_mean_similarity_per_book(
@@ -180,12 +174,11 @@ def get_local_mean_similarity_per_book(
 
     return BookLocalMeanSimilarity(
         book_id=book_id.source_id,
-        similarity=mean_local_similarity,
+        mean_similarity=mean_local_similarity,
         similarity_ci=(
             mean_local_similarity - ci_half,
             mean_local_similarity + ci_half,
         ),
-        similarity_sd=sd,
         count=count,
         n_seeds=n_seeds,
         n_books=len(local_similarities_per_peer),

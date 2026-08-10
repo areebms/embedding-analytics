@@ -58,12 +58,3 @@ class BooksMetadataCache:
     @property
     def book_ids(self) -> list[BookIndex]:
         return list(self.books_metadata)
-
-    @property
-    def book_years(self) -> dict[BookIndex, int]:
-        """Publication year per book, for the books that carry one."""
-        return {
-            book_id: data.published_year
-            for book_id, data in self.books_metadata.items()
-            if data.published_year is not None
-        }

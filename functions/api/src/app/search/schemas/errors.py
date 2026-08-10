@@ -3,7 +3,7 @@ from typing import ClassVar, Literal
 
 from pydantic import BaseModel
 
-from app.search.constants import MIN_MATCHING_BOOKS
+from app.search.constants import MIN_BOOKS_WITH_TERM
 
 
 class ExpressionAbsentResponse(BaseModel):
@@ -20,7 +20,7 @@ class ExpressionAbsentResponse(BaseModel):
 class QueryInTooFewBooksResponse(BaseModel):
 
     openapi_description: ClassVar[str] = (
-        f"Fewer than {MIN_MATCHING_BOOKS} of the requested books carry the query."
+        f"Fewer than {MIN_BOOKS_WITH_TERM} of the requested books carry the query."
     )
 
     reason: Literal["query_in_too_few_books"] = "query_in_too_few_books"

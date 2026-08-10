@@ -4,14 +4,10 @@ from collections.abc import Iterable, Sequence
 
 import numpy as np
 
-from app.search.constants import NUM_LOCAL_NEAREST_TERMS
+from app.search.constants import NUM_NEAREST_TERMS_FOR_LOCAL_COSINE_SIMILARITY
 from app.search.errors import MissingTermsError, NoLocalNearestTermsError
 from app.search.services.semantic_drift.book_term_vectors import BooksTermCache
-from app.search.services.semantic_drift.utils import (
-    SearchExpr,
-    center_vectors,
-    normalize_vectors,
-)
+from app.search.services.semantic_drift.utils import SearchExpr, center_vectors
 from shared.commons import BookIndex
 
 
@@ -34,6 +30,7 @@ class BookSimilarityVectors:
 
         self.terms = book_terms[self.is_valid]
         self.similarity_vectors = similarity_vectors[:, self.is_valid]
+        self.mean_similarities = self.similarity_vectors.mean(axis=0)
 
     @staticmethod
     def get_similarity_vectors(query_vectors: np.ndarray, term_vectors: np.ndarray):
@@ -53,16 +50,16 @@ class BookSimilarityVectors:
         shared_indexes = self.masked_iloc[indexes[local_indexes]]
         shared_peer_indexes = peer.masked_iloc[peer_indexes[local_indexes]]
 
-        if len(shared_indexes) < NUM_LOCAL_NEAREST_TERMS:
+        if len(shared_indexes) < NUM_NEAREST_TERMS_FOR_LOCAL_COSINE_SIMILARITY:
             raise NoLocalNearestTermsError(
                 self.book_id, peer.book_id, len(shared_indexes)
             )
 
         # vectors of terms closest to the expression.
-        shared_similarity_vectors = self.similarity_vectors[:, shared_indexes].mean(
-            axis=0
-        )
-        sorted_iloc = np.argsort(-shared_similarity_vectors)[:NUM_LOCAL_NEAREST_TERMS]
+        shared_similarity_vectors = self.mean_similarities[shared_indexes]
+        sorted_iloc = np.argsort(-shared_similarity_vectors)[
+            :NUM_NEAREST_TERMS_FOR_LOCAL_COSINE_SIMILARITY
+        ]
 
         n_seeds = min(
             self.similarity_vectors.shape[0], peer.similarity_vectors.shape[0]
@@ -75,12 +72,16 @@ class BookSimilarityVectors:
         shared_peer_vectors = peer.similarity_vectors[:n_seeds][
             :, shared_peer_indexes[sorted_iloc]
         ]
-        local_similarity = np.sum(
-            normalize_vectors(center_vectors(shared_book_vectors))
-            * normalize_vectors(center_vectors(shared_peer_vectors)),
-            axis=1,
-        )
-        return local_similarity
+        return self.correlate_vectors(shared_book_vectors, shared_peer_vectors)
+
+    @staticmethod
+    def correlate_vectors(a_vectors, b_vectors):
+        a_centered = center_vectors(a_vectors)
+        b_centered = center_vectors(b_vectors)
+        a_dot_b = np.einsum("...i,...i->...", a_centered, b_centered)
+        a_dot_a = np.einsum("...i,...i->...", a_centered, a_centered)
+        b_dot_b = np.einsum("...i,...i->...", b_centered, b_centered)
+        return a_dot_b / np.maximum(np.sqrt(a_dot_a * b_dot_b), 1e-12)
 
 
 class BooksSimilarityCache:
@@ -94,9 +95,7 @@ class BooksSimilarityCache:
     def __getitem__(self, key: tuple[BookIndex, str]) -> BookSimilarityVectors:
         return self.book_similarity_vectors[key]
 
-    def load_book(
-        self, book_id: BookIndex, expr: SearchExpr
-    ) -> BookSimilarityVectors:
+    def load_book(self, book_id: BookIndex, expr: SearchExpr) -> BookSimilarityVectors:
 
         key = (book_id, expr.serialized)
         if key in self.book_similarity_vectors:

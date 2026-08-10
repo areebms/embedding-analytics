@@ -3,21 +3,29 @@ import math
 import numpy as np
 import pytest
 
-from conftest import VOCAB, book_rows, set_multi_book_table
-from app.search.constants import NUM_LOCAL_NEAREST_TERMS
+from conftest import LOCAL_VOCAB_FLOOR, VOCAB, book_rows, set_multi_book_table
+from app.search.constants import (
+    MIN_BOOKS_WITH_TERM,
+    MIN_BOOKS_WITH_TERM_IN_NEAREST_TERMS,
+    NUM_NEAREST_TERMS_FOR_LOCAL_COSINE_SIMILARITY,
+    NUM_NEAREST_TERMS_FOR_SIMILARITY_CENTERING,
+    NUM_TERMS_KEPT,
+)
 from app.search.schemas.semantic_drift import MAX_TREE_DEPTH
-from app.search.services.semantic_drift import (
-    MIN_MATCHING_BOOKS,
-    NEAREST_TERM_COUNT,
-    BooksSimilarityCache,
+from app.search.services.semantic_drift import BooksSimilarityCache
+from app.search.services.semantic_drift.local_mean_similarities import (
+    center_locally,
+    get_is_local,
+    get_n_highest_similarities,
 )
 from shared.commons import BookIndex
 
-CORPUS_SIZE = max(MIN_MATCHING_BOOKS, 3)
+CORPUS_SIZE = max(MIN_BOOKS_WITH_TERM, 3)
 SELECTED_ID = 1
 TARGET_IDS = list(range(2, CORPUS_SIZE + 2))  # the selected book isn't one of them
 BOOK_IDS = list(range(1, CORPUS_SIZE + 1))  # unselected: every book counts itself
 SPARE_ID = CORPUS_SIZE + 1  # one past the floor: it can drop out and leave a result
+FLAT_SIMILARITY = 0.8
 
 
 def default_books(book_ids=None, **kwargs):
@@ -37,17 +45,6 @@ def make_fixed_term_entry(term, vector, n_seeds=5, count=100, tags=None):
     }
 
 
-def set_book_years(pipeline_table, years):
-    pipeline_table.get_all_entries.return_value = [
-        {
-            "platform_data": f"gutenberg-{book_id}",
-            "s3_prefix_models": f"models/{book_id}",
-            **({} if year is None else {"published_year": year}),
-        }
-        for book_id, year in years.items()
-    ]
-
-
 @pytest.fixture
 def post_semantic_drift(client, term_table):
     def post(books=None, tree=None, book_ids=None, selected=SELECTED_ID, **body):
@@ -65,17 +62,23 @@ def post_semantic_drift(client, term_table):
     return post
 
 
+def nearest_term_data(body):
+    return body["comparative_terms"]
+
 
 def term_books(body):
     """Every scored term, the query's first, as (term, books) pairs."""
     return [(body["expr"]["expr"], body["expr"]["books"])] + [
-        (term_data["term"], term_data["books"]) for term_data in body["nearest_terms"]
+        (term_data["term"], term_data["books"]) for term_data in nearest_term_data(body)
     ]
 
 
 def nearest_terms(body):
-    """Just the nearest-term labels, which the payload no longer lists flat."""
-    return [term_data["term"] for term_data in body["nearest_terms"]]
+    return [term_data["term"] for term_data in nearest_term_data(body)]
+
+
+def scored_terms(body):
+    return [term_data["term"] for term_data in nearest_term_data(body)]
 
 
 def book_scores(body, book_id):
@@ -111,57 +114,64 @@ def books_by_id(body):
 
 def assert_response_shape(body, expected_book_ids, expected_n_books):
     assert [b["id"] for b in body["books"]] == expected_book_ids
-    assert len(nearest_terms(body)) == NEAREST_TERM_COUNT
-    assert body["expr"]["expr"] not in nearest_terms(body)
+    assert NUM_TERMS_KEPT <= len(nearest_terms(body)) <= 2 * NUM_TERMS_KEPT
+    assert body["expr"]["expr"] not in scored_terms(body)
     assert sum(len(books) for _, books in term_books(body)) == len(
         expected_book_ids
-    ) * (NEAREST_TERM_COUNT + 1)
+    ) * (len(scored_terms(body)) + 1)
     for book_id in expected_book_ids:
         assert [e["term"] for e in book_scores(body, book_id)] == [
             body["expr"]["expr"],
-            *nearest_terms(body),
+            *scored_terms(body),
         ]
         for entry in book_scores(body, book_id):
-            assert entry["similarity"] is not None  # measured, so not a gap
+            assert entry["mean_similarity"] is not None  # measured, so not a gap
             assert entry["n_seeds"] == 5
             assert entry["n_books"] == expected_n_books
             lo, hi = entry["similarity_ci"]
             assert math.isfinite(lo) and math.isfinite(hi)
-            assert lo < entry["similarity"] < hi
-            assert entry["similarity_sd"] > 0  # the spread the CI is built from
+            assert lo < entry["mean_similarity"] < hi
             assert entry["count"] > 0  # measured, so the book uses the terms
     for _, books in term_books(body):
         for book_data in books:
             assert set(book_data) == {
                 "book_id",
-                "similarity",
+                "mean_similarity",
                 "similarity_ci",
-                "similarity_sd",
                 "count",
                 "n_seeds",
                 "n_books",
             }
     assert set(body["expr"]) == {"expr", "terms", "books"}
-    for term_data in body["nearest_terms"]:
+    for term_data in nearest_term_data(body):
         assert set(term_data) == {
             "term",
-            "mean_similarity",
-            "n_books_with_term",
-            "slope",
-            "r_squared",
-            "tags",
+            "stability",
+            "instability",
+            "n_books_in",
+            "n_books_as_top50",
+            "n_books_as_top100",
             "books",
         }
-        assert term_data["n_books_with_term"] >= MIN_MATCHING_BOOKS
-        assert 0.0 <= term_data["r_squared"] <= 1.0
-        assert term_data["tags"]
+        assert term_data["n_books_in"] >= MIN_BOOKS_WITH_TERM
+        assert term_data["instability"] >= 0.0
+        # Membership is bounded by vocabulary: a book cannot place a term it
+        # does not have, and the floor is what admitted the term at all.
+        assert (
+            MIN_BOOKS_WITH_TERM_IN_NEAREST_TERMS
+            <= term_data["n_books_as_top100"]
+            <= term_data["n_books_in"]
+        )
+        assert term_data["n_books_as_top50"] <= term_data["n_books_as_top100"]
     assert all(
         set(b) == {"id", "n_shared_terms", "missing_terms"} for b in body["books"]
     )
     assert all(b["missing_terms"] == [] for b in body["books"])
     # Every book here drew a line, so every one cleared the anchor floor.
-    assert all(b["n_shared_terms"] >= NUM_LOCAL_NEAREST_TERMS for b in body["books"])
-
+    assert all(
+        b["n_shared_terms"] >= NUM_NEAREST_TERMS_FOR_LOCAL_COSINE_SIMILARITY
+        for b in body["books"]
+    )
 
 
 def test_comparative_happy_path(post_semantic_drift):
@@ -188,7 +198,8 @@ def test_comparative_scores_a_compound_expression(post_semantic_drift):
     assert body["expr"]["terms"] == ["labour", "value"]
     assert not {"labour", "value"} & set(nearest_terms(body))
     assert all(
-        entry["similarity"] is not None for entry in book_scores(body, TARGET_IDS[0])
+        entry["mean_similarity"] is not None
+        for entry in book_scores(body, TARGET_IDS[0])
     )
 
 
@@ -197,36 +208,21 @@ def fixed_similarity_entry(term, similarity):
     return make_fixed_term_entry(term, [similarity, math.sqrt(1 - similarity**2)])
 
 
-def filler_rows():
-    """Terms that exist only to clear NUM_LOCAL_NEAREST_TERMS, for the fixed-vector
-    corpora. Identical in every book, so they carry no trend, and all further from
-    the query than any term those tests name, so they cannot displace one."""
+def books_from_similarities(similarities_by_book):
     return {
-        f"filler{n:03d}": fixed_similarity_entry(f"filler{n:03d}", 0.05 + n / 400)
-        for n in range(NUM_LOCAL_NEAREST_TERMS)
+        book_id: {
+            "labour": make_fixed_term_entry("labour", [1.0, 0.0]),
+            **{
+                term: fixed_similarity_entry(term, similarity)
+                for term, similarity in similarities.items()
+            },
+        }
+        for book_id, similarities in similarities_by_book.items()
     }
 
 
-def trend_book_rows(trending_similarity, flat_similarity=0.8):
-    """One book's rows for the sort="slope" tests: `labour` is the query anchor,
-    `flat` sits at a constant, high similarity to it in every book, and
-    `trending`'s similarity is whatever the caller passes -- fixed vectors (see
-    make_fixed_term_entry), so these similarities are exact, not RNG-approximate.
-
-    Ranking never needs more vocabulary than that, so this stays at three terms.
-    A test that also reads the scores needs the pair to clear
-    NUM_LOCAL_NEAREST_TERMS, and merges in filler_rows() itself.
-    """
-    return {
-        "labour": make_fixed_term_entry("labour", [1.0, 0.0]),
-        "trending": fixed_similarity_entry("trending", trending_similarity),
-        "flat": fixed_similarity_entry("flat", flat_similarity),
-    }
-
-
-def trend_years(book_ids=BOOK_IDS):
-    """One publication year per book, a generation apart."""
-    return {book_id: 1800 + 20 * index for index, book_id in enumerate(book_ids)}
+def filler_similarities():
+    return {f"filler{n:03d}": 0.05 + n / 400 for n in range(LOCAL_VOCAB_FLOOR)}
 
 
 def rising_similarities(book_ids=BOOK_IDS):
@@ -237,116 +233,280 @@ def rising_similarities(book_ids=BOOK_IDS):
     return {book_id: 0.1 + 0.8 * index / last for index, book_id in enumerate(book_ids)}
 
 
-def test_semantic_drift_slope_sort_ranks_a_drifting_term_over_a_flatter_closer_one(
-    post_semantic_drift, pipeline_table
-):
-    trending = rising_similarities()
-    books = {book_id: trend_book_rows(trending[book_id]) for book_id in BOOK_IDS}
-    set_book_years(pipeline_table, trend_years())
-
-    mean_body = post_semantic_drift(
-        books=books, selected=None, sort="mean_similarity"
-    ).json()
-    assert nearest_terms(mean_body) == ["flat", "trending"]
-
-    slope_body = post_semantic_drift(books=books, selected=None, sort="slope").json()
-    assert nearest_terms(slope_body) == ["trending", "flat"]
+def swinging_similarities(book_ids=BOOK_IDS):
+    """Similarity alternating book to book. Its mean sits below
+    `rising_similarities`'."""
+    return {
+        book_id: 0.44 if index % 2 else 0.06 for index, book_id in enumerate(book_ids)
+    }
 
 
 def test_semantic_drift_drops_a_term_below_the_book_coverage_floor(
-    post_semantic_drift, pipeline_table
+    post_semantic_drift,
 ):
-    rare_book_ids = BOOK_IDS[: MIN_MATCHING_BOOKS - 1]
+    rare_book_ids = BOOK_IDS[: MIN_BOOKS_WITH_TERM - 1]
     rare_similarities = rising_similarities(rare_book_ids)
-    books = {}
-    for book_id in BOOK_IDS:
-        rows = {
-            "labour": make_fixed_term_entry("labour", [1.0, 0.0]),
-            "common": make_fixed_term_entry("common", [0.2, math.sqrt(1 - 0.2**2)]),
-        }
-        if book_id in rare_similarities:
-            # Nearer the query than `common` ever gets, and climbing.
-            s = 0.9 + 0.09 * rare_similarities[book_id]
-            rows["rare"] = make_fixed_term_entry("rare", [s, math.sqrt(1 - s**2)])
-        books[book_id] = rows
-    set_book_years(pipeline_table, trend_years())
-
-    for sort in ("mean_similarity", "slope"):
-        body = post_semantic_drift(books=books, selected=None, sort=sort).json()
-        assert nearest_terms(body) == ["common"], sort
-
-
-def test_semantic_drift_slope_sort_fits_around_a_book_with_no_published_year(
-    post_semantic_drift, pipeline_table
-):
-    trending = rising_similarities()
-    set_book_years(pipeline_table, {**trend_years(), BOOK_IDS[-1]: None})
-
-    response = post_semantic_drift(
-        # Padded: this test reads the scores, not just the ranking.
-        books={
-            book_id: {**trend_book_rows(trending[book_id]), **filler_rows()}
+    books = books_from_similarities(
+        {
+            book_id: {
+                "common": 0.2,
+                # Nearer the query than `common` ever gets, and climbing.
+                **(
+                    {"rare": 0.9 + 0.09 * rare_similarities[book_id]}
+                    if book_id in rare_similarities
+                    else {}
+                ),
+            }
             for book_id in BOOK_IDS
-        },
-        selected=None,
-        sort="slope",
+        }
     )
 
-    assert response.status_code == 200
-    # `trending` is the only term that moves at all, so it leads however many
-    # flat-by-construction filler terms come after it.
-    assert nearest_terms(response.json())[0] == "trending"
-    assert {book["book_id"] for book in response.json()["expr"]["books"]} == set(
-        BOOK_IDS
-    )
+    body = post_semantic_drift(books=books, selected=None).json()
+    assert nearest_terms(body) == ["common"]
 
 
-def test_semantic_drift_nearest_terms_carry_their_ranking_statistics(
-    post_semantic_drift, pipeline_table
+def ranking_similarities_by_book(book_ids=BOOK_IDS):
+    """Every scored term's similarity in every book: the numbers the ranking
+    corpora are built from, which a test reading the statistics back has to
+    know. The query's own term is left out, since it never scores."""
+    trending = rising_similarities(book_ids)
+    swinging = swinging_similarities(book_ids)
+    return {
+        book_id: {
+            "trending": trending[book_id],
+            "flat": FLAT_SIMILARITY,
+            "swinging": swinging[book_id],
+            **filler_similarities(),
+        }
+        for book_id in book_ids
+    }
+
+
+def swinging_books(book_ids=BOOK_IDS):
+    """A corpus carrying all three of `flat`, `trending` and `swinging`, over a
+    full complement of nearest terms. The statistics are read against those, so a
+    corpus of only the three would let them set their own scale."""
+    return books_from_similarities(ranking_similarities_by_book(book_ids))
+
+
+def local_positions(similarities_by_book):
+    """The fixture's own similarities as the response reports them: each book's
+    value read against the centre of that book's own nearest terms, since books
+    share no scale on which an absolute cosine could be compared.
+
+    Offsets rather than distances, so they sit near zero for a term the book
+    holds at about its neighbourhood's usual remove -- compare against these by
+    absolute tolerance, not relative, and leave room for the float16 rounding
+    in the stored vectors.
+    """
+    positions = {}
+    for book_similarities in similarities_by_book.values():
+        values = np.array(list(book_similarities.values()))
+        local = np.sort(values)[-NUM_NEAREST_TERMS_FOR_SIMILARITY_CENTERING:]
+        for term, similarity in book_similarities.items():
+            positions.setdefault(term, []).append(similarity - local.mean())
+    return positions
+
+
+def test_semantic_drift_returns_a_term_its_spread_alone_selected(
+    post_semantic_drift,
 ):
-    trending = rising_similarities()
-    set_book_years(pipeline_table, trend_years())
-    books = {
-        book_id: {**trend_book_rows(trending[book_id]), **filler_rows()}
-        for book_id in BOOK_IDS
-    }
+    body = post_semantic_drift(books=swinging_books(), selected=None).json()
+    ranked = nearest_term_data(body)
+    by_term = {term_data["term"]: term_data for term_data in ranked}
 
-    mean_body = post_semantic_drift(books=books, selected=None).json()
+    assert "swinging" in by_term
 
-    means = [term["mean_similarity"] for term in mean_body["nearest_terms"]]
-    assert means == sorted(means, reverse=True)  # the key the sort actually ranked on
-
-    # `flat` sits at a constant 0.8 in every book: nothing to fit, so no trend.
-    flat = next(term for term in mean_body["nearest_terms"] if term["term"] == "flat")
-    assert flat["mean_similarity"] == pytest.approx(0.8, abs=1e-3)
-    assert flat["n_books_with_term"] == len(BOOK_IDS)
-    assert (flat["slope"], flat["r_squared"]) == (0.0, 0.0)
-
-    slope_body = post_semantic_drift(books=books, selected=None, sort="slope").json()
-
-    scores = [
-        abs(term["slope"] * term["r_squared"]) for term in slope_body["nearest_terms"]
+    nearer = [
+        term_data
+        for term_data in ranked
+        if term_data["stability"] > by_term["swinging"]["stability"]
     ]
-    assert scores == sorted(scores, reverse=True)
-
-    # `trending` climbs 0.1 -> 0.9 against evenly spaced years: a straight line.
-    rising = slope_body["nearest_terms"][0]
-    assert rising["term"] == "trending"
-    assert rising["slope"] > 0
-    assert rising["r_squared"] == pytest.approx(1.0, abs=1e-3)
+    assert len(nearer) >= NUM_TERMS_KEPT
 
 
-def test_semantic_drift_term_tags_are_the_union_across_books(post_semantic_drift):
-    verb_id, *_ = TARGET_IDS
-    books = default_books()
-    books[verb_id] = {
-        term: {**entry, "tags": {"V"}} for term, entry in books[verb_id].items()
+def test_semantic_drift_nearest_terms_carry_their_statistics(
+    post_semantic_drift,
+):
+    body = post_semantic_drift(books=swinging_books(), selected=None).json()
+
+    by_term = {term["term"]: term for term in nearest_term_data(body)}
+    # The sample variance of exactly the positions the corpus was built to hold.
+    expected = local_positions(ranking_similarities_by_book())
+    for term in ("swinging", "trending", "flat"):
+        assert by_term[term]["instability"] == pytest.approx(
+            np.var(expected[term], ddof=1), abs=1e-4
+        )
+        assert by_term[term]["stability"] == pytest.approx(
+            np.mean(expected[term]), abs=1e-3
+        )
+        assert by_term[term]["n_books_in"] == len(BOOK_IDS)
+
+    # `flat` sits at a constant 0.8 in every book and still spreads: holding one
+    # distance while the terms around it move *is* the books disagreeing
+    # about where the term sits. It spreads least of the three all the same.
+    assert by_term["flat"]["instability"] > 0.0
+    assert by_term["flat"]["instability"] < by_term["trending"]["instability"]
+
+
+def membership_books(book_ids=BOOK_IDS):
+    """Three terms every book carries, differing in how many books put them
+    among their own nearest ones: `everywhere` in all of them, `sometimes` in
+    the later half, `solo` in just one. Below the fillers is outside a book's
+    nearest terms, above them is inside, which is what moves the count.
+
+    `solo` swings hardest of the three by construction, so a spread ranking
+    leads with it.
+    """
+    last = len(book_ids) - 1
+    half = len(book_ids) // 2
+    return books_from_similarities(
+        {
+            book_id: {
+                "everywhere": 0.9 if index < half else 0.4,
+                "sometimes": 0.04 if index < half else 0.3,
+                "solo": 0.95 if index == last else 0.04,
+                **filler_similarities(),
+            }
+            for index, book_id in enumerate(book_ids)
+        }
+    )
+
+
+def test_semantic_drift_keeps_a_term_only_one_book_places_near_the_query(
+    post_semantic_drift,
+):
+    body = post_semantic_drift(books=membership_books(), selected=None).json()
+    by_term = {term["term"]: term for term in nearest_term_data(body)}
+
+    # One book puts `solo` nearer the query than anything else it carries and
+    # the rest bury it below their own nearest terms -- the widest spread in
+    # the corpus. A term this thin only reaches this stage at all because it
+    # survived ingestion's own vocabulary filtering, so a single book's
+    # membership is signal, not noise: nothing floors it out.
+    assert "solo" in by_term
+    assert by_term["solo"]["n_books_as_top50"] == 1
+    assert by_term["solo"]["n_books_as_top100"] == 1
+
+    assert by_term["everywhere"]["n_books_as_top100"] == CORPUS_SIZE
+    assert by_term["sometimes"]["n_books_as_top100"] == CORPUS_SIZE // 2
+    # Vocabulary is not the same as membership: every book carries all three.
+    for term in ("everywhere", "sometimes", "solo"):
+        assert by_term[term]["n_books_in"] == CORPUS_SIZE
+
+    assert {"everywhere", "sometimes", "solo"} <= set(by_term)
+
+
+def outlying_books(book_ids=BOOK_IDS):
+    return books_from_similarities(
+        {
+            book_id: {
+                "outlying": 0.15 if index < 2 else 0.001,
+                "borderline": (0.5, 0.15)[index] if index < 2 else 0.001,
+                **filler_similarities(),
+            }
+            for index, book_id in enumerate(book_ids)
+        }
+    )
+
+
+def test_semantic_drift_drops_an_unstable_term_no_book_holds_nearest(
+    post_semantic_drift,
+):
+    body = post_semantic_drift(books=outlying_books(), selected=None).json()
+    by_term = {term["term"]: term for term in nearest_term_data(body)}
+
+    assert "outlying" not in by_term
+
+    assert by_term["borderline"]["n_books_as_top50"] == 1
+    assert by_term["borderline"]["n_books_as_top100"] == 2
+
+
+def test_semantic_drift_returns_the_term_the_books_hold_nearest(
+    post_semantic_drift,
+):
+    body = post_semantic_drift(books=swinging_books(), selected=None).json()
+    ranked = nearest_term_data(body)
+
+    assert len(ranked) > NUM_TERMS_KEPT
+
+    nearest = max(ranked, key=lambda term_data: term_data["stability"])
+    assert nearest["term"] == "flat"
+
+
+def offset_similarities_by_book(book_ids=BOOK_IDS):
+    """Books that rank the query's nearest terms identically and disagree only
+    about how far off it sits: every book's similarities are one base profile
+    shifted bodily, the way two texts can hold a whole vocabulary nearer or
+    farther without reordering any of it. A shift and not a rescaling, because a
+    shift is the whole of what centring claims to remove -- a book whose nearest
+    terms are bunched more tightly than another's really does contribute smaller
+    offsets, and that difference is left in on purpose.
+    """
+    span = max(len(book_ids) - 1, 1)
+    base = [
+        0.1 + 0.3 * n / (LOCAL_VOCAB_FLOOR + 2) for n in range(LOCAL_VOCAB_FLOOR + 3)
+    ]
+    return {
+        book_id: {
+            f"term{n:03d}": similarity + 0.45 * index / span
+            for n, similarity in enumerate(base)
+        }
+        for index, book_id in enumerate(book_ids)
     }
 
-    body = post_semantic_drift(books=books).json()
 
-    # Books tag a lemma independently, so a term reads as both parts of speech.
-    assert all(term["tags"] == ["N", "V"] for term in body["nearest_terms"])
+def test_semantic_drift_statistics_read_position_not_distance(
+    post_semantic_drift,
+):
+    """Books never share a coordinate frame, so a book that places the whole
+    vocabulary farther off is not disagreeing about any term in it."""
+
+    similarities = offset_similarities_by_book()
+
+    body = post_semantic_drift(
+        books=books_from_similarities(similarities), selected=None
+    ).json()
+
+    # Read as raw cosines, these books disagree about every term in the corpus --
+    # all of it an artefact of how far from the query each book happens to sit.
+    raw_spreads = [
+        np.var([book[term] for book in similarities.values()], ddof=1)
+        for term in next(iter(similarities.values()))
+    ]
+    assert min(raw_spreads) > 0.01
+
+    # Read as position, they agree, because not one of them reordered anything.
+    # Measured against the disagreement centring was asked to remove, rather than
+    # against a fixed bound, since these are offsets and carry no scale of their
+    # own. Three orders of magnitude down, and what is left is float16 rounding.
+    negligible = min(raw_spreads) / 1000
+    for term_data in nearest_term_data(body):
+        assert term_data["instability"] < negligible, term_data["term"]
+
+
+def test_center_locally_leaves_a_book_with_nothing_to_centre_alone():
+    """The query's own terms are masked out before a profile is centred, so a
+    book carrying nothing else reaches this with no nearest terms at all."""
+    assert (
+        len(center_locally(np.array([]), NUM_NEAREST_TERMS_FOR_SIMILARITY_CENTERING))
+        == 0
+    )
+
+
+def test_an_empty_local_profile_is_returned_rather_than_raised_on():
+    assert (
+        len(
+            get_n_highest_similarities(
+                np.array([]), NUM_NEAREST_TERMS_FOR_SIMILARITY_CENTERING
+            )
+        )
+        == 0
+    )
+    assert (
+        len(get_is_local(np.array([]), NUM_NEAREST_TERMS_FOR_SIMILARITY_CENTERING))
+        == 0
+    )
 
 
 def test_semantic_drift_count_is_each_books_own_word_count(post_semantic_drift):
@@ -361,7 +521,7 @@ def test_semantic_drift_count_is_each_books_own_word_count(post_semantic_drift):
 
     for book_id, count in counts.items():
         assert [entry["count"] for entry in book_scores(body, book_id)] == [count] * (
-            NEAREST_TERM_COUNT + 1
+            len(scored_terms(body)) + 1
         )
 
 
@@ -376,7 +536,7 @@ def test_semantic_drift_count_sums_the_leaves_of_a_compound_expression(
     assert all(entry["count"] == 200 for entry in body["expr"]["books"])
     assert all(
         entry["count"] == 100
-        for term in body["nearest_terms"]
+        for term in nearest_term_data(body)
         for entry in term["books"]
     )
 
@@ -397,7 +557,10 @@ def test_comparative_thin_local_terms_are_not_measured_at_all(post_semantic_drif
     body = post_semantic_drift(
         books={
             SELECTED_ID: book_rows(SELECTED_ID),
-            thin_id: book_rows(thin_id, vocab=VOCAB[: NUM_LOCAL_NEAREST_TERMS - 1]),
+            thin_id: book_rows(
+                thin_id,
+                vocab=VOCAB[: NUM_NEAREST_TERMS_FOR_LOCAL_COSINE_SIMILARITY - 1],
+            ),
             bare_id: book_rows(bare_id, vocab=["labour", "alpha", "beta"]),
             **default_books(full_ids),
         }
@@ -410,14 +573,20 @@ def test_comparative_thin_local_terms_are_not_measured_at_all(post_semantic_drif
     # Nothing was missing, so `n_shared_terms` is what says why. It is the book's
     # BEST overlap, so falling below the floor proves every comparison failed --
     # the one thing separating this from a book absent for want of vocabulary.
-    assert books_by_id(body)[thin_id]["n_shared_terms"] == NUM_LOCAL_NEAREST_TERMS - 1
+    assert (
+        books_by_id(body)[thin_id]["n_shared_terms"]
+        == NUM_NEAREST_TERMS_FOR_LOCAL_COSINE_SIMILARITY - 1
+    )
 
     # A full book clears the floor and is measured.
     full = score(body, full_ids[0], "labour")
-    assert full["similarity"] is not None
+    assert full["mean_similarity"] is not None
     lo, hi = full["similarity_ci"]
-    assert lo <= full["similarity"] <= hi
-    assert books_by_id(body)[full_ids[0]]["n_shared_terms"] >= NUM_LOCAL_NEAREST_TERMS
+    assert lo <= full["mean_similarity"] <= hi
+    assert (
+        books_by_id(body)[full_ids[0]]["n_shared_terms"]
+        >= NUM_NEAREST_TERMS_FOR_LOCAL_COSINE_SIMILARITY
+    )
 
     assert score_or_none(body, bare_id, "labour") is None
     assert book_scores(body, bare_id) == []
@@ -467,7 +636,7 @@ def test_comparative_query_term_absent_from_selected_book_returns_404(
 
 def test_comparative_too_few_targets_returns_404(post_semantic_drift):
 
-    response = post_semantic_drift(book_ids=TARGET_IDS[: MIN_MATCHING_BOOKS - 1])
+    response = post_semantic_drift(book_ids=TARGET_IDS[: MIN_BOOKS_WITH_TERM - 1])
 
     assert response.status_code == 404
     body = response.json()
@@ -509,7 +678,7 @@ def test_semantic_drift_book_missing_query_leaf_is_absent_from_that_term(
     assert book_scores(body, SPARE_ID)  # its other terms are still scored
     assert score_or_none(body, SPARE_ID, "labour") is None
     # The rest have the term; only each other backs their query score now.
-    assert score(body, BOOK_IDS[0], "labour")["similarity"] is not None
+    assert score(body, BOOK_IDS[0], "labour")["mean_similarity"] is not None
     assert score(body, BOOK_IDS[0], "labour")["n_books"] == len(BOOK_IDS) - 1
 
 
@@ -586,33 +755,54 @@ def test_semantic_drift_incomparable_book_does_not_shorten_other_seeds(
     assert books_by_id(body)[SPARE_ID]["n_shared_terms"] == 1
 
 
+def test_semantic_drift_score_is_independent_of_peer_order(post_semantic_drift):
+
+    books = {**default_books(BOOK_IDS), SPARE_ID: book_rows(SPARE_ID, n_seeds=3)}
+
+    def query_score(book_ids):
+        body = post_semantic_drift(books=books, book_ids=book_ids, selected=None).json()
+        return score(body, BOOK_IDS[0], "labour")
+
+    spare_last = query_score([*BOOK_IDS, SPARE_ID])
+    spare_first = query_score([SPARE_ID, *BOOK_IDS])
+
+    assert spare_last["n_seeds"] == 3
+    for field in ("book_id", "count", "n_seeds", "n_books"):
+        assert spare_last[field] == spare_first[field]
+    for field in ("mean_similarity", "similarity_ci"):
+        assert spare_last[field] == pytest.approx(spare_first[field], abs=1e-6)
+
+
 def test_semantic_drift_nearest_terms_not_restricted_to_one_books_vocabulary(
     post_semantic_drift,
 ):
     lacking_id, *carrying_ids = [*BOOK_IDS, SPARE_ID]
 
-    def rows(with_capital):
-        return {
-            "labour": make_fixed_term_entry("labour", [1.0, 0.0]),
-            **(
-                {"capital": fixed_similarity_entry("capital", 0.9)}
-                if with_capital
-                else {}
-            ),
-            **filler_rows(),
-        }
+    # The book lacking `capital` shares nothing else with the others either. Its
+    # own terms are in one vocabulary, so the coverage floor drops them, and the
+    # fillers do not collect a book `capital` cannot -- which under a
+    # presence-led key would outrank it on a count rather than on the reading.
+    lacking_similarities = {
+        term: 0.9 - index / 20
+        for index, term in enumerate(("value", "wage", "rent", "stock", "price"))
+    }
 
     response = post_semantic_drift(
-        books={
-            lacking_id: rows(with_capital=False),
-            **{book_id: rows(with_capital=True) for book_id in carrying_ids},
-        },
+        books=books_from_similarities(
+            {
+                lacking_id: lacking_similarities,
+                **{
+                    book_id: {"capital": 0.9, **filler_similarities()}
+                    for book_id in carrying_ids
+                },
+            }
+        ),
         book_ids=[*BOOK_IDS, SPARE_ID],
         selected=None,
     )
 
     assert response.status_code == 200
-    assert "capital" in nearest_terms(response.json())
+    assert "capital" in scored_terms(response.json())
 
 
 # -- storage-order independence -----------------------------------------------
@@ -760,7 +950,7 @@ def test_semantic_drift_scores_agree_with_and_without_the_batched_cache(
     )
     without_cache = post_semantic_drift(selected=None).json()
 
-    assert nearest_terms(with_cache) == nearest_terms(without_cache)
+    assert scored_terms(with_cache) == scored_terms(without_cache)
     assert with_cache["books"] == without_cache["books"]
 
     batched_terms, plain_terms = term_books(with_cache), term_books(without_cache)
@@ -773,7 +963,7 @@ def test_semantic_drift_scores_agree_with_and_without_the_batched_cache(
             assert batched["n_seeds"] == plain["n_seeds"]
             assert batched["n_books"] == plain["n_books"]
             np.testing.assert_allclose(
-                batched["similarity"], plain["similarity"], atol=1e-6
+                batched["mean_similarity"], plain["mean_similarity"], atol=1e-6
             )
             np.testing.assert_allclose(
                 batched["similarity_ci"], plain["similarity_ci"], atol=1e-6

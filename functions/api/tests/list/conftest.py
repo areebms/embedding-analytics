@@ -1,19 +1,22 @@
 """Fixtures for list-route tests (/books, /terms).
 
 Mocking philosophy:
-- get_pipeline_table and get_term_table are patched at the import boundary
-  in app.list.routers and app.list.services.
+- the pipeline table is reached through the BooksMetadataCache dependency, so the
+  cache is overridden per test; get_term_table is patched at the import
+  boundary in app.list.routers.
 - FastAPICache backend is left uninitialized (REDIS_URL unset),
   so the dependencies.cache shim becomes a no-op.
-- evaluate_tree and the CI math run for real against the app's full router.
+- The list routes run for real against the app's full router.
 """
 
 import os
-import copy
 from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
+
+from app.core.dependencies import get_books_metadata_cache
+from app.core.services import BooksMetadataCache
 
 os.environ.pop("REDIS_URL", None)
 
@@ -51,15 +54,9 @@ DEFAULT_PIPELINE = [
 
 @pytest.fixture
 def mock_pipeline_table():
-    """Pipeline table with two aligned books by default.
-
-    Uses side_effect (not return_value) so each call to get_all_entries
-    returns a fresh deep copy. This prevents BookResponse.from_entry's
-    pop('platform_data') from mutating shared state across calls within
-    a single test.
-    """
+    """Pipeline table with two aligned books by default."""
     table = MagicMock()
-    table.get_all_entries.side_effect = lambda *a, **kw: copy.deepcopy(DEFAULT_PIPELINE)
+    table.get_all_entries.return_value = DEFAULT_PIPELINE
     return table
 
 
@@ -73,11 +70,24 @@ def mock_term_table():
 
 
 @pytest.fixture
-def patch_tables(monkeypatch, mock_pipeline_table, mock_term_table):
+def mock_books_metadata_cache(mock_pipeline_table):
+    """One books cache per test, as production keeps one per warm container."""
+    return BooksMetadataCache(mock_pipeline_table)
+
+
+@pytest.fixture
+def patch_tables(
+    monkeypatch, mock_pipeline_table, mock_term_table, mock_books_metadata_cache
+):
     """Patch list-route storage entry points."""
-    monkeypatch.setattr("app.list.services.get_pipeline_table", lambda: mock_pipeline_table)
+    from main import app
+
+    app.dependency_overrides[get_books_metadata_cache] = (
+        lambda: mock_books_metadata_cache
+    )
     monkeypatch.setattr("app.list.routers.get_book_term_table", lambda: mock_term_table)
-    return mock_pipeline_table, mock_term_table
+    yield mock_pipeline_table, mock_term_table
+    app.dependency_overrides.pop(get_books_metadata_cache, None)
 
 
 @pytest.fixture

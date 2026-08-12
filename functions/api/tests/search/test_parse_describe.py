@@ -18,7 +18,7 @@ def mocked_openai(returns):
     stub.chat.completions.create.return_value = MagicMock(
         choices=[MagicMock(message=MagicMock(content=returns))]
     )
-    return lambda api_key : stub
+    return lambda: stub
 
 
 def _set_vocabulary(term_table, terms):
@@ -38,7 +38,9 @@ def test_parse_describe_happy_path(client, monkeypatch, patch_tables):
     _, term_table = patch_tables
     _set_vocabulary(term_table, ["labour", "value"])
 
-    monkeypatch.setattr("app.search.services.describe.OpenAI", mocked_openai("labour"))
+    monkeypatch.setattr(
+        "app.search.services.describe.get_openai_client", mocked_openai("labour")
+    )
 
     response = client.post("/parse-describe", json={"message": "show me labour"})
 
@@ -54,7 +56,9 @@ def test_parse_describe_with_substitution(client, monkeypatch, patch_tables):
     _, term_table = patch_tables
     _set_vocabulary(term_table, ["labour"])
 
-    monkeypatch.setattr("app.search.services.describe.OpenAI", mocked_openai("labor"))
+    monkeypatch.setattr(
+        "app.search.services.describe.get_openai_client", mocked_openai("labor")
+    )
 
     response = client.post("/parse-describe", json={"message": "show me labor"})
 
@@ -70,24 +74,30 @@ def test_parse_describe_unparseable_returns_400(client, monkeypatch, patch_table
     _, term_table = patch_tables
     _set_vocabulary(term_table, ["labour"])
 
-    monkeypatch.setattr("app.search.services.describe.OpenAI", mocked_openai(""))
+    monkeypatch.setattr(
+        "app.search.services.describe.get_openai_client", mocked_openai("")
+    )
 
     response = client.post("/parse-describe", json={"message": "nonsense"})
 
     assert response.status_code == 400
 
 
-def test_parse_describe_unresolvable_returns_422(client, monkeypatch, patch_tables):
+def test_parse_describe_unresolvable_returns_404(client, monkeypatch, patch_tables):
     _, term_table = patch_tables
     _set_vocabulary(term_table, ["labour"])
 
-    monkeypatch.setattr("app.search.services.describe.OpenAI", mocked_openai("xyzzy"))
+    monkeypatch.setattr(
+        "app.search.services.describe.get_openai_client", mocked_openai("xyzzy")
+    )
     response = client.post("/parse-describe", json={"message": "show me xyzzy"})
 
-    assert response.status_code == 422
-    detail = response.json()["detail"]
-    assert detail["term"] == "xyzzy"
-    assert "candidates" in detail
+    # A finding, not a failure: 404 keeps it off request-validation's 422.
+    assert response.status_code == 404
+    body = response.json()
+    assert body["reason"] == "term_resolution"
+    assert body["term"] == "xyzzy"
+    assert "candidates" in body
 
 
 def test_parse_describe_missing_message_returns_422(client):
@@ -100,7 +110,9 @@ def test_parse_describe_llm_fallback_resolves(client, monkeypatch, patch_tables)
     _, term_table = patch_tables
     _set_vocabulary(term_table, ["labour", "value", "rent"])
 
-    monkeypatch.setattr("app.search.services.describe.OpenAI", mocked_openai("labour"))
+    monkeypatch.setattr(
+        "app.search.services.describe.get_openai_client", mocked_openai("labour")
+    )
 
     response = client.post("/parse-describe", json={"message": "labourx"})
 

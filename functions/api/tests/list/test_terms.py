@@ -35,7 +35,7 @@ def test_terms_lists_multi_book_terms(client, patch_tables):
 
 
 def test_terms_excludes_pos_tag_r(client, patch_tables):
-    """Entries tagged {"R"} (removed) are skipped."""
+    """Entries tagged {"R"} (adverb-only) are skipped."""
     _, term_table = patch_tables
     _set_term_entries(term_table, {
         "gutenberg-1": [
@@ -65,7 +65,7 @@ def test_terms_response_validates_against_schema(client, patch_tables):
         TermResponse.model_validate(entry)
 
 
-def test_terms_books_field_contains_platform_data_ids(client, patch_tables):
+def test_terms_books_field_contains_source_ids(client, patch_tables):
     _, term_table = patch_tables
     _set_term_entries(term_table, {
         "gutenberg-1": [{"term": "labour", "tags": {"N"}}],
@@ -74,7 +74,7 @@ def test_terms_books_field_contains_platform_data_ids(client, patch_tables):
 
     entry = client.get("/terms").json()[0]
 
-    assert set(entry["books"]) == {"gutenberg-1", "gutenberg-2"}
+    assert set(entry["books"]) == {1, 2}
 
 
 def test_terms_empty_corpus(client, patch_tables):

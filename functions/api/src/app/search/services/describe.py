@@ -1,74 +1,43 @@
 import re
 import os
-import logging
 from collections import deque
 from dataclasses import dataclass
 from difflib import get_close_matches
 from functools import lru_cache
+from typing import Literal
 
-from openai import OpenAI
-
+from app.core.logging import add_to_log
+from app.search.services.utils import extract_terms, serialize_expression
 from app.search.constants import PARSE_SYSTEM_PROMPT, FALLBACK_PROMPT
-from app.search.schemas.search_expr import OpNode, TermNode
-from shared.tables.pipeline import get_pipeline_table
-from shared.tables.book_terms import get_book_term_table
+from app.search.schemas.semantic_drift import OpNode, TermNode
+from app.search.errors import TermResolutionError
+from shared.commons import BookIndex
+from shared.tables.book_terms import ADVERB_TAGS, get_book_term_table
 
-logger = logging.getLogger(__name__)
 
+def get_openai_client():
+    from openai import OpenAI
 
-# ---------------------------------------------------------------------------
-# Vocabulary
-# ---------------------------------------------------------------------------
+    return OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 
 @lru_cache(maxsize=1)
-def get_vocabulary() -> tuple[set[str], list[str]]:
+def get_vocabulary(book_ids: tuple[BookIndex, ...]) -> tuple[set[str], list[str]]:
     """Load the term vocabulary from DynamoDB (same source as /terms).
 
     Cached for the lifetime of the Lambda instance.
     """
-    book_ids = [
-        item["platform_data"]
-        for item in get_pipeline_table().get_all_entries(
-            ["platform_data", "s3_prefix_models"]
-        )
-        if "s3_prefix_models" in item
-    ]
-
     terms: set[str] = set()
     term_table = get_book_term_table()
     for book_id in book_ids:
         for item in term_table.get_entries(book_id, fields=["term", "tags"]):
-            if item.get("tags") == {"R"}:
+            if item.get("tags") == ADVERB_TAGS:
                 continue
             terms.add(item["term"])
 
     sorted_terms = sorted(terms)
-    logger.info("Loaded vocabulary: %d terms", len(sorted_terms))
+    add_to_log(vocab_terms=len(sorted_terms))
     return terms, sorted_terms
-
-
-# ---------------------------------------------------------------------------
-# Expression serialization
-# ---------------------------------------------------------------------------
-
-
-def serialize_expression(tree: TermNode | OpNode, *, strip_outer: bool = False) -> str:
-    """Convert a TermNode/OpNode tree back into an expression string.
-
-    Every binary operation is wrapped in parentheses.
-    If strip_outer is True, the outermost parentheses are removed.
-    """
-    if isinstance(tree, TermNode):
-        return tree.term
-
-    if isinstance(tree, OpNode):
-        left = serialize_expression(tree.args[0])
-        right = serialize_expression(tree.args[1])
-        result = f"({left} {tree.op} {right})"
-        return result[1:-1] if strip_outer else result
-
-    raise TypeError(f"Expected TermNode or OpNode, got {type(tree).__name__}")
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +75,7 @@ def parse_expression(raw: str) -> TermNode | OpNode | None:
     def binary_expression() -> TermNode | OpNode | None:
         left_operand = get_operand()
         while left_operand and q and q[0] in ("+", "-"):
-            op = q.popleft()
+            op: Literal["+", "-"] = "+" if q.popleft() == "+" else "-"
             right_operand = get_operand()
             if right_operand is None:
                 return None
@@ -117,46 +86,7 @@ def parse_expression(raw: str) -> TermNode | OpNode | None:
     return tree if tree and not q else None
 
 
-def extract_terms(tree: TermNode | OpNode) -> list[str]:
-    """Extract all term strings from a parsed tree."""
-    terms: list[str] = []
-    stack: list[TermNode | OpNode] = [tree]
-
-    while stack:
-        node = stack.pop()
-        if isinstance(node, TermNode):
-            terms.append(node.term)
-        elif isinstance(node, OpNode):
-            for i in range(len(node.args) - 1, -1, -1):
-                stack.append(node.args[i])
-
-    return terms
-
-
-# ---------------------------------------------------------------------------
-# Term resolution (vocabulary-level)
-# ---------------------------------------------------------------------------
-
-
-class TermResolutionError(Exception):
-    """Raised when a term cannot be resolved to any vocabulary entry."""
-
-    def __init__(self, term: str, candidates: list[str]):
-        self.term = term
-        self.candidates = candidates
-        if candidates:
-            msg = (
-                f"No matching term found for '{term}'. "
-                f"Did you mean: {', '.join(candidates)}?"
-            )
-        else:
-            msg = (
-                f"No matching term found for '{term}'. No similar terms in vocabulary."
-            )
-        super().__init__(msg)
-
-
-def resolve_vocabulary_term(term: str) -> str:
+def resolve_vocabulary_term(term: str, book_ids: tuple[BookIndex, ...]) -> str:
     """Resolve a single term against the vocabulary.
 
     Returns the term unchanged if it exists, a fuzzy match if one is close
@@ -164,23 +94,21 @@ def resolve_vocabulary_term(term: str) -> str:
 
     Raises TermResolutionError if no resolution is possible.
     """
-    vocab, vocab_list = get_vocabulary()
+    vocab, vocab_list = get_vocabulary(book_ids)
 
     if term in vocab:
         return term
 
-    # Step 1: high-confidence fuzzy match (free)
     close = get_close_matches(term, vocab_list, n=1, cutoff=0.6)
     if close:
         return close[0]
 
-    # Step 2: LLM fallback with narrowed candidates
     candidates = get_close_matches(term, vocab_list, n=20, cutoff=0.3)
     if not candidates:
         fallback = [w for w in vocab_list if term and w[0] == term[0]]
         raise TermResolutionError(term, fallback[:5])
 
-    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    client = get_openai_client()
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         max_tokens=20,
@@ -195,16 +123,11 @@ def resolve_vocabulary_term(term: str) -> str:
         ],
     )
 
-    result = response.choices[0].message.content.strip().lower()
-    if result in vocab:
-        return result
+    content = response.choices[0].message.content
+    if content and content.strip().lower() in vocab:
+        return content.strip().lower()
 
     raise TermResolutionError(term, candidates[:5])
-
-
-# ---------------------------------------------------------------------------
-# Tree resolution
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -214,7 +137,7 @@ class Substitution:
 
 
 def autocorrect_term_tree(
-    tree: TermNode | OpNode,
+    tree: TermNode | OpNode, book_ids: tuple[BookIndex, ...]
 ) -> tuple[TermNode | OpNode, list[Substitution]]:
     """Walk the tree and resolve every term against the vocabulary.
 
@@ -225,7 +148,7 @@ def autocorrect_term_tree(
 
     def walk(node: TermNode | OpNode) -> TermNode | OpNode:
         if isinstance(node, TermNode):
-            resolved = resolve_vocabulary_term(node.term)
+            resolved = resolve_vocabulary_term(node.term, book_ids)
             if resolved != node.term:
                 substitutions.append(
                     Substitution(original=node.term, resolved=resolved)
@@ -238,14 +161,9 @@ def autocorrect_term_tree(
     return resolved_tree, substitutions
 
 
-# ---------------------------------------------------------------------------
-# Chat pipeline (steps 2-4)
-# ---------------------------------------------------------------------------
-
-
 def llm_generate_expression(message: str) -> str:
     """Call gpt-4o-mini to convert natural language into an expression string."""
-    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    client = get_openai_client()
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
@@ -255,11 +173,12 @@ def llm_generate_expression(message: str) -> str:
         temperature=0,
         max_tokens=200,
     )
-    return response.choices[0].message.content.strip()
+    content = response.choices[0].message.content
+    return (content or "").strip()
 
 
 def process_describe_query(
-    message: str,
+    message: str, book_ids: tuple[BookIndex, ...]
 ) -> tuple[str, list[str], list[Substitution]]:
     """End-to-end: natural language in, resolved expression out.
 
@@ -269,18 +188,15 @@ def process_describe_query(
         ValueError: if the LLM output cannot be parsed.
         TermResolutionError: if any term cannot be resolved.
     """
-    # Step 2: LLM generates expression string
     raw_expression = llm_generate_expression(message)
 
-    # Step 3: parse into tree
     tree = parse_expression(raw_expression)
     if tree is None:
         raise ValueError(
             f"Failed to parse LLM output into a valid expression: '{raw_expression}'"
         )
 
-    # Step 4: resolve terms and rebuild
-    resolved_tree, substitutions = autocorrect_term_tree(tree)
+    resolved_tree, substitutions = autocorrect_term_tree(tree, book_ids)
 
     expression = serialize_expression(resolved_tree, strip_outer=True)
     terms = extract_terms(resolved_tree)

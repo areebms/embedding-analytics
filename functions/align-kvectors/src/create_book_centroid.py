@@ -6,59 +6,14 @@ import numpy as np
 from shared.session import get_session
 from shared.tables.pipeline import get_pipeline_table
 from procrustes_utils import (
-    rotate,
-    load_corpus_centroid,
-    weighted_orthogonal_procrustes,
     S3Kvectors,
     gradient_descent_alignment,
-    build_centroid_kvector
+    build_centroid_kvector,
 )
 
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-
-
-def align_to_corpus_centroid(centroid, kvector_stack, session):
-    """
-    If a corpus_centroid exists, solve closed-form Procrustes between this
-    book's centroid and the corpus, then apply the resulting rotation to
-    the centroid AND every per-seed kvector in place. After this returns,
-    everything in `kvector_stack` plus `centroid` is in the corpus frame.
-
-    Returns the corpus disparity, or None if no corpus alignment was applied
-    (bootstrap case, or insufficient stable anchors).
-    """
-    corpus_centroid = load_corpus_centroid(session)
-    if corpus_centroid is None:
-        logger.info(
-            "No corpus centroid found — book stored in within-book frame. "
-            "Run rebuild_corpus.py to establish or update the corpus frame."
-        )
-        return None
-
-    anchor_list = sorted(set(centroid.key_to_index) & set(corpus_centroid.key_to_index))
-
-    book_matrix = np.stack([centroid[w] for w in anchor_list]).astype(np.float32)
-    corpus_matrix = np.stack([corpus_centroid[w] for w in anchor_list]).astype(
-        np.float32
-    )
-    counts = np.array(
-        [corpus_centroid.get_vecattr(w, "count") or 1 for w in anchor_list],
-        dtype=np.float32,
-    )
-
-    result = weighted_orthogonal_procrustes(book_matrix, corpus_matrix, counts)
-    rotate(centroid, result.R)
-    for kv in kvector_stack:
-        rotate(kv, result.R)
-
-    logger.info(
-        "Aligned to corpus on %d anchors, disparity=%.4f",
-        len(anchor_list),
-        result.disparity,
-    )
-    return result.disparity
 
 
 def align_kvectors(index):
@@ -85,17 +40,15 @@ def align_kvectors(index):
 
     centroid = build_centroid_kvector(terms, counts, residuals, centroid_vectors)
 
-    corpus_disparity = align_to_corpus_centroid(centroid, kvector_stack, session)
-
     s3_kvectors.upload("aligned", centroid, kvector_stack, file_names)
 
-    updates = {
-        "mean_disparity": Decimal(str(mean_disparity)),
-        "s3_prefix_models": f"kvectors/{index}/",
-    }
-    if corpus_disparity is not None:
-        updates["corpus_disparity"] = Decimal(str(corpus_disparity))
-    table.update_entries(index, updates)
+    table.update_entries(
+        index,
+        {
+            "mean_disparity": Decimal(str(mean_disparity)),
+            "s3_prefix_models": f"kvectors/{index}/",
+        },
+    )
 
     return {"index": index, "mean_disparity": mean_disparity}
 

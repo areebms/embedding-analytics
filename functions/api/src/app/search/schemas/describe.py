@@ -5,7 +5,7 @@ class ParseDescribeRequest(BaseModel):
     message: str
 
 
-class SubstitutionResult(BaseModel):
+class SubstitutionResponse(BaseModel):
     original: str
     resolved: str
 
@@ -13,4 +13,4 @@ class SubstitutionResult(BaseModel):
 class ParseDescribeResponse(BaseModel):
     expression: str
     terms: list[str]
-    substitutions: list[SubstitutionResult]
+    substitutions: list[SubstitutionResponse]

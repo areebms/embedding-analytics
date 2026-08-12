@@ -30,7 +30,7 @@ class BookSimilarityVectors:
 
         self.terms = book_terms[self.is_valid]
         self.similarity_vectors = similarity_vectors[:, self.is_valid]
-        self.mean_similarities = self.similarity_vectors.mean(axis=0)
+        self.mean_similarities_to_query = self.similarity_vectors.mean(axis=0)
 
     @staticmethod
     def get_similarity_vectors(query_vectors: np.ndarray, term_vectors: np.ndarray):
@@ -40,7 +40,7 @@ class BookSimilarityVectors:
             ..., 0
         ]
 
-    def get_local_cosine_similarity(self, peer: BookSimilarityVectors):
+    def get_local_similarity(self, peer: BookSimilarityVectors):
         # returns one value per seed
 
         indexes, peer_indexes = self.books_term_cache.get_shared_term_indexes(
@@ -56,7 +56,7 @@ class BookSimilarityVectors:
             )
 
         # vectors of terms closest to the expression.
-        shared_similarity_vectors = self.mean_similarities[shared_indexes]
+        shared_similarity_vectors = self.mean_similarities_to_query[shared_indexes]
         sorted_iloc = np.argsort(-shared_similarity_vectors)[
             :NUM_NEAREST_TERMS_FOR_LOCAL_COSINE_SIMILARITY
         ]
@@ -75,7 +75,7 @@ class BookSimilarityVectors:
         return self.correlate_vectors(shared_book_vectors, shared_peer_vectors)
 
     @staticmethod
-    def correlate_vectors(a_vectors, b_vectors):
+    def correlate_vectors(a_vectors: np.ndarray, b_vectors: np.ndarray) -> np.ndarray:
         a_centered = center_vectors(a_vectors)
         b_centered = center_vectors(b_vectors)
         a_dot_b = np.einsum("...i,...i->...", a_centered, b_centered)

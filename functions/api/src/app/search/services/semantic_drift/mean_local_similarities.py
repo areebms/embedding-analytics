@@ -10,11 +10,15 @@ from app.search.constants import (
     MIN_BOOKS_WITH_UNSTABLE_TERM_AS_TOP_50,
     NUM_NEAREST_TERMS_FOR_SIMILARITY_CENTERING,
     NUM_RELEVANT_TERMS_FOR_INSTABILITY,
-    NUM_TERMS_KEPT,
+    NUM_COMPARATIVE_TERMS,
     T_CRIT_95,
 )
 from app.search.errors import NoLocalNearestTermsError
-from app.search.schemas.semantic_drift import BookLocalMeanSimilarity, TermStats
+from app.search.schemas.semantic_drift import (
+    DefinitionalAgreement,
+    DefinitionalAgreementToCorpus,
+    TermStats,
+)
 from app.search.services.semantic_drift.book_similarity_vectors import (
     BooksSimilarityCache,
 )
@@ -81,7 +85,7 @@ def get_comparative_terms(
 
     for book_id in book_ids:
         book_similarity_vectors = books_similarity_cache.load_book(book_id, query)
-        book_similarities = book_similarity_vectors.mean_similarities
+        book_similarities = book_similarity_vectors.mean_similarities_to_query
         book_similarities_list.append(book_similarities)
         book_terms_list.append(book_similarity_vectors.terms)
         book_similarities_centered_list.append(
@@ -114,16 +118,16 @@ def get_comparative_terms(
     n_books_100 = np.bincount(term_iloc, weights=is_in_top_100).astype(np.intp)
 
     all_similarities = np.concat(book_similarities_centered_list)
-    mean_similarities = np.bincount(term_iloc, weights=all_similarities) / n_books_in
+    centered_similarity_stability = np.bincount(term_iloc, weights=all_similarities) / n_books_in
 
     variance = np.bincount(
-        term_iloc, weights=(all_similarities - mean_similarities[term_iloc]) ** 2
+        term_iloc, weights=(all_similarities - centered_similarity_stability[term_iloc]) ** 2
     ) / np.maximum(n_books_in - 1, 1)
 
     def make_term_stats(iloc: np.intp) -> TermStats:
         return TermStats(
             term=str(terms[iloc]),
-            stability=float(mean_similarities[iloc]),
+            stability=float(centered_similarity_stability[iloc]),
             instability=float(variance[iloc]),
             n_books_in=int(n_books_in[iloc]),
             n_books_as_top50=int(n_books_50[iloc]),
@@ -133,8 +137,8 @@ def get_comparative_terms(
     mean_iloc = np.flatnonzero(
         is_relevant_to_corpus & (n_books_50 >= MIN_BOOKS_WITH_TERM_IN_NEAREST_TERMS)
     )
-    mean_ranked = mean_iloc[np.argsort(-mean_similarities[mean_iloc], kind="stable")][
-        :NUM_TERMS_KEPT
+    mean_ranked = mean_iloc[np.argsort(-centered_similarity_stability[mean_iloc], kind="stable")][
+        :NUM_COMPARATIVE_TERMS
     ]
 
     variance_iloc = np.flatnonzero(
@@ -143,54 +147,76 @@ def get_comparative_terms(
         & (n_books_50 >= MIN_BOOKS_WITH_UNSTABLE_TERM_AS_TOP_50)
     )
     most_similar_iloc = variance_iloc[
-        np.argsort(-mean_similarities[variance_iloc], kind="stable")
+        np.argsort(-centered_similarity_stability[variance_iloc], kind="stable")
     ]
     pool_iloc = np.sort(most_similar_iloc[:NUM_RELEVANT_TERMS_FOR_INSTABILITY])
     variance_ranked = pool_iloc[
-        np.argsort(-variance[pool_iloc], kind="stable")[:NUM_TERMS_KEPT]
+        np.argsort(-variance[pool_iloc], kind="stable")[:NUM_COMPARATIVE_TERMS]
     ]
 
     return [make_term_stats(iloc) for iloc in np.union1d(mean_ranked, variance_ranked)]
 
 
-def get_local_mean_similarity_per_book(
+def t_crit_95(df: int) -> float:
+    """Two-tailed 95% critical value for `df` degrees of freedom."""
+    return T_CRIT_95[df] if df < len(T_CRIT_95) else 1.96
+
+
+def standard_error_half_width(observations: np.ndarray) -> float:
+    """Half-width of the 95% interval on the mean of `observations`."""
+    n = len(observations)
+    if n < 2:
+        return 0.0
+    sd = float(np.std(observations, ddof=1))
+    return t_crit_95(n - 1) * sd / np.sqrt(n)
+
+
+def get_mean_local_similarity_per_book(
     book_id: BookIndex,
     local_similarities_per_peer: list[np.ndarray],
-    count: int,
+    occurrences: int,
+    *,
+    against_corpus: bool,
 ):
 
     n_seeds = min(len(similarity) for similarity in local_similarities_per_peer)
-    mean_local_similarities_per_seed = np.mean(
-        [similarity[:n_seeds] for similarity in local_similarities_per_peer], axis=0
-    )
+    truncated = [similarity[:n_seeds] for similarity in local_similarities_per_peer]
+
+    mean_local_similarities_per_seed = np.mean(truncated, axis=0)
     mean_local_similarity = float(np.mean(mean_local_similarities_per_seed))
 
-    if n_seeds > 1:
-        t_crit = T_CRIT_95[n_seeds - 1] if n_seeds - 1 < len(T_CRIT_95) else 1.96
-        sd = float(np.std(mean_local_similarities_per_seed, ddof=1))
-        ci_half = t_crit * sd / np.sqrt(n_seeds)
+    per_peer_means = np.array([similarity.mean() for similarity in truncated])
+    if against_corpus and len(per_peer_means) > 1:
+        ci_half = standard_error_half_width(per_peer_means)
     else:
-        sd = ci_half = 0.0
+        ci_half = standard_error_half_width(mean_local_similarities_per_seed)
 
-    return BookLocalMeanSimilarity(
+    ci = (mean_local_similarity - ci_half, mean_local_similarity + ci_half)
+
+    if against_corpus:
+        return DefinitionalAgreementToCorpus(
+            book_id=book_id.source_id,
+            mean_local_similarity=mean_local_similarity,
+            ci=ci,
+            occurrences=occurrences,
+            n_seeds=n_seeds,
+            n_books=len(local_similarities_per_peer),
+        )
+    return DefinitionalAgreement(
         book_id=book_id.source_id,
-        mean_similarity=mean_local_similarity,
-        similarity_ci=(
-            mean_local_similarity - ci_half,
-            mean_local_similarity + ci_half,
-        ),
-        count=count,
+        mean_local_similarity=mean_local_similarity,
+        ci=ci,
+        occurrences=occurrences,
         n_seeds=n_seeds,
-        n_books=len(local_similarities_per_peer),
     )
 
 
-def get_local_mean_similarities(
+def get_mean_local_similarities(
     books_similarity_cache: BooksSimilarityCache,
     expr: SearchExpr,
     book_ids: list[BookIndex],
     selected_book_id: BookIndex | None = None,
-) -> list[BookLocalMeanSimilarity]:
+) -> list[DefinitionalAgreement] | list[DefinitionalAgreementToCorpus]:
 
     books_similarity_vectors = books_similarity_cache.load_books(book_ids, expr)
 
@@ -199,16 +225,14 @@ def get_local_mean_similarities(
     else:
         peers = [books_similarity_cache.load_book(selected_book_id, expr)]
 
-    books_data: list[BookLocalMeanSimilarity] = []
+    books_data = []
     for book_similarity_vectors in books_similarity_vectors:
         local_similarities_per_peer = []
         for peer in peers:
             if peer.book_id == book_similarity_vectors.book_id:
                 continue
             try:
-                local_similarity = book_similarity_vectors.get_local_cosine_similarity(
-                    peer
-                )
+                local_similarity = book_similarity_vectors.get_local_similarity(peer)
             except NoLocalNearestTermsError:
                 continue
             local_similarities_per_peer.append(local_similarity)
@@ -220,11 +244,14 @@ def get_local_mean_similarities(
         book_terms = books_similarity_cache.books_term_cache[
             book_similarity_vectors.book_id
         ]
-        count = sum(book_terms.get_term_count(term) for term in expr.terms)
+        occurrences = sum(book_terms.get_term_count(term) for term in expr.terms)
 
         books_data.append(
-            get_local_mean_similarity_per_book(
-                book_similarity_vectors.book_id, local_similarities_per_peer, count
+            get_mean_local_similarity_per_book(
+                book_similarity_vectors.book_id,
+                local_similarities_per_peer,
+                occurrences,
+                against_corpus=selected_book_id is None,
             )
         )
 

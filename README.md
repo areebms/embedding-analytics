@@ -1,57 +1,43 @@
-# Embedding Analytics: Backend
+# Embedding Analytics
 
-Six containerized Python microservices on AWS Lambda, orchestrated by Step Functions, serving a FastAPI API backed by DynamoDB and Redis.
+A shared word does not guarantee a shared concept. Competing treatises, legal opinions, technical standards, and technical specifications may use the same vocabulary but strongly disagree about the definitions. It traditionally requires a very close and careful reading to identify such changes in meaning.
 
-The system trains Word2Vec model ensembles, aligns them via Generalized Procrustes Analysis, and scores queries across the ensemble rather than a single model, reporting every value with a 95% confidence interval. Natural-language queries are translated into validated expression trees through an LLM pipeline with deterministic guardrails.
+Embedding Analytics provides an alternative method to capture semantic drift. It allows you to search expressions and find comparative terms that every document within the corpus define similarly or inconstently. Stable comparative terms indicate aspects of meaning that the all authors keeps consistent, whereas unstable comparative terms indicate aspects of the meaning that change between authors. Embedding Analytics allows you to query what "labour" meant to Adam Smith versus John Stuart Mill, in vector arithmetic as `labour + (productive - unproductive)` or in plain English.
+
+![The query "value" scored across five books, 1767 to 1850. The thick line follows the query itself with its 95% confidence band; the lighter points are neighbouring terms, each carrying its own interval.](docs/assets/demo.png)
+
+Behind it: six containerized Lambdas that train a Word2Vec ensemble per book, align them with Generalized Procrustes Analysis, and report every score with a 95% confidence interval rather than a single number. Natural-language queries become validated expression trees through an LLM pipeline with deterministic guardrails.
 
 **Live demo:** https://www.embedding-analytics.com
 **Frontend repo:** https://github.com/areebms/embedding-analytics-frontend
 
 ---
 
-## Engineering highlights
-
-- **Microservices pipeline:** Six independent, containerized Lambda stages for scraping, tokenization, model training, vector alignment, publishing, and API serving
-- **Fan-out orchestration:** Step Functions Map state trains N seeded models in parallel, converging into a single alignment stage
-- **Dual serving layer:** S3 holds intermediate artifacts during training; a publish stage fans results out to DynamoDB (per-seed ensemble vectors, term metadata) and Pinecone (indexed centroid vectors), pruning deprecated terms on republish
-- **LLM integration with guardrails:** OpenAI-powered natural-language parsing bounded by recursive descent validation, tiered vocabulary resolution, and structured error recovery
-- **Ensemble confidence scoring:** Queries are evaluated across every aligned model independently, producing 95% confidence intervals instead of single-point similarity scores
-- **Test-gated deploys:** Per-service pytest suites run inside a dedicated Docker test stage before any image is pushed; the API suite enforces an 85% coverage floor
-- **Zero idle cost:** Fully serverless, containerized, no always-on infrastructure
-
-The domain is classical political economy, but the architecture maps directly to production AI infrastructure: data ingestion, model generation, vector indexing and serving, LLM parsing, validation, caching, and low-cost cloud deployment.
-
----
-
 ## What the product does
 
-A standard Word2Vec interface returns nearest neighbours for a single term. This system supports compositional queries with vector arithmetic.
+A standard Word2Vec interface returns the nearest terms for a single term. This system takes compositional queries built with vector arithmetic. Addition narrows context. `capital + profit` pulls "capital" toward its economic sense and away from the geographical one. Subtraction creates a contrast direction. `labour + (productive - unproductive)` finds terms close to productive labour and far from unproductive labour.
 
-A single term like `capital` can return results from multiple meanings. Adding a second term narrows the context:
+A query returns five comparative terms. Each carries a stability score, the mean position the books give it near the query, and an instability score, the variance of those positions. Each book's own score against a term arrives with a 95% confidence interval. The two scores answer different questions. Querying `value` returns the following stable and unstable terms:
 
-```text
-capital + profit
-```
+| Neighbour | Stability | Instability |
+|---|---:|---:|
+| silver | +0.128 | 0.009 |
+| gold | +0.115 | 0.006 |
+| metal | +0.107 | 0.010 |
+| commodity | +0.101 | 0.010 |
+| money | +0.100 | 0.009 |
 
-This pulls "capital" toward its economic sense and away from the geographical one.
+Every author places value among the things value is measured in.
 
-Subtraction creates contrast directions. The query `labour + (productive - unproductive)` starts with labour and tilts it toward the productive side of the productive/unproductive distinction:
+| Neighbour | Stability | Instability |
+|---|---:|---:|
+| utility | −0.072 | 0.058 |
+| labour | −0.046 | 0.037 |
+| coin | +0.035 | 0.037 |
+| medium | −0.099 | 0.037 |
+| found | −0.160 | 0.033 |
 
-```text
-labour + (productive - unproductive)
-```
-
-The backend evaluates that expression against each aligned model in the ensemble and returns ranked terms with 95% confidence intervals. Results reflect contextual proximity, not dictionary meaning: two terms score highly because the authors discuss them in similar contexts, not because they are synonyms. Tight intervals indicate the relationship was consistent across training runs; wide intervals flag instability.
-
-Users can also type plain English:
-
-```text
-productive vs unproductive labour
-```
-
-The backend converts that into a validated expression tree, resolves every term against the corpus vocabulary, and returns the structured expression for the frontend to render and edit.
-
-More detail: [`docs/guide.md`](docs/guide.md)
+The two rival theories of value, utility and labour, rank 1 and 2.
 
 ---
 
@@ -81,147 +67,35 @@ graph TD
         SCR[Scrape] --> TOK[Tokenize] --> TRN["Train Word2Vec x N seeds"] --> ALN[Align Models] --> PUB[Publish Vectors]
     end
 
-    subgraph Corpus [Corpus Alignment]
-        direction LR
-        BCC[Build Corpus Centroid]
-    end
-
     SF --> Pipeline
     Pipeline --> S3
     PUB --> DDB
     PUB --> PC
     FAPI <--> DDB
     FAPI -. optional .-> RED
-    Corpus --> S3
 ```
-
----
-
-## Tech stack
 
 | Area | Tools |
 |---|---|
 | API | Python 3.13, FastAPI, Mangum, Pydantic |
 | AI/ML | Gensim Word2Vec, NumPy, SciPy, OpenAI API |
-| Vector index | Pinecone (centroid index, written by `publish`) |
 | Cloud | AWS Lambda, Step Functions, S3, DynamoDB, ECR |
-| Caching | Redis, fastapi-cache |
 | NLP/Data | spaCy, NLTK, WordNet, BeautifulSoup |
 | Testing | pytest, coverage gating, Docker test stages |
 | Infrastructure | Docker, Docker Compose, Bash |
 
----
-
-## Pipeline
-
-Six containerized Lambda services, each a single stage with its own memory and timeout configuration:
-
-| Stage | What it does | Output |
-|---|---|---|
-| `scrape` | Pulls source text and metadata from Project Gutenberg | HTML, clean text, metadata in S3 |
-| `tokenize` | Segments, lemmatizes, normalizes spelling, tags POS | Token CSVs in S3 |
-| `train-kvector` | Trains one seeded Word2Vec model | `.model` artifact in S3 |
-| `align-kvectors` | Aligns seed models into a shared vector space via GPA | Rotated models + centroid in S3 |
-| `publish` | Fans out to the serving layer | Per-seed vectors + metadata in DynamoDB, centroid vectors in Pinecone |
-| `api` | Serves books, terms, and NL parse endpoints | JSON responses via Lambda Function URL |
-
-Step Function flow:
-
-```text
-scrape --> tokenize --> train-kvector Map(N seeds) --> align-kvectors --> publish
-```
-
-Every stage is idempotent: failed or repeated runs skip already-completed work and resume safely. Republishing a book also removes terms that no longer exist in the new model from Pinecone and the corpus vocabulary.
-
-More detail: [`docs/pipeline.md`](docs/pipeline.md)
+Six independent containerized Lambda stages for scraping, tokenization, model training, vector alignment, publishing, and API serving. A Step Functions Map state trains N seeded models in parallel and converges into a single alignment stage. S3 holds intermediate artifacts; a publish stage fans results out to DynamoDB and Pinecone. Fully serverless, no always-on infrastructure. Per-service pytest suites run inside a dedicated Docker test stage before any image is pushed, and the API suite enforces an 85% coverage floor.
 
 ---
 
-## Storage model
+## Documentation
 
-| Store | Role |
+| Document | What's in it |
 |---|---|
-| `PipelineTable` (DynamoDB) | Per-book pipeline state, S3 artifact keys, author/title/year metadata |
-| `BookTermTable` (DynamoDB) | One row per (term, book): per-seed aligned vectors (float16), alignment stats, token positions, POS tags, counts |
-| `CorpusTermTable` (DynamoDB) | Single-partition table mapping each term to the books that contain it, for fast cross-book vocabulary queries |
-| Pinecone index | One centroid vector per (book, term), keyed `{book_id}::{term}`, with metadata for book and POS filtering at query time |
-| S3 | Intermediate training artifacts: raw text, token CSVs, seed models, aligned models, centroids |
-
----
-
-## API endpoints
-
-### `GET /books`
-
-Returns every corpus that has completed the full pipeline.
-
-```json
-[
-  {
-    "id": 3300,
-    "label": "Smith (1776)",
-    "author": "Smith, Adam",
-    "title": "An Inquiry into...",
-    "published_year": 1776
-  }
-]
-```
-
-### `GET /terms`
-
-Returns the cross-book vocabulary. Terms must appear in at least two books. Adverb-only terms are excluded.
-
-```json
-[
-  {
-    "term": "labour",
-    "books": ["gutenberg-3300", "gutenberg-846"]
-  }
-]
-```
-
-### `POST /parse-describe`
-
-Converts plain English into a validated vector expression. Uses an LLM for expression generation, then validates via recursive descent parsing and resolves every term against the DynamoDB vocabulary through a three-tier fallback (exact match, fuzzy match, LLM-assisted resolution). Returns 422 with candidate suggestions when a term cannot be resolved.
-
-Request:
-
-```json
-{ "message": "productive vs unproductive labour" }
-```
-
-Response:
-
-```json
-{
-  "expression": "labour + (productive - unproductive)",
-  "terms": ["labour", "productive", "unproductive"],
-  "substitutions": []
-}
-```
-
-More detail: [`docs/describe.md`](docs/describe.md)
-
----
-
-## Alignment and reliability
-
-A single Word2Vec model trained on a small corpus is unreliable. This backend trains multiple seeded models, aligns them with Generalized Procrustes Analysis, and evaluates every query across the full ensemble to produce 95% confidence intervals.
-
-Within-book GPA aligns the seed models for each book into a per-book centroid with per-term stability metrics.
-
-The result is a reliability signal that a standard embedding tool does not provide: tight CI means the relationship was stable across training runs, wide CI means treat with skepticism.
-
-More detail: [`docs/alignment.md`](docs/alignment.md)
-
----
-
-## Testing
-
-- Per-service pytest suites cover the API routers and services, publish, alignment, and shared table clients
-- Deploys are test-gated: `deploy_lambdas.sh` builds a dedicated `test` stage of each multi-stage Dockerfile and runs the suite against the production dependency set; a failure aborts before any image is built or pushed
-- The API suite enforces an 85% line-coverage floor (`--cov-fail-under=85`)
-- Services can define a `smoke_cmd` in `services.yaml` that runs against the production image before it is pushed to ECR
+| [Pipeline](docs/internals.md) | The six stages and what each one produces, with a link to each stage's own docs |
+| [API](functions/api/README.md) | The request path, what the score measures, and the API contract |
+| [Operations](docs/operations.md) | Orchestration, observability, configuration, and deployment |
+| [Changelog](CHANGELOG.md) | Release history |
 
 ---
 
@@ -235,104 +109,23 @@ docker compose build
 docker compose up lambda-api    # --> http://localhost:8000
 ```
 
-Run the per-book pipeline:
+`.env` needs real values first. The image names in `docker-compose.yml` interpolate `AWS_ACCOUNT_ID`
+and `AWS_REGION`, and the API reads the DynamoDB tables that `publish` writes, so a clone with an
+empty `.env` will build and start but answer every query against an empty vocabulary. There is no
+bundled fixture corpus yet — running the system on your own texts means running the pipeline first.
+To see it working on the five-book corpus without any of that, use the
+[live demo](https://www.embedding-analytics.com).
 
-```bash
-docker compose run lambda-scrape python main.py --platform gutenberg --id 3300
-docker compose run lambda-tokenize python main.py --platform gutenberg --id 3300
-docker compose run lambda-train-kvector python main.py --platform gutenberg --id 3300 --seed 1
-docker compose run lambda-train-kvector python main.py --platform gutenberg --id 3300 --seed 2
-docker compose run lambda-align-kvectors python create_book_centroid.py
-docker compose run lambda-publish python publish_to_api.py
-```
-
-`create_book_centroid.py` and `publish_to_api.py` iterate over every book in the pipeline table; both are idempotent, and publish prunes terms that no longer exist after retraining.
-
-Per-service VS Code devcontainers for the API, alignment, and publish services live in `.devcontainer/`.
-
----
-
-## Deployment
-
-```bash
-./infra/deploy_lambdas.sh scrape tokenize train-kvector align-kvectors publish api
-./infra/deploy_step_function.sh
-```
-
-Deployment scripts build Docker images for `linux/amd64`, run the service's test suite inside the image, push to ECR, and create or update Lambda services only when the image or configuration has changed.
-
----
-
-## Repo layout
-
-```text
-embedding-analytics/
-├── functions/
-│   ├── scrape/
-│   ├── tokenize/
-│   ├── train-kvector/
-│   ├── align-kvectors/
-│   │   ├── src/
-│   │   │   ├── create_book_centroid.py
-│   │   │   └── procrustes_utils.py
-│   │   └── tests/
-│   ├── publish/
-│   │   ├── src/
-│   │   │   ├── publish_to_api.py
-│   │   │   └── publish_utils.py
-│   │   └── tests/
-│   └── api/
-│       ├── src/
-│       │   ├── main.py             # FastAPI app, CORS, request logging, Mangum
-│       │   └── app/
-│       │       ├── core/           # shared dependencies (cache)
-│       │       ├── list/           # /books, /terms
-│       │       └── search/         # /parse-describe
-│       └── tests/                  # pytest, 85% coverage gate
-├── shared/
-│   ├── tables/                     # storage clients
-│   │   ├── base.py
-│   │   ├── pipeline.py             # PipelineTable (DynamoDB)
-│   │   ├── book_terms.py           # BookTermTable (DynamoDB)
-│   │   ├── corpus_terms.py         # CorpusTermTable (DynamoDB)
-│   │   └── vectors.py              # Pinecone index client
-│   ├── s3.py
-│   ├── session.py
-│   ├── schemas.py
-│   ├── lambda_event.py
-│   └── commons.py
-├── infra/
-│   ├── deploy_lambdas.sh
-│   ├── deploy_step_function.sh
-│   ├── services.yaml
-│   └── step-function.template.json
-├── docs/
-│   ├── pipeline.md
-│   ├── alignment.md
-│   ├── describe.md
-│   └── guide.md
-├── .devcontainer/                  # per-service devcontainers (api, align, publish)
-├── docker-compose.yml
-└── .env.example
-```
-
----
-
-## What this demonstrates
-
-- Designing and deploying a multi-stage serverless data pipeline on AWS (Lambda, Step Functions, S3, DynamoDB)
-- Python API development with FastAPI, Pydantic schemas, recursive evaluation, and structured error handling
-- LLM integration with deterministic validation boundaries and tiered fallback resolution
-- Ensemble-based confidence scoring as a production reliability pattern for vector search
-- Containerized microservice deployment with per-service resource tuning and test-gated releases
-- Caching, idempotency, and zero-idle-cost serverless architecture
+Processing a book, and deployment, are covered in [Operations](docs/operations.md).
 
 ---
 
 ## What's next
 
-- [ ] Diachronic similarity chart (semantic drift of a term across books)
-- [ ] Expose the training pipeline as callable endpoints if traffic warrants it
+- [ ] Integrate LLMs within the Scrape lambda.
+- [ ] Update `publish` to remove Pinecone used by previous API version.
+- [ ] Increase number of books in corpus
+
 
 ---
 

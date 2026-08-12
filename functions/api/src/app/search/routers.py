@@ -34,7 +34,7 @@ from app.search.services.semantic_drift import (
     BooksTermCache,
     SearchExpr,
     get_comparative_terms,
-    get_local_mean_similarities,
+    get_mean_local_similarities,
 )
 from shared.commons import BookIndex
 
@@ -178,7 +178,7 @@ def get_semantic_drift(
         exprs,
     )
     expr_book_data = [
-        get_local_mean_similarities(
+        get_mean_local_similarities(
             books_similarity_cache, expr, book_ids, selected_book_id
         )
         for expr in exprs

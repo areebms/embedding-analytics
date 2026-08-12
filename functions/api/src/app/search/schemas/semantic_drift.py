@@ -90,15 +90,41 @@ class BookSummary(BaseModel):
     missing_terms: list[str] = Field(default_factory=list)
 
 
-class BookLocalMeanSimilarity(BaseModel):
-    """The mean of the local cosine similarities per peer for each book."""
+class DefinitionalAgreement(BaseModel):
+    """One book read against the nominated source book.
+
+    `mean_local_similarity` is the mean across seeds of a single pairwise local
+    similarity, over the 75 terms nearest the query in the measuring book. With
+    one peer there is no between-book variation to estimate, so `ci` covers seed
+    noise alone.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     book_id: int
-    mean_similarity: float
-    similarity_ci: tuple[float, float]
-    count: int
+    mean_local_similarity: float
+    ci: tuple[float, float]
+    occurrences: int
+    n_seeds: int
+
+
+class DefinitionalAgreementToCorpus(BaseModel):
+    """One book read against every other requested book.
+
+    `mean_local_similarity` is the mean of the pairwise local similarities
+    against each peer in turn -- not a comparison against one aggregate corpus
+    profile, which would be a different quantity. `ci` treats the peers as the
+    unit of replication, so it carries between-book disagreement as well as the
+    seed noise inside each pairwise figure, and is not comparable in width to
+    the interval on `DefinitionalAgreement`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    book_id: int
+    mean_local_similarity: float
+    ci: tuple[float, float]
+    occurrences: int
     n_seeds: int
     n_books: int
 
@@ -117,7 +143,7 @@ class TermStats(BaseModel):
 
 class TermData(TermStats):
 
-    books: list[BookLocalMeanSimilarity]
+    books: list[DefinitionalAgreement] | list[DefinitionalAgreementToCorpus]
 
 
 class ExprData(BaseModel):
@@ -126,7 +152,7 @@ class ExprData(BaseModel):
 
     expr: str
     terms: list[str]
-    books: list[BookLocalMeanSimilarity]
+    books: list[DefinitionalAgreement] | list[DefinitionalAgreementToCorpus]
 
 
 class SemanticDriftResponse(BaseModel):

@@ -31,49 +31,40 @@ def get_book_ids(subject_id):
 
 
 def get_metadata(gutenberg_id):
+    response = get(f"{BASE_URL}/ebooks/{gutenberg_id}/")
+    response.raise_for_status()
+
+    metadata_table = BeautifulSoup(response.content, "html.parser").find(
+        "table", class_="bibrec"
+    )
+    if metadata_table is None:
+        raise ValueError(f"No metadata table for gutenberg id {gutenberg_id}")
 
     metadata = defaultdict(list)
-    for tr in (
-        BeautifulSoup(get(f"{BASE_URL}/ebooks/{gutenberg_id}/").content, "html.parser")
-        .find("table", class_="bibrec")
-        .find_all("tr")
-    ):
-        key = tr.find("th")
-        if key is not None:
-            value = tr.find("td")
-            a = value.find("a")
-            href = a["href"] if a else None
-            key = key.text.lower().replace(" ", "-").replace(".", "").replace("-", "_")
-            for line in tr.find("td").get_text(separator="\n").split("\n"):
-                if line:
-                    metadata[key].append(line)
-            if href:
-                metadata[key + "_link"].append(href)
+    for table_row in metadata_table.find_all("tr"):
+        table_header = table_row.find("th")
+        table_data = table_row.find("td")
+        if table_header is None or table_data is None:
+            continue
+
+        a = table_data.find("a")
+        href = a["href"] if a else None
+        key = (
+            table_header.text.lower()
+            .replace(" ", "-")
+            .replace(".", "")
+            .replace("-", "_")
+        )
+        for line in table_data.get_text(separator="\n").split("\n"):
+            if line:
+                metadata[key].append(line)
+        if href:
+            metadata[key + "_link"].append(href)
 
     return dict(metadata)
 
 
 def get_html(gutenberg_id):
-    return get(
-        f"{BASE_URL}/cache/epub/{gutenberg_id}/pg{gutenberg_id}-images.html"
-    ).text
-
-
-def get_text(html):
-
-    html_element = BeautifulSoup(html, "html.parser").html
-    html_element.find(attrs={"id": "pg-footer"}).decompose()
-    html_element.find(attrs={"id": "pg-header"}).decompose()
-
-    return (
-        " ".join(
-            [
-                word
-                for word in " ".join(
-                    html_element.body.get_text(strip=True, separator=" ").split("\r\n")
-                ).split()
-                if word
-            ]
-        )
-        or None
-    )
+    response = get(f"{BASE_URL}/cache/epub/{gutenberg_id}/pg{gutenberg_id}-images.html")
+    response.raise_for_status()
+    return response.text

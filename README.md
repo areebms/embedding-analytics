@@ -57,7 +57,6 @@ graph TD
     subgraph Storage
         direction LR
         DDB[(DynamoDB)]
-        PC[(Pinecone)]
         RED[(Redis Cache)]
         S3[(S3 Artifacts)]
     end
@@ -70,7 +69,6 @@ graph TD
     SF --> Pipeline
     Pipeline --> S3
     PUB --> DDB
-    PUB --> PC
     FAPI <--> DDB
     FAPI -. optional .-> RED
 ```
@@ -84,7 +82,7 @@ graph TD
 | Testing | pytest, coverage gating, Docker test stages |
 | Infrastructure | Docker, Docker Compose, Bash |
 
-Six independent containerized Lambda stages for scraping, tokenization, model training, vector alignment, publishing, and API serving. A Step Functions Map state trains N seeded models in parallel and converges into a single alignment stage. S3 holds intermediate artifacts; a publish stage fans results out to DynamoDB and Pinecone. Fully serverless, no always-on infrastructure. Per-service pytest suites run inside a dedicated Docker test stage before any image is pushed, and the API suite enforces an 85% coverage floor.
+Six independent containerized Lambda stages for scraping, tokenization, model training, vector alignment, publishing, and API serving. A Step Functions Map state trains N seeded models in parallel and converges into a single alignment stage. S3 holds intermediate artifacts; a publish stage writes results to DynamoDB. Fully serverless, no always-on infrastructure. Per-service pytest suites run inside a dedicated Docker test stage before any image is pushed, and the API suite enforces an 85% coverage floor.
 
 ---
 

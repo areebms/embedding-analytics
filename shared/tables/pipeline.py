@@ -5,7 +5,6 @@ from botocore.exceptions import ClientError
 from shared.tables.base import BaseTable
 from shared.session import get_session
 
-
 PIPELINE_TABLE = os.getenv("PIPELINE_TABLE")
 
 _pipeline_table = None
@@ -32,8 +31,8 @@ class PipelineTable(BaseTable):
     def get_entry(self, platform_data, fields=["platform_data"]):
         return super().get_entry({"platform_data": platform_data}, fields)
 
-    def put_entry(self, platform_data):
-        item = {"platform_data": platform_data}
+    def put_entry(self, platform_data, attributes=None):
+        item = {"platform_data": platform_data, **(attributes or {})}
         try:
             self.table.put_item(
                 Item=item, ConditionExpression="attribute_not_exists(platform_data)"

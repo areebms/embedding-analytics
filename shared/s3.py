@@ -6,19 +6,8 @@ from contextlib import contextmanager
 
 from shared.session import get_session
 
-
 S3_BUCKET = os.getenv("S3_BUCKET")
 
-
-def upload_object(
-    session, s3_key, file_bytes, content_type="text/plain; charset=utf-8"
-):
-    session.client("s3").upload_fileobj(
-        io.BytesIO(file_bytes.encode("utf-8")),
-        S3_BUCKET,
-        s3_key,
-        ExtraArgs={"ContentType": content_type},
-    )
 
 
 def upload_file(session, s3_key, path):
@@ -60,14 +49,20 @@ class S3Loader:
             with self.load_file(obj.key) as result:
                 yield result
 
-
     def load_text(self, s3_key):
         return (
-            self.s3_resource
-            .Object(S3_BUCKET, s3_key)
+            self.s3_resource.Object(S3_BUCKET, s3_key)
             .get()["Body"]
             .read()
             .decode("utf-8")
+        )
+
+    def upload_object(self, s3_key, file_bytes, content_type):
+        self.s3_resource.meta.client.upload_fileobj(
+            io.BytesIO(file_bytes.encode("utf-8")),
+            S3_BUCKET,
+            s3_key,
+            ExtraArgs={"ContentType": content_type},
         )
 
 

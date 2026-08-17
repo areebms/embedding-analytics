@@ -1,19 +1,21 @@
 {
   "Comment": "Per-book embedding analytics pipeline",
-  "StartAt": "scrape",
+  "StartAt": "scrape-metadata",
   "QueryLanguage": "JSONata",
   "States": {
-    "scrape": {
+    "scrape-metadata": {
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
       "Arguments": {
         "FunctionName": "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${LAMBDA_PREFIX}-scrape:$LATEST",
         "Payload": {
-          "index": "{% $states.input.index %}"
+          "index": "{% $states.input.index %}",
+          "stage": "metadata"
         }
       },
       "Output": {
         "index": "{% $states.result.Payload.index %}",
+        "status": "{% $states.result.Payload.status %}",
         "seeds": "{% $states.input.seeds %}"
       },
       "Retry": [
@@ -30,7 +32,68 @@
           "JitterStrategy": "FULL"
         }
       ],
-      "Next": "tokenize"
+      "Next": "skipped-after-metadata?"
+    },
+    "skipped-after-metadata?": {
+      "Type": "Choice",
+      "Comment": "Any SCRAPED_SKIPPED_* status ends the book here, so a new skip reason needs no change to this branch.",
+      "Choices": [
+        {
+          "Condition": "{% $contains($states.input.status, 'SCRAPED_SKIPPED') %}",
+          "Next": "skipped"
+        }
+      ],
+      "Default": "wait-before-content"
+    },
+    "skipped": {
+      "Type": "Succeed"
+    },
+    "wait-before-content": {
+      "Type": "Wait",
+      "Seconds": 3,
+      "Next": "scrape-content"
+    },
+    "scrape-content": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${LAMBDA_PREFIX}-scrape:$LATEST",
+        "Payload": {
+          "index": "{% $states.input.index %}",
+          "stage": "content"
+        }
+      },
+      "Output": {
+        "index": "{% $states.result.Payload.index %}",
+        "status": "{% $states.result.Payload.status %}",
+        "seeds": "{% $states.input.seeds %}"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Next": "skipped-after-content?"
+    },
+    "skipped-after-content?": {
+      "Type": "Choice",
+      "Comment": "A book already marked skipped by a later stage re-enters here; it must not be sent on to tokenize.",
+      "Choices": [
+        {
+          "Condition": "{% $contains($states.input.status, 'SCRAPED_SKIPPED') %}",
+          "Next": "skipped"
+        }
+      ],
+      "Default": "tokenize"
     },
     "tokenize": {
       "Type": "Task",

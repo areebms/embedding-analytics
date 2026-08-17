@@ -44,9 +44,11 @@ def scrape_subject_book_list(subject_id):
     table = get_pipeline_entries()
     book_ids = get_book_ids(subject_id)
 
+    indexes = []
     created = 0
     for book_id in book_ids:
         index = BookIndex(book_id)
+
         try:
             entry = PipelineEntry(
                 platform_data=index, pipeline_status=EntryStatus.CREATED
@@ -55,6 +57,7 @@ def scrape_subject_book_list(subject_id):
                 created += 1
         except Exception:
             logger.exception("%s: failed to create pipeline entry", index)
+        indexes.append(str(index))
 
     logger.info(
         "subject %s: %d books found, %d new pipeline entries created.",
@@ -62,6 +65,13 @@ def scrape_subject_book_list(subject_id):
         len(book_ids),
         created,
     )
+
+    return {
+        "subject": subject_id,
+        "found": len(book_ids),
+        "created": created,
+        "indexes": indexes,
+    }
 
 
 def scrape_book_metadata(index):

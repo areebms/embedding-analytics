@@ -1,8 +1,11 @@
 """Tests for the handler's stage dispatch.
 
-One Lambda runs both stages; the event's `stage` picks which. No test reached this
+One Lambda runs all three stages; the event's `stage` picks which. No test reached this
 layer before, which is how the handler shipped calling a signature that no longer
 existed.
+
+`list` takes a subject rather than an index, which is why the handler validates `stage`
+before it validates either argument.
 """
 
 import json
@@ -90,3 +93,77 @@ def test_the_index_arrives_as_a_book_index(seed, mocker):
     app.handler({"index": "gutenberg-3300", "stage": "metadata"}, None)
 
     get_metadata.assert_called_once_with(3300)
+
+
+# ── list stage ────────────────────────────────────────────────────────
+
+
+def test_list_stage_seeds_the_subject_and_returns_its_books(entries, mocker):
+    import app
+    import scrape
+
+    mocker.patch.object(scrape, "get_book_ids", return_value=["3300", "846"])
+
+    result = app.handler({"subject": "12345", "stage": "list"}, None)
+
+    assert result == {
+        "subject": "12345",
+        "found": 2,
+        "created": 2,
+        "indexes": ["gutenberg-3300", "gutenberg-846"],
+    }
+    assert entries.get_indexes(EntryStatus.CREATED) == [
+        "gutenberg-3300",
+        "gutenberg-846",
+    ]
+
+
+def test_list_stage_needs_no_index(entries, mocker):
+    """The other two stages reject an event with no index; this one must not."""
+    import app
+    import scrape
+
+    mocker.patch.object(scrape, "get_book_ids", return_value=["3300"])
+
+    assert app.handler({"subject": "12345", "stage": "list"}, None)["found"] == 1
+
+
+def test_a_list_event_with_no_subject_is_rejected(aws):
+    import app
+
+    with pytest.raises(ValueError, match="subject is required"):
+        app.handler({"stage": "list"}, None)
+
+
+def test_the_index_is_not_accepted_in_place_of_a_subject(aws):
+    """A per-book event sent to the list stage is a mistake, not a one-book subject."""
+    import app
+
+    with pytest.raises(ValueError, match="subject is required"):
+        app.handler({"index": "gutenberg-3300", "stage": "list"}, None)
+
+
+def test_the_subject_is_read_from_a_json_body(entries, mocker):
+    import app
+    import scrape
+
+    mocker.patch.object(scrape, "get_book_ids", return_value=["3300"])
+
+    result = app.handler({"body": json.dumps({"subject": "12345"}), "stage": "list"}, None)
+
+    assert result["subject"] == "12345"
+
+
+def test_the_listed_indexes_are_json_serialisable(entries, mocker):
+    """The Map iterates this array, so BookIndex has to come back out as plain strings."""
+    import app
+    import scrape
+
+    mocker.patch.object(scrape, "get_book_ids", return_value=["3300", "846"])
+
+    result = app.handler({"subject": "12345", "stage": "list"}, None)
+
+    assert json.loads(json.dumps(result))["indexes"] == [
+        "gutenberg-3300",
+        "gutenberg-846",
+    ]

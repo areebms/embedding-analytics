@@ -1,5 +1,7 @@
 """Tests for the Gutenberg HTML scrapers."""
 
+from urllib.parse import parse_qs, urlparse
+
 import pytest
 
 import retrieve
@@ -105,12 +107,15 @@ def test_get_book_ids_asks_for_another_page_while_pages_come_back_full(mocker):
     book_ids = retrieve.get_book_ids(42)
 
     assert book_ids == [str(i) for i in first + second]
-    # start_index is 1-based and follows the running total.
-    assert [call.args[0].rsplit("=", 1)[1] for call in get.call_args_list] == [
-        "1",
-        str(page_size + 1),
-        str(2 * page_size + 1),
+    # start_index is 1-based and follows the running total, and it has to be a real
+    # query parameter alongside sort_order rather than glued on with a second "?".
+    queries = [parse_qs(urlparse(call.args[0]).query) for call in get.call_args_list]
+    assert [q["start_index"] for q in queries] == [
+        ["1"],
+        [str(page_size + 1)],
+        [str(2 * page_size + 1)],
     ]
+    assert all(q["sort_order"] == ["downloads"] for q in queries)
 
 
 def test_get_book_ids_stops_on_a_partial_page(mocker):
@@ -125,6 +130,22 @@ def test_get_book_ids_stops_on_a_partial_page(mocker):
 
     assert len(retrieve.get_book_ids(42)) == retrieve.MAX_BOOK_IDS_PER_PAGE + 2
     assert get.call_count == 2
+
+
+def test_get_book_ids_stops_at_the_subject_cap(mocker):
+    """Full pages keep coming, but the cap ends the walk."""
+    page_size = retrieve.MAX_BOOK_IDS_PER_PAGE
+    pages = [
+        _subject_page(range(start, start + page_size))
+        for start in range(1, 10 * page_size, page_size)
+    ]
+    get = mocker.patch.object(retrieve, "get", side_effect=pages)
+    mocker.patch.object(retrieve, "sleep")
+
+    book_ids = retrieve.get_book_ids(42)
+
+    assert len(book_ids) == retrieve.MAX_BOOKS_PER_SUBJECT
+    assert get.call_count == retrieve.MAX_BOOKS_PER_SUBJECT // page_size
 
 
 def test_get_book_ids_ignores_non_book_links_and_duplicates(mocker):

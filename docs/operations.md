@@ -23,6 +23,46 @@ output transforms, keeping orchestration logic out of the handlers.
 The state machine template lives at `infra/step-function.template.json`, rendered
 with `AWS_REGION`, `AWS_ACCOUNT_ID`, and `LAMBDA_PREFIX`.
 
+### The scrape machine (pending deployment)
+
+`infra/scrape-pipeline.step-function.template.json` takes a whole Gutenberg subject
+and scrapes every book in it. **It has no safe deploy path yet.** Until it gets one,
+drive the subject flow through the `list` stage directly — see
+[scrape](../functions/scrape/README.md). The template is kept as the recorded design.
+
+> **Do not deploy it with the `STEP_FUNCTION_TEMPLATE` override.** `deploy_step_function.sh`
+> will happily render any template that variable points at, but the state machine name it
+> deploys to is fixed at `${LAMBDA_PREFIX}-pipeline`. That ARN already exists, so the
+> script takes the update path and **replaces the training pipeline with the scrape
+> machine** — no new machine, no error, no warning. Teaching the script a name per
+> template is the prerequisite for deploying this one.
+
+```text
+seed-subject (stage=list)          input: { "subject": "12345" }
+  |
+scrape-books  Map, MaxConcurrency 1, over the seeded indexes
+  |
+  +-- scrape (stage=metadata) → ready-for-content? → wait 3s → scrape (stage=content)
+```
+
+Three things about it are deliberate:
+
+- **`MaxConcurrency: 1`** — gutenberg.org is a single volunteer-run host, so books go
+  through one at a time, no ruder than the `scrape.py` CLI.
+- **The `Choice` is positive**, advancing only on `SCRAPED_METADATA`, which is
+  `scrape_book_content`'s own precondition — so a resume short-circuits books an
+  earlier run already took to `SCRAPED_HTML` instead of paying a wait and a no-op.
+- **A failed book does not fail the subject.** An uncaught error in an inline `Map`
+  discards every remaining iteration, so each task `Catch`es to a `Succeed`; the book
+  keeps its `pipeline_status` for the next run and the count surfaces as `failed`.
+
+The `list` stage seeds at most `MAX_BOOKS_PER_SUBJECT` (100) books, taking the most
+downloaded first. That is a deliberate cap on how much of a subject enters the corpus,
+not a limit of the invocation: four 25-book pages at 1s each finish well inside the
+120s timeout. Raising the cap raises the runtime with it — past roughly 800 books the
+invocation is killed mid-list, so seed those with `scrape.py list --subject …`, which
+has no timeout.
+
 Every state carries its own `Retry`: up to 3 attempts at `Lambda.ServiceException`,
 `Lambda.AWSLambdaException`, `Lambda.SdkClientException`, and
 `Lambda.TooManyRequestsException` — AWS/Lambda-service-level failures — with 1s

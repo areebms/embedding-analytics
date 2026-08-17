@@ -117,7 +117,7 @@ def test_a_row_with_no_status_is_a_distinct_error(entries):
         scrape.get_status(INDEX)
 
 
-# ── bulk CLI helpers ──────────────────────────────────────────────────
+# ── subject listing ───────────────────────────────────────────────────
 
 
 def test_subject_list_seeds_every_book_once(entries, mocker):
@@ -125,10 +125,29 @@ def test_subject_list_seeds_every_book_once(entries, mocker):
 
     mocker.patch.object(scrape, "get_book_ids", return_value=["3300", "846"])
 
-    scrape.scrape_subject_book_list("subject-42")
-    scrape.scrape_subject_book_list("subject-42")  # put_entry is a conditional create
+    first = scrape.scrape_subject_book_list("subject-42")
+    again = scrape.scrape_subject_book_list("subject-42")  # put_entry is a conditional create
 
     assert entries.get_indexes(EntryStatus.CREATED) == ["gutenberg-3300", "gutenberg-846"]
+    assert first["created"] == 2
+    assert again["created"] == 0
+
+
+def test_subject_list_returns_every_book_found_not_just_the_new_ones(entries, mocker):
+    """The Map iterates `indexes`, so a re-run has to hand back the whole subject."""
+    import scrape
+
+    mocker.patch.object(scrape, "get_book_ids", return_value=["3300", "846"])
+
+    scrape.scrape_subject_book_list("subject-42")
+    again = scrape.scrape_subject_book_list("subject-42")
+
+    assert again == {
+        "subject": "subject-42",
+        "found": 2,
+        "created": 0,
+        "indexes": ["gutenberg-3300", "gutenberg-846"],
+    }
 
 
 def test_subject_list_survives_one_book_failing_to_seed(entries, mocker):
@@ -139,9 +158,13 @@ def test_subject_list_survives_one_book_failing_to_seed(entries, mocker):
         entries, "put_entry", side_effect=[RuntimeError("throttled"), True]
     )
 
-    scrape.scrape_subject_book_list("subject-42")  # must not raise
+    result = scrape.scrape_subject_book_list("subject-42")  # must not raise
 
     assert entries.put_entry.call_count == 2
+    assert result["created"] == 1
+    # The book that failed to seed is still listed: the Map will try it, and the
+    # metadata stage's own LookupError is what reports it as unseeded.
+    assert result["indexes"] == ["gutenberg-3300", "gutenberg-846"]
 
 
 def test_sleepy_map_keeps_going_after_one_book_fails(mocker):

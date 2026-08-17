@@ -1,12 +1,12 @@
 import json
 
 
-def extract_index(event):
+def extract_field(event, field):
     if not isinstance(event, dict):
         return None
 
-    if "index" in event:
-        return event["index"]
+    if field in event:
+        return event[field]
 
     body = event.get("body")
     if not body:
@@ -18,6 +18,10 @@ def extract_index(event):
         return None
 
     if isinstance(payload, dict):
-        return payload.get("index")
+        return payload.get(field)
 
     return None
+
+
+def extract_index(event):
+    return extract_field(event, "index")

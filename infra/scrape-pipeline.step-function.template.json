@@ -1,0 +1,167 @@
+{
+  "Comment": "Seed a Gutenberg subject and scrape every book it lists. NOT DEPLOYED: deploy_step_function.sh hardcodes the state machine name to ${LAMBDA_PREFIX}-pipeline, so pointing STEP_FUNCTION_TEMPLATE at this file overwrites the per-book training machine instead of creating a second one. Teach the script a name per template first, or deploy this by hand.",
+  "StartAt": "seed-subject",
+  "QueryLanguage": "JSONata",
+  "States": {
+    "seed-subject": {
+      "Type": "Task",
+      "Comment": "Creates a pipeline entry per book. Returns the subject's whole book list, not just the new rows, so a re-run resumes a partly-scraped subject.",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${LAMBDA_PREFIX}-scrape:$LATEST",
+        "Payload": {
+          "subject": "{% $states.input.subject %}",
+          "stage": "list"
+        }
+      },
+      "Output": {
+        "subject": "{% $states.result.Payload.subject %}",
+        "found": "{% $states.result.Payload.found %}",
+        "created": "{% $states.result.Payload.created %}",
+        "indexes": "{% $states.result.Payload.indexes %}"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Next": "scrape-books"
+    },
+    "scrape-books": {
+      "Type": "Map",
+      "Comment": "MaxConcurrency 1: gutenberg.org is a single volunteer-run host, so books go through one at a time, as the scrape.py CLI does.",
+      "Items": "{% $states.input.indexes %}",
+      "MaxConcurrency": 1,
+      "ItemSelector": {
+        "index": "{% $states.context.Map.Item.Value %}"
+      },
+      "Output": {
+        "subject": "{% $states.input.subject %}",
+        "created": "{% $states.input.created %}",
+        "books": "{% $count($states.result) %}",
+        "failed": "{% $count($states.result[$exists(error)]) %}"
+      },
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "INLINE"
+        },
+        "StartAt": "scrape-metadata",
+        "States": {
+          "scrape-metadata": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Arguments": {
+              "FunctionName": "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${LAMBDA_PREFIX}-scrape:$LATEST",
+              "Payload": {
+                "index": "{% $states.input.index %}",
+                "stage": "metadata"
+              }
+            },
+            "Output": {
+              "index": "{% $states.result.Payload.index %}",
+              "status": "{% $states.result.Payload.status %}"
+            },
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Lambda.ServiceException",
+                  "Lambda.AWSLambdaException",
+                  "Lambda.SdkClientException",
+                  "Lambda.TooManyRequestsException"
+                ],
+                "IntervalSeconds": 1,
+                "MaxAttempts": 3,
+                "BackoffRate": 2,
+                "JitterStrategy": "FULL"
+              }
+            ],
+            "Catch": [
+              {
+                "ErrorEquals": ["States.ALL"],
+                "Next": "book-failed",
+                "Output": {
+                  "index": "{% $states.input.index %}",
+                  "error": "{% $states.errorOutput.Error %}"
+                }
+              }
+            ],
+            "Next": "ready-for-content?"
+          },
+          "ready-for-content?": {
+            "Type": "Choice",
+            "Comment": "SCRAPED_METADATA is scrape_book_content's own precondition. Gating on it positively also short-circuits books an earlier run already took to SCRAPED_HTML, so a resume does not pay the wait and a no-op invocation per finished book.",
+            "Choices": [
+              {
+                "Condition": "{% $states.input.status = 'SCRAPED_METADATA' %}",
+                "Next": "wait-before-content"
+              }
+            ],
+            "Default": "book-done"
+          },
+          "wait-before-content": {
+            "Type": "Wait",
+            "Seconds": 3,
+            "Next": "scrape-content"
+          },
+          "scrape-content": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Arguments": {
+              "FunctionName": "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${LAMBDA_PREFIX}-scrape:$LATEST",
+              "Payload": {
+                "index": "{% $states.input.index %}",
+                "stage": "content"
+              }
+            },
+            "Output": {
+              "index": "{% $states.result.Payload.index %}",
+              "status": "{% $states.result.Payload.status %}"
+            },
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Lambda.ServiceException",
+                  "Lambda.AWSLambdaException",
+                  "Lambda.SdkClientException",
+                  "Lambda.TooManyRequestsException"
+                ],
+                "IntervalSeconds": 1,
+                "MaxAttempts": 3,
+                "BackoffRate": 2,
+                "JitterStrategy": "FULL"
+              }
+            ],
+            "Catch": [
+              {
+                "ErrorEquals": ["States.ALL"],
+                "Next": "book-failed",
+                "Output": {
+                  "index": "{% $states.input.index %}",
+                  "error": "{% $states.errorOutput.Error %}"
+                }
+              }
+            ],
+            "End": true
+          },
+          "book-done": {
+            "Type": "Succeed"
+          },
+          "book-failed": {
+            "Type": "Succeed",
+            "Comment": "One book failing must not discard the rest of the subject, which is what an uncaught error in an inline Map would do. The book keeps its pipeline_status, so the next run retries it; the error rides out in the Map result and is counted in `failed`."
+          }
+        }
+      },
+      "End": true
+    }
+  }
+}

@@ -15,7 +15,7 @@ and resume safely.
 
 | Stage | Input | Output |
 |---|---|---|
-| `scrape` | Gutenberg book ID | HTML, text, and metadata in S3 |
+| `scrape` | Gutenberg subject, then book ID | Pipeline rows, then HTML, text, and metadata in S3 |
 | `tokenize` | Raw text | Token, lemma, and POS-tag CSVs in S3 |
 | `train-kvector` | Token lemmas + seed | One trained Word2Vec model in S3 |
 | `align-kvectors` | N raw models | Procrustes-aligned models and centroid in S3 |
@@ -27,9 +27,10 @@ scrape → tokenize → train-kvector Map(N seeds) → align-kvectors → publis
 ```
 
 `train-kvector` runs as a Step Functions Map state, so each seed is an
-independent Lambda invocation. The state machine template, seed fan-out, and
+independent Lambda invocation. The state machine templates, seed fan-out, and
 retry policy are cross-cutting orchestration concerns — see
-[Operations § Orchestration](./operations.md#orchestration).
+[Operations § Orchestration](./operations.md#orchestration), which also covers the
+separate scrape machine that seeds a subject and scrapes every book in it.
 
 | Stage | Documentation |
 |---|---|

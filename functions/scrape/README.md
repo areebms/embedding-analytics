@@ -17,7 +17,7 @@ conditional create — so a re-run skips work already done.
 
 This is the only stage that fetches the corpus over the network, and it derives
 nothing. Turning that HTML into readable text is
-[standardize-submit](../standardize-submit/) and
+[standardize-headings](../standardize-headings/) and
 [standardize-collect](../standardize-collect/)'s job, so changing how an artifact is
 rendered costs a re-run over `html/` rather than a refetch.
 

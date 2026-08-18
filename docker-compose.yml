@@ -12,6 +12,20 @@ services:
     volumes:
       - ./functions/scrape/src:/var/task
       - ./shared:/var/task/shared
+    
+  lambda-standardize-headings:
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${AWS_ECR_REPO}/lambda-lambda-standardize-headings:0.1
+    env_file:
+    - .env
+    build:
+      context: .
+      dockerfile: functions/lambda-standardize-headings/Dockerfile
+      target: test
+      args:
+        AWS_URI_PREFIX: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+    volumes:
+      - ./functions/lambda-standardize-headings/src:/var/task
+      - ./shared:/var/task/shared
 
   lambda-tokenize:
     image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${AWS_ECR_REPO}/lambda-tokenize:0.1

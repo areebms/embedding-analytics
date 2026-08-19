@@ -8,43 +8,31 @@ from shared.tables.pipeline_entries import (
 )
 
 from book_records.constants import (
-    CUSTOM_ID_ILLEGAL,
     HEADING_ELEMENTS,
     JSON_CONTENT_TYPE,
-    MANIFEST_PREFIX,
+    LLM_INDEX_ILLEGAL,
+    S3_STANDARDIZE_PREFIX,
 )
 from book_records.html_text_tags import load_tag_text_pairs
-from book_records.schemas import BatchDetail, BookRecord
+from book_records.schemas import BookTagTextPairs
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
-def sanitize_custom_id(book_label: str) -> str:
-    return CUSTOM_ID_ILLEGAL.sub("_", book_label)[:64]
+def sanitize_llm_index(book_label: str) -> str:
+    return LLM_INDEX_ILLEGAL.sub("_", book_label)[:64]
 
 
-def save_book_record(book: BookRecord) -> None:
+def save_book_tag_text_pairs(book_tag_text_pairs: BookTagTextPairs) -> None:
     get_s3_loader().upload_object(
-        f"{MANIFEST_PREFIX}/books/{book.index}.json",
-        book.model_dump_json(),
+        f"{S3_STANDARDIZE_PREFIX}/books/{book_tag_text_pairs.index}.json",
+        book_tag_text_pairs.model_dump_json(),
         content_type=JSON_CONTENT_TYPE,
     )
 
 
-def save_batch_index(batch_id: str, book_records: list[BookRecord]) -> None:
-    batch_index = BatchDetail(
-        batch_id=batch_id,
-        custom_ids={book.custom_id: book.index for book in book_records},
-    )
-    get_s3_loader().upload_object(
-        f"{MANIFEST_PREFIX}/index.json",
-        batch_index.model_dump_json(),
-        content_type=JSON_CONTENT_TYPE,
-    )
-
-
-def get_pending_book_records() -> list[BookRecord]:
+def get_pending_book_tag_text_pairs() -> list[BookTagTextPairs]:
     pipeline_entries = get_pipeline_entries()
 
     submitted_indexes = pipeline_entries.get_indexes(EntryStatus.STANDARDIZE_SUBMITTED)
@@ -62,7 +50,7 @@ def get_pending_book_records() -> list[BookRecord]:
     if not scraped_indexes:
         return []
 
-    book_records = []
+    book_tag_text_pairs = []
 
     for index in scraped_indexes:
         try:
@@ -82,13 +70,13 @@ def get_pending_book_records() -> list[BookRecord]:
             logger.info("%s has no headings; skipping.", index)
             continue
 
-        book_records.append(
-            BookRecord(
-                custom_id=sanitize_custom_id(index),
+        book_tag_text_pairs.append(
+            BookTagTextPairs(
+                llm_index=sanitize_llm_index(index),
                 index=index,
                 tag_text_pairs=tag_text_pairs,
             )
         )
-        save_book_record(book_records[-1])
+        save_book_tag_text_pairs(book_tag_text_pairs[-1])
 
-    return book_records
+    return book_tag_text_pairs

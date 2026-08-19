@@ -3,8 +3,10 @@ import os
 
 import anthropic
 
+from shared.commons import BookIndex
+
 from book_records.constants import HEADING_ELEMENTS
-from book_records.schemas import BookRecord, TagTextPair
+from book_records.schemas import BookTagTextPairs, TagTextPair
 from llm_classify_request.constants import HEADING_TEXT_TRUNCATE
 from llm_classify_request.schemas import (
     AnthropicRequest,
@@ -31,7 +33,7 @@ def get_client() -> anthropic.Anthropic:
 
 
 def to_anthropic_message(
-    book_id: str, tag_text_pairs: list[TagTextPair]
+    book_id: BookIndex, tag_text_pairs: list[TagTextPair]
 ) -> AnthropicRequestMessage:
     headings: list[tuple[str, str]] = []
     gaps: list[int] = []
@@ -51,23 +53,32 @@ def to_anthropic_message(
     return AnthropicRequestMessage(content=f"Book: {book_id}\n\n{heading_lines}")
 
 
-def convert_to_anthropic_request(book: BookRecord) -> AnthropicRequest:
-    heading_count = sum(1 for tag, _ in book.tag_text_pairs if tag in HEADING_ELEMENTS)
+def convert_to_anthropic_request(
+    book_tag_text_pairs: BookTagTextPairs,
+) -> AnthropicRequest:
+    heading_count = sum(
+        1 for tag, _ in book_tag_text_pairs.tag_text_pairs if tag in HEADING_ELEMENTS
+    )
     max_tokens = min(MAX_OUTPUT_TOKENS, max(256, heading_count * 12 + 100))
 
     return AnthropicRequest(
-        custom_id=book.custom_id,
+        custom_id=book_tag_text_pairs.llm_index,
         params=AnthropicRequestParams(
             max_tokens=max_tokens,
-            messages=[to_anthropic_message(book.index, book.tag_text_pairs)],
+            messages=[
+                to_anthropic_message(
+                    book_tag_text_pairs.index, book_tag_text_pairs.tag_text_pairs
+                )
+            ],
         ),
     )
 
 
-def send_message_batch(book_records: list[BookRecord]) -> str:
+def send_message_batch(book_tag_text_pairs: list[BookTagTextPairs]) -> str:
     client = get_client()
     request_data = [
-        convert_to_anthropic_request(book).model_dump() for book in book_records
+        convert_to_anthropic_request(book_tag_text_pair).model_dump()
+        for book_tag_text_pair in book_tag_text_pairs
     ]
 
     batch = client.messages.batches.create(requests=request_data)

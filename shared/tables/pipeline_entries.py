@@ -18,6 +18,7 @@ class EntryStatus(StrEnum):
     SCRAPED_SKIPPED_NON_ENGLISH = "SCRAPED_SKIPPED_NON_ENGLISH"
     SCRAPED_SKIPPED_NO_HEADINGS = "SCRAPED_SKIPPED_NO_HEADINGS"
     STANDARDIZE_SUBMITTED = "STANDARDIZE_SUBMITTED"
+    STANDARDIZED = "STANDARDIZED"
 
 
 BookIndexField = Annotated[
@@ -43,6 +44,12 @@ class PipelineEntry(BaseModel):
 
     platform_data: BookIndexField
     pipeline_status: EntryStatus | None = None
+
+    # Written by standardize-collect and by nothing else. Absent until a book
+    # reaches STANDARDIZED, and left unset rather than defaulted by every other
+    # stage, so get_modified_fields' exclude_unset keeps them out of those writes.
+    s3_standardized_html_key: str | None = None
+    s3_text_key: str | None = None
 
     @property
     def s3_metadata_key(self) -> str:

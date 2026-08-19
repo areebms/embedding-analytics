@@ -23,6 +23,7 @@ os.environ.setdefault("TERM_CORPUS_TABLE", "corpus-term-test")
 from shared.tables.book_terms import get_book_term_table
 from shared.tables.corpus_terms import get_corpus_term_table
 from shared.tables.pipeline import get_pipeline_table
+from shared.tables.pipeline_entries import EntryStatus, metadata_key
 from shared.session import get_session
 
 
@@ -121,9 +122,20 @@ def _create_pipeline_table(dynamodb):
         BillingMode="PAY_PER_REQUEST",
         AttributeDefinitions=[
             {"AttributeName": "platform_data", "AttributeType": "S"},
+            {"AttributeName": "pipeline_status", "AttributeType": "S"},
         ],
         KeySchema=[
             {"AttributeName": "platform_data", "KeyType": "HASH"},
+        ],
+        GlobalSecondaryIndexes=[
+            {
+                "IndexName": "pipeline_status-index",
+                "KeySchema": [
+                    {"AttributeName": "pipeline_status", "KeyType": "HASH"},
+                    {"AttributeName": "platform_data", "KeyType": "RANGE"},
+                ],
+                "Projection": {"ProjectionType": "KEYS_ONLY"},
+            }
         ],
     )
 
@@ -273,9 +285,8 @@ def smith_s3_data(moto_dynamo):
     _upload_csv_to_s3(s3, bucket, lemmas_key, token_lemmas)
     _upload_csv_to_s3(s3, bucket, tags_key, token_tags)
 
-    # Metadata JSON.
-    metadata_key = f"metadata/{BOOK_SMITH}/metadata.json"
-    _upload_json_to_s3(s3, bucket, metadata_key, SMITH_METADATA)
+    # Metadata JSON, at the key publish derives from the index.
+    _upload_json_to_s3(s3, bucket, metadata_key(BOOK_SMITH), SMITH_METADATA)
 
     # PipelineTable entry with S3 keys.
 
@@ -283,7 +294,7 @@ def smith_s3_data(moto_dynamo):
     pt.table.put_item(
         Item={
             "platform_data": BOOK_SMITH,
-            "s3_metadata_key": metadata_key,
+            "pipeline_status": EntryStatus.SCRAPED_HTML,
             "s3_token_lemmas_key": lemmas_key,
             "s3_token_tags_key": tags_key,
             "published_year": SMITH_PUBLISHED_YEAR,

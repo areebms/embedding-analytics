@@ -13,6 +13,8 @@ from unittest.mock import patch
 
 import numpy as np
 
+from shared.tables.pipeline_entries import EntryStatus, metadata_key
+
 from conftest import (
     BOOK_SMITH,
     BOOK_RICARDO,
@@ -144,12 +146,12 @@ def test_publish_updates_pipeline_metadata(
 
 
 def test_publish_skips_unscraped_book(pipeline_table, pinecone_table):
-    """A book without s3_metadata_key should be skipped entirely."""
+    """A book with no pipeline_status should be skipped entirely."""
     pipeline_table.table.put_item(
         Item={
             "platform_data": BOOK_SMITH,
             "published_year": 1776,
-            # No s3_metadata_key.
+            # No pipeline_status.
         }
     )
 
@@ -195,11 +197,10 @@ def test_publish_filters_terms_with_non_content_pos_tags(
     _upload_csv_to_s3(s3, bucket, lemmas_key, token_lemmas)
     _upload_csv_to_s3(s3, bucket, tags_key, token_tags)
 
-    metadata_key = f"metadata/{BOOK_SMITH}/metadata.json"
     _upload_json_to_s3(
         s3,
         bucket,
-        metadata_key,
+        metadata_key(BOOK_SMITH),
         {"author": ["Smith, Adam"], "title": ["The Wealth of Nations"]},
     )
 
@@ -209,7 +210,7 @@ def test_publish_filters_terms_with_non_content_pos_tags(
     pt.table.put_item(
         Item={
             "platform_data": BOOK_SMITH,
-            "s3_metadata_key": metadata_key,
+            "pipeline_status": EntryStatus.SCRAPED_HTML,
             "s3_token_lemmas_key": lemmas_key,
             "s3_token_tags_key": tags_key,
             "published_year": 1776,

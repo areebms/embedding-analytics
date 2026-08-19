@@ -8,7 +8,7 @@ HEADING_ELEMENTS = ("h1", "h2", "h3", "h4", "h5", "h6")
 # Where the handoff objects live, and what they are written as. standardize-headings
 # writes both keys under this prefix and collect reads them back, so the two stages
 # share the one definition rather than each spelling the prefix out.
-MANIFEST_PREFIX = "standardize-batches"
+S3_STANDARDIZE_PREFIX = "standardize-headings"
 JSON_CONTENT_TYPE = "application/json; charset=utf-8"
 
 # Everything Anthropic disallows in a custom_id. book_records.utils substitutes on

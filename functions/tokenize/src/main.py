@@ -9,7 +9,7 @@ from nltk.tokenize import sent_tokenize
 from nltk.stem import WordNetLemmatizer
 
 from shared.session import get_session
-from shared.s3 import upload_object, load_text_from_s3
+from shared.s3 import upload_object, get_s3_loader
 from shared.tables.pipeline import get_pipeline_table
 from shared.commons import get_index
 
@@ -31,8 +31,17 @@ with Path(__file__).with_name("ignored_nouns.txt").open(encoding="utf-8") as fil
     ignored_nouns = set(file.read().splitlines())
 
 
+def split_sentences(text):
+    return [
+        sentence
+        for block in text.split("\n\n")
+        if block.strip()
+        for sentence in sent_tokenize(block)
+    ]
+
+
 def chunk_text(nlp, text):
-    all_sentences = sent_tokenize(text)
+    all_sentences = split_sentences(text)
     num_chunks = len(all_sentences) % nlp.max_length
     if num_chunks <= 1:
         return [text]
@@ -118,7 +127,7 @@ def tokenize(index):
         logger.info("Index has already been tokenized", extra={"index": index})
         return
 
-    text = load_text_from_s3(session, s3_text_key)
+    text = get_s3_loader().load_text(s3_text_key)
     nlp = spacy.load("en_core_web_sm", disable=["ner"])
     doc_texts = chunk_text(nlp, text)
 

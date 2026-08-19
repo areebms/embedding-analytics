@@ -11,4 +11,4 @@ class BookRecord(BaseModel):
 
 class BatchDetail(BaseModel):
     batch_id: str
-    custom_ids: dict[str, str]
+    id_mapping: dict[str, str]

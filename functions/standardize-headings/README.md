@@ -37,6 +37,14 @@ against the id it was invoked with. Nothing else records it: the batch id reache
 collect through this function's return value, and is otherwise recoverable from
 `client.messages.batches.list()` for 29 days after the batch was created.
 
+This function also owns both halves of the wire format, not just the outbound one.
+`llm_classify_request/` builds the prompt and sends the batch; `llm_parse_response/`
+defines the semantic blocks a reply may name and validates the lines that come back.
+collect imports the second package to read its batch. Keeping them side by side is
+the point: a block added to the SYSTEM_PROMPT and not to `SEMANTIC_BLOCKS` is
+rejected in the same package it was introduced in, rather than drifting out of step
+with a validator in another function.
+
 ```bash
 aws lambda invoke --function-name $LAMBDA_PREFIX-standardize-headings \
     --payload '{}' out.json

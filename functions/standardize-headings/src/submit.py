@@ -6,7 +6,8 @@ from shared.tables.pipeline_entries import (
     get_pipeline_entries,
 )
 
-from book_records.utils import get_pending_book_records, save_batch_index
+from book_records.batch_index import save_batch_index
+from book_records.utils import get_pending_book_records
 from llm_classify_request.send_request import send_message_batch
 
 logger = logging.getLogger(__name__)

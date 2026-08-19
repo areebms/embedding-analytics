@@ -10,6 +10,7 @@ from gensim.models import KeyedVectors
 
 from shared.s3 import get_s3_loader
 from shared.tables.pipeline import get_pipeline_table
+from shared.tables.pipeline_entries import EntryStatus, metadata_key
 from shared.tables.book_terms import get_book_term_table
 from shared.tables.corpus_terms import get_corpus_term_table
 from shared.tables.vectors import get_pinecone_table
@@ -233,11 +234,12 @@ def publish(index):
     s3_loader = get_s3_loader()
     pipeline_table = get_pipeline_table()
 
-    item = pipeline_table.get_entry(index, ["s3_metadata_key", "published_year"])
-    s3_metadata_key = item.get("s3_metadata_key")
-    if not s3_metadata_key:
+    item = pipeline_table.get_entry(index, ["pipeline_status", "published_year"]) or {}
+    if item.get("pipeline_status") in (None, EntryStatus.CREATED):
         logger.warning("%s: has not been scraped", index)
         return
+
+    s3_metadata_key = metadata_key(index)
 
     logger.info(
         "%s: s3_metadata_key=%s published_year=%s",

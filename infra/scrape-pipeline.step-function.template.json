@@ -1,5 +1,5 @@
 {
-  "Comment": "Seed a Gutenberg subject and scrape every book it lists. NOT DEPLOYED: deploy_step_function.sh hardcodes the state machine name to ${LAMBDA_PREFIX}-pipeline, so pointing STEP_FUNCTION_TEMPLATE at this file overwrites the per-book training machine instead of creating a second one. Teach the script a name per template first, or deploy this by hand.",
+  "Comment": "Seed a Gutenberg subject, scrape every book it lists, then standardize their headings — one execution takes a subject from a subject id to STANDARDIZED. NOT DEPLOYED: deploy_step_function.sh hardcodes the state machine name to ${LAMBDA_PREFIX}-pipeline, so pointing STEP_FUNCTION_TEMPLATE at this file overwrites the per-book training machine instead of creating a second one. Teach the script a name per template first, or deploy this by hand.",
   "StartAt": "seed-subject",
   "QueryLanguage": "JSONata",
   "States": {
@@ -161,7 +161,109 @@
           }
         }
       },
-      "End": true
+      "Next": "standardize-submit"
+    },
+    "standardize-submit": {
+      "Type": "Task",
+      "Comment": "Opens one Anthropic batch over every book at SCRAPED_HTML and returns without waiting. The sweep is corpus-wide, not scoped to this subject, so two overlapping executions of this machine collide: the second one's submit finds the first's books at STANDARDIZE_SUBMITTED and returns book_count 0. Run subjects one at a time.",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${LAMBDA_PREFIX}-standardize-headings:$LATEST",
+        "Payload": {
+          "stage": "submit"
+        }
+      },
+      "Output": {
+        "subject": "{% $states.input.subject %}",
+        "books": "{% $states.input.books %}",
+        "failed": "{% $states.input.failed %}",
+        "batch_id": "{% $states.result.Payload.batch_id %}",
+        "book_count": "{% $states.result.Payload.book_count %}"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Next": "anything-submitted?"
+    },
+    "anything-submitted?": {
+      "Type": "Choice",
+      "Comment": "book_count 0 has two causes and neither is an error: nothing sat at SCRAPED_HTML, or a batch is already in flight. Gating on the count rather than on batch_id keeps the condition off a JSON null.",
+      "Choices": [
+        {
+          "Condition": "{% $states.input.book_count = 0 %}",
+          "Next": "nothing-to-standardize"
+        }
+      ],
+      "Default": "wait-for-batch"
+    },
+    "nothing-to-standardize": {
+      "Type": "Succeed"
+    },
+    "wait-for-batch": {
+      "Type": "Wait",
+      "Comment": "The batch is asynchronous, so the waiting belongs here rather than inside a Lambda holding an open invocation. Each collect rebuilds its state from the batch id, so a poll that lands on a cold container is correct; 300s caps the lag after the batch ends without burning invocations on a batch that may run for hours.",
+      "Seconds": 300,
+      "Next": "standardize-collect"
+    },
+    "standardize-collect": {
+      "Type": "Task",
+      "Comment": "Returns immediately while the batch is still running, and settles it once it has ended.",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${LAMBDA_PREFIX}-standardize-headings:$LATEST",
+        "Payload": {
+          "stage": "collect",
+          "batch_id": "{% $states.input.batch_id %}"
+        }
+      },
+      "Output": {
+        "subject": "{% $states.input.subject %}",
+        "books": "{% $states.input.books %}",
+        "failed": "{% $states.input.failed %}",
+        "batch_id": "{% $states.input.batch_id %}",
+        "batch_status": "{% $states.result.Payload.batch_status %}",
+        "standardized": "{% $states.result.Payload.standardized %}"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Next": "batch-ended?"
+    },
+    "batch-ended?": {
+      "Type": "Choice",
+      "Comment": "Written as the negative so an unfamiliar processing_status keeps polling instead of reporting the subject done. 'ended' covers expiry too, so the loop always terminates.",
+      "Choices": [
+        {
+          "Condition": "{% $states.input.batch_status != 'ended' %}",
+          "Next": "wait-for-batch"
+        }
+      ],
+      "Default": "subject-done"
+    },
+    "subject-done": {
+      "Type": "Succeed"
     }
   }
 }

@@ -18,6 +18,7 @@ class EntryStatus(StrEnum):
     SCRAPED_SKIPPED_NON_ENGLISH = "SCRAPED_SKIPPED_NON_ENGLISH"
     SCRAPED_SKIPPED_NO_HEADINGS = "SCRAPED_SKIPPED_NO_HEADINGS"
     STANDARDIZE_SUBMITTED = "STANDARDIZE_SUBMITTED"
+    STANDARDIZED = "STANDARDIZED"
 
 
 BookIndexField = Annotated[
@@ -37,6 +38,14 @@ def html_key(index: BookIndex) -> str:
     return f"html/{index}.html"
 
 
+def standardized_html_key(index: BookIndex) -> str:
+    return f"html-standardized/{index}.html"
+
+
+def text_key(index: BookIndex) -> str:
+    return f"text/{index}.txt"
+
+
 class PipelineEntry(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
@@ -51,6 +60,14 @@ class PipelineEntry(BaseModel):
     @property
     def s3_html_key(self) -> str:
         return html_key(self.platform_data)
+
+    @property
+    def s3_standardized_html_key(self) -> str:
+        return standardized_html_key(self.platform_data)
+
+    @property
+    def s3_text_key(self) -> str:
+        return text_key(self.platform_data)
 
 
 _pipeline_entries = None

@@ -1,168 +1,238 @@
-"""Tests for the HTML walker that turns a scraped book into (tag, text) blocks.
+"""Tests for the HTML → (tag, text) reduction that feeds every later stage.
 
-Everything here except load_tag_text_pairs is pure, so these are plain strings in
-and lists out — no fixtures, no mocking.
+This is the only place in the function that reads a book's raw markup. Whatever it
+drops here is gone from the classification prompt, from `html-standardized/` and from
+`text/`, so the fixtures below are the shapes Project Gutenberg actually ships:
+license wrappers, tables of contents as lists, transcriber's notes as comments.
 """
 
 import pytest
+from bs4 import BeautifulSoup
 
-from conftest import BOOK_HTML, INDEX
+from conftest import BOOK_HTML, BOOK_PAIRS, INDEX, PROSE_ONLY_HTML
+from shared.tables.pipeline_entries import html_key
+
+from book_records.html_text_tags import (
+    as_paragraph_elements,
+    blank_line_separated_texts,
+    clean_element_text,
+    clean_text,
+    definition_list_texts,
+    flatten_html_elements,
+    list_item_texts,
+    load_tag_text_pairs,
+    prepare_book_body,
+    strip_non_book_elements,
+    strip_pg_boilerplate,
+    table_row_texts,
+)
 
 
-def _pairs(html):
-    from book_records.html_text_tags import flatten_html_elements, prepare_book_body
-
+def flatten(html):
     return list(flatten_html_elements(prepare_book_body(html)))
 
 
-# ── the block kinds ───────────────────────────────────────────────────
+def soup_of(html):
+    return BeautifulSoup(html, "html.parser")
 
 
-def test_headings_keep_their_tag_and_prose_becomes_p():
-    assert _pairs("<body><h2>Chapter I</h2><p>Once upon a time.</p></body>") == [
-        ("h2", "Chapter I"),
-        ("p", "Once upon a time."),
-    ]
+# ── text cleaning ─────────────────────────────────────────────────────
 
 
-def test_whitespace_inside_a_block_is_collapsed():
-    assert _pairs("<body><p>one\n  two\t\tthree</p></body>") == [
-        ("p", "one two three")
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("  spaced  out  ", "spaced out"),
+        ("line\nbreak", "line break"),
+        ("tabs\tand\r\nnewlines", "tabs and newlines"),
+        ("", ""),
+        ("   ", ""),
+    ],
+)
+def test_clean_text_collapses_every_run_of_whitespace(raw, expected):
+    assert clean_text(raw) == expected
+
+
+def test_clean_element_text_joins_inline_children_with_a_space():
+    """get_text() with no separator would run "<i>a</i><b>b</b>" together as "ab"."""
+    element = soup_of("<p><i>first</i><b>second</b></p>").p
+
+    assert clean_element_text(element) == "first second"
+
+
+def test_as_paragraph_elements_labels_prose_and_drops_what_cleaned_away():
+    assert list(as_paragraph_elements(["one", "", "two"])) == [("p", "one"), ("p", "two")]
+
+
+# ── the per-element text extractors ───────────────────────────────────
+
+
+def test_list_items_are_one_block_each_and_nested_lists_stay_with_their_parent():
+    element = soup_of("<ul><li>one<ul><li>inner</li></ul></li><li>two</li></ul>").ul
+
+    assert list(list_item_texts(element)) == ["one inner", "two"]
+
+
+def test_definition_lists_yield_terms_and_definitions_in_document_order():
+    element = soup_of("<dl><dt>Labour</dt><dd>The real price.</dd><dt>Rent</dt></dl>").dl
+
+    assert list(definition_list_texts(element)) == ["Labour", "The real price.", "Rent"]
+
+
+def test_table_rows_are_one_block_each_with_cells_joined_by_spaces():
+    """Column layout carries no meaning once the book is prose."""
+    element = soup_of(
+        "<table><tr><th>Year</th><th>Price</th></tr>"
+        "<tr><td>1776</td><td>2s.</td></tr></table>"
+    ).table
+
+    assert list(table_row_texts(element)) == ["Year Price", "1776 2s."]
+
+
+def test_empty_table_cells_do_not_leave_double_spaces():
+    element = soup_of("<table><tr><td>1776</td><td></td><td>2s.</td></tr></table>").table
+
+    assert list(table_row_texts(element)) == ["1776 2s."]
+
+
+def test_blockquotes_split_on_blank_lines_because_that_is_all_they_give_us():
+    element = soup_of(
+        "<blockquote>first para\n\n  \nsecond para</blockquote>"
+    ).blockquote
+
+    assert list(blank_line_separated_texts(element)) == ["first para", "second para"]
+
+
+# ── flatten_html_elements: one test per branch ────────────────────────
+
+
+def test_headings_keep_their_original_tag():
+    assert flatten("<body><h1>Title</h1><h3>Section</h3></body>") == [
+        ("h1", "Title"),
+        ("h3", "Section"),
     ]
 
 
 def test_a_heading_that_cleans_away_to_nothing_is_dropped():
-    """It is not demoted to prose — it vanishes, and the positions Claude is asked
-    about are numbered over what survives."""
-    assert _pairs("<body><h2>   </h2><p>Real text.</p></body>") == [("p", "Real text.")]
+    """An empty heading would otherwise take a position in the prompt and force the
+    model to classify a blank line."""
+    assert flatten("<body><h1>   </h1><p>prose</p></body>") == [("p", "prose")]
 
 
-def test_an_empty_paragraph_is_dropped():
-    assert _pairs("<body><p></p><p>Real text.</p></body>") == [("p", "Real text.")]
-
-
-@pytest.mark.parametrize("tag", ["ul", "ol"], ids=["unordered", "ordered"])
-def test_list_items_each_become_their_own_block(tag):
-    html = f"<body><{tag}><li>First</li><li>Second</li></{tag}></body>"
-
-    assert _pairs(html) == [("p", "First"), ("p", "Second")]
-
-
-def test_a_nested_list_folds_into_its_parent_item():
-    """Only direct <li> children are enumerated, but each one's text is taken
-    recursively, so a nested list arrives inside its parent's block."""
-    html = "<body><ul><li>Outer<ul><li>Inner</li></ul></li></ul></body>"
-
-    assert _pairs(html) == [("p", "Outer Inner")]
-
-
-def test_definition_lists_flatten_terms_and_definitions_in_document_order():
-    html = "<body><dl><dt>Term</dt><dd>Meaning</dd><dt>Other</dt></dl></body>"
-
-    assert _pairs(html) == [("p", "Term"), ("p", "Meaning"), ("p", "Other")]
-
-
-def test_table_rows_collapse_to_one_block_per_row():
-    html = (
-        "<body><table>"
-        "<tr><th>Year</th><th>Price</th></tr>"
-        "<tr><td>1776</td><td>Two shillings</td></tr>"
-        "</table></body>"
-    )
-
-    assert _pairs(html) == [("p", "Year Price"), ("p", "1776 Two shillings")]
-
-
-def test_a_row_of_empty_cells_produces_no_block():
-    html = (
-        "<body><table><tr><td></td><td>  </td></tr>"
-        "<tr><td>Real</td></tr></table></body>"
-    )
-
-    assert _pairs(html) == [("p", "Real")]
-
-
-def test_a_nested_table_has_its_text_counted_more_than_once():
-    """Pins current behaviour, which is almost certainly not what anyone wanted.
-    Unlike the list and definition-list helpers, table_row_texts searches
-    recursively, so the inner table's cell is picked up by the outer row *and*
-    again as a row of its own. Layout tables are common in OCR'd book HTML, so
-    this inflates the word counts Claude is given between headings."""
-    html = (
-        "<body><table><tr><td>Outer"
-        "<table><tr><td>Inner</td></tr></table>"
-        "</td></tr></table></body>"
-    )
-
-    assert _pairs(html) == [("p", "Outer Inner Inner"), ("p", "Inner")]
-
-
-def test_blockquotes_split_on_blank_lines():
-    html = "<body><blockquote>First stanza.\n\nSecond stanza.</blockquote></body>"
-
-    assert _pairs(html) == [("p", "First stanza."), ("p", "Second stanza.")]
-
-
-def test_preformatted_text_splits_on_blank_lines():
-    html = "<body><pre>Line one.\n\nLine two.</pre></body>"
-
-    assert _pairs(html) == [("p", "Line one."), ("p", "Line two.")]
-
-
-# ── walking wrappers ──────────────────────────────────────────────────
-
-
-def test_a_wrapper_holding_real_structure_is_walked_through():
-    html = "<body><div><div><h2>Deep heading</h2><p>Deep prose.</p></div></div></body>"
-
-    assert _pairs(html) == [("h2", "Deep heading"), ("p", "Deep prose.")]
-
-
-def test_a_wrapper_holding_no_structure_is_taken_whole():
-    html = "<body><span>Just <em>some</em> words</span></body>"
-
-    assert _pairs(html) == [("p", "Just some words")]
-
-
-# ── what never counts as book text ────────────────────────────────────
-
-
-def test_project_gutenberg_boilerplate_is_dropped():
-    pairs = _pairs(BOOK_HTML)
-
-    assert ("h1", "The Wealth of Nations") in pairs
-    assert not any("Project Gutenberg" in text for _, text in pairs)
-
-
-def test_skipped_tags_contribute_nothing():
-    html = "<body><script>var x = 1;</script><style>p {}</style><p>Real.</p></body>"
-
-    assert _pairs(html) == [("p", "Real.")]
-
-
-def test_comments_and_doctypes_are_not_prose():
-    html = "<!DOCTYPE html><body><!-- Transcriber's note --><p>Real.</p></body>"
-
-    assert _pairs(html) == [("p", "Real.")]
-
-
-def test_a_fragment_with_no_body_is_walked_as_it_stands():
-    """html.parser does not invent a <body>, so prepare_book_body falls back to the
-    whole soup rather than returning None."""
-    assert _pairs("<h1>Title</h1><p>Prose.</p>") == [
-        ("h1", "Title"),
-        ("p", "Prose."),
+def test_loose_text_outside_any_element_becomes_a_paragraph():
+    assert flatten("<body>loose text<p>para</p></body>") == [
+        ("p", "loose text"),
+        ("p", "para"),
     ]
 
 
-# ── the one impure function ───────────────────────────────────────────
+def test_lists_dls_and_tables_all_reduce_to_paragraphs():
+    html = (
+        "<body><ul><li>bullet</li></ul><ol><li>numbered</li></ol>"
+        "<dl><dt>term</dt></dl><table><tr><td>cell</td></tr></table></body>"
+    )
+
+    assert flatten(html) == [
+        ("p", "bullet"),
+        ("p", "numbered"),
+        ("p", "term"),
+        ("p", "cell"),
+    ]
 
 
-def test_load_tag_text_pairs_reads_the_books_html_object(bucket):
-    from shared.tables.pipeline_entries import html_key
+def test_an_unknown_container_holding_structure_is_descended_into():
+    """A <div> wrapping a chapter must not collapse into one giant paragraph."""
+    assert flatten("<body><div><h2>Chapter</h2><p>prose</p></div></body>") == [
+        ("h2", "Chapter"),
+        ("p", "prose"),
+    ]
 
-    from book_records.html_text_tags import load_tag_text_pairs
 
+def test_an_unknown_container_holding_only_inline_markup_is_one_block():
+    assert flatten("<body><div><span>a</span> <span>b</span></div></body>") == [
+        ("p", "a b")
+    ]
+
+
+def test_blockquotes_and_preformatted_text_break_on_their_blank_lines():
+    """Verse and long quotations arrive as one element with the paragraph breaks
+    only in the whitespace."""
+    html = "<body><blockquote>quoted\n\nsecond</blockquote><pre>code\n\nmore</pre></body>"
+
+    assert flatten(html) == [
+        ("p", "quoted"),
+        ("p", "second"),
+        ("p", "code"),
+        ("p", "more"),
+    ]
+
+
+# ── stripping ─────────────────────────────────────────────────────────
+
+
+def test_the_pg_licence_wrapper_is_removed():
+    soup = strip_pg_boilerplate(
+        soup_of('<div id="pg-header">licence</div><p>book</p><div id="pg-footer">tail</div>')
+    )
+
+    assert "licence" not in soup.get_text()
+    assert "tail" not in soup.get_text()
+    assert "book" in soup.get_text()
+
+
+def test_stripping_boilerplate_is_fine_on_a_page_that_has_none():
+    soup = strip_pg_boilerplate(soup_of("<p>book</p>"))
+
+    assert soup.get_text() == "book"
+
+
+def test_scripts_styles_and_images_are_not_book_text():
+    soup = strip_non_book_elements(
+        soup_of("<script>var x=1</script><style>p{}</style><img src='x'><p>keep</p>")
+    )
+
+    assert clean_text(soup.get_text(" ")) == "keep"
+
+
+def test_comments_and_doctypes_are_not_paragraphs():
+    """They subclass NavigableString, so without NON_TEXT_STRINGS the walk would
+    yield "<!-- Transcriber's note -->" as prose."""
+    html = "<!DOCTYPE html><body><!-- Transcriber's note --><p>keep</p></body>"
+
+    assert flatten(html) == [("p", "keep")]
+
+
+def test_prepare_book_body_returns_the_body_when_there_is_one():
+    assert prepare_book_body("<html><body><p>x</p></body></html>").name == "body"
+
+
+def test_prepare_book_body_falls_back_to_the_whole_document():
+    """Not every scraped page has a <body>; a fragment still has to flatten."""
+    assert flatten("<h1>Title</h1><p>x</p>") == [("h1", "Title"), ("p", "x")]
+
+
+# ── the whole reduction ───────────────────────────────────────────────
+
+
+def test_a_gutenberg_page_reduces_to_its_headings_and_prose():
+    assert flatten(BOOK_HTML) == BOOK_PAIRS
+
+
+def test_a_book_of_pure_prose_yields_no_headings():
+    assert flatten(PROSE_ONLY_HTML) == [
+        ("p", "An inquiry into the nature and causes."),
+        ("p", "The greatest improvement in the productive powers of labour."),
+    ]
+
+
+def test_load_tag_text_pairs_reads_the_raw_html_artifact(bucket):
     bucket.put_object(Key=html_key(INDEX), Body=BOOK_HTML.encode("utf-8"))
 
-    assert load_tag_text_pairs(INDEX)[0] == ("h1", "The Wealth of Nations")
+    assert load_tag_text_pairs(INDEX) == BOOK_PAIRS
+
+
+def test_load_tag_text_pairs_raises_when_the_book_was_never_scraped(bucket):
+    """get_pending_book_tag_text_pairs relies on this raising rather than returning
+    an empty list, so that it can skip the book instead of submitting an empty one."""
+    with pytest.raises(Exception):
+        load_tag_text_pairs(INDEX)

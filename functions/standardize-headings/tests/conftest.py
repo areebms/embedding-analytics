@@ -1,3 +1,4 @@
+import datetime
 import os
 from unittest.mock import MagicMock
 
@@ -37,12 +38,25 @@ BOOK_HTML = """<!DOCTYPE html>
 </html>
 """
 
+# What BOOK_HTML flattens to. Three headings, so a classification reply for this
+# book is three lines.
+BOOK_PAIRS = [
+    ("h1", "The Wealth of Nations"),
+    ("p", "An inquiry into the nature and causes."),
+    ("h2", "BOOK I."),
+    ("h2", "OF THE CAUSES OF IMPROVEMENT."),
+    ("p", "The greatest improvement in the productive powers of labour."),
+]
+
 # The same page with every heading removed: what a book of pure prose looks like.
 PROSE_ONLY_HTML = """<html><body>
   <p>An inquiry into the nature and causes.</p>
   <p>The greatest improvement in the productive powers of labour.</p>
 </body></html>
 """
+
+
+# ── AWS ───────────────────────────────────────────────────────────────
 
 
 def _create_pipeline_table(dynamodb):
@@ -73,9 +87,9 @@ def _create_bucket(session):
 
     Both arms are live: the setdefault above only applies when the variable is
     unset, and the deploy gate runs this suite as `docker run --env-file .env`,
-    where .env sets AWS_REGION=us-west-2. Creating the bucket unconditionally —
-    as scrape's conftest does — raises IllegalLocationConstraintException there,
-    so the suite would pass locally and error in the gate it exists to clear.
+    where .env sets AWS_REGION=us-west-2. Creating the bucket unconditionally
+    raises IllegalLocationConstraintException there, so the suite would pass
+    locally and error in the gate it exists to clear.
     """
     region = os.environ["AWS_REGION"]
     constraint = (
@@ -132,6 +146,17 @@ def seed(entries):
 
 
 @pytest.fixture
+def statuses(entries):
+    """Read a book's current pipeline_status back out of the table."""
+
+    def _status(index=INDEX):
+        entry = entries.get_entry(index, ["platform_data", "pipeline_status"])
+        return None if entry is None else entry.pipeline_status
+
+    return _status
+
+
+@pytest.fixture
 def scraped_book(seed, bucket):
     """A book at SCRAPED_HTML with its raw html in the bucket: what submit sweeps."""
     from shared.tables.pipeline_entries import EntryStatus, html_key
@@ -145,6 +170,38 @@ def scraped_book(seed, bucket):
 
 
 @pytest.fixture
+def book_manifest(bucket):
+    """The per-book manifest submit leaves behind for collect to render from."""
+    from book_records.schemas import BookTagTextPairs
+    from book_records.utils import sanitize_llm_index
+
+    def _book_manifest(index=INDEX, tag_text_pairs=None):
+        book_tag_text_pairs = BookTagTextPairs(
+            llm_index=sanitize_llm_index(index),
+            index=index,
+            tag_text_pairs=BOOK_PAIRS if tag_text_pairs is None else tag_text_pairs,
+        )
+        bucket.put_object(
+            Key=f"standardize-headings/books/{index}.json",
+            Body=book_tag_text_pairs.model_dump_json().encode("utf-8"),
+        )
+        return book_tag_text_pairs
+
+    return _book_manifest
+
+
+def s3_body(bucket, key):
+    return bucket.Object(key).get()["Body"].read().decode("utf-8")
+
+
+def s3_content_type(bucket, key):
+    return bucket.Object(key).get()["ContentType"]
+
+
+# ── Anthropic ─────────────────────────────────────────────────────────
+
+
+@pytest.fixture
 def anthropic_client():
     """The Anthropic SDK, mocked the way publish mocks Pinecone: moto covers S3 and
     DynamoDB, but nothing fakes the Batches API, so the client is a MagicMock."""
@@ -153,12 +210,86 @@ def anthropic_client():
     return client
 
 
+def succeeded_response(custom_id, text, stop_reason="end_turn"):
+    """One finished batch result, built from the real SDK types.
+
+    Not a MagicMock: yield_anthropic_content calls response.to_json() before it
+    looks at the result, and serialize_content_block branches on isinstance. A
+    mock would satisfy both without proving either works against the SDK.
+    """
+    from anthropic.types import Message, TextBlock, Usage
+    from anthropic.types.messages import (
+        MessageBatchIndividualResponse,
+        MessageBatchSucceededResult,
+    )
+
+    return MessageBatchIndividualResponse(
+        custom_id=custom_id,
+        result=MessageBatchSucceededResult(
+            type="succeeded",
+            message=Message(
+                id="msg_test",
+                type="message",
+                role="assistant",
+                model="claude-sonnet-5",
+                content=[TextBlock(type="text", text=text)],
+                stop_reason=stop_reason,
+                stop_sequence=None,
+                usage=Usage(input_tokens=10, output_tokens=10),
+            ),
+        ),
+    )
+
+
+def errored_response(custom_id, message="request too large"):
+    from anthropic.types.messages import (
+        MessageBatchErroredResult,
+        MessageBatchIndividualResponse,
+    )
+    from anthropic.types.shared import ErrorResponse, InvalidRequestError
+
+    return MessageBatchIndividualResponse(
+        custom_id=custom_id,
+        result=MessageBatchErroredResult(
+            type="errored",
+            error=ErrorResponse(
+                type="error",
+                error=InvalidRequestError(
+                    type="invalid_request_error", message=message
+                ),
+            ),
+        ),
+    )
+
+
 @pytest.fixture
-def statuses(entries):
-    """Read a book's current pipeline_status back out of the table."""
+def batch_client():
+    """An Anthropic client whose batch retrieve/results answer with real SDK objects."""
+    from anthropic.types.messages import MessageBatch, MessageBatchRequestCounts
 
-    def _status(index=INDEX):
-        entry = entries.get_entry(index, ["platform_data", "pipeline_status"])
-        return None if entry is None else entry.pipeline_status
+    def _batch_client(processing_status="ended", responses=()):
+        responses = list(responses)
+        batch = MessageBatch(
+            id=BATCH_ID,
+            type="message_batch",
+            processing_status=processing_status,
+            created_at=datetime.datetime(2026, 1, 1),
+            expires_at=datetime.datetime(2026, 2, 1),
+            request_counts=MessageBatchRequestCounts(
+                processing=0,
+                succeeded=len(responses),
+                errored=0,
+                canceled=0,
+                expired=0,
+            ),
+            archived_at=None,
+            cancel_initiated_at=None,
+            ended_at=None,
+            results_url=None,
+        )
+        client = MagicMock()
+        client.messages.batches.retrieve.return_value = batch
+        client.messages.batches.results.return_value = iter(responses)
+        return client
 
-    return _status
+    return _batch_client

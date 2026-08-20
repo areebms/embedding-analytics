@@ -10,6 +10,11 @@ services:
     function_name: scrape
     image: lambda-scrape
 
+  standardize-headings:
+    function_name: standardize-headings
+    image: lambda-standardize-headings
+    timeout: 600
+
   tokenize:
     function_name: tokenize
     image: lambda-tokenize

@@ -1,159 +1,144 @@
-"""Tests for the corpus sweep and the two S3 objects it hands to collect."""
+"""Tests for the submit stage's sweep: which books it picks up, which it passes over,
+and what it leaves in the bucket for collect to render from.
+
+The sweep is corpus-wide and costs money downstream, so the guards that stop it
+matter as much as the happy path.
+"""
 
 import json
 
 import pytest
 
-from shared.tables.pipeline_entries import EntryStatus
+from conftest import BOOK_HTML, BOOK_PAIRS, INDEX, INDEX_2, PROSE_ONLY_HTML, s3_body, s3_content_type
+from shared.tables.pipeline_entries import EntryStatus, html_key
 
-from conftest import INDEX, INDEX_2, PROSE_ONLY_HTML
+from book_records.constants import JSON_CONTENT_TYPE
+from book_records.schemas import BookTagTextPairs
+from book_records.utils import (
+    get_pending_book_tag_text_pairs,
+    sanitize_llm_index,
+    save_book_tag_text_pairs,
+)
 
 
-def _object(bucket, key):
-    return bucket.Object(key).get()
+def book_key(index):
+    return f"standardize-headings/books/{index}.json"
 
 
-# ── custom ids ────────────────────────────────────────────────────────
+# ── sanitize_llm_index ────────────────────────────────────────────────
 
 
 @pytest.mark.parametrize(
     "label, expected",
     [
         ("gutenberg-3300", "gutenberg-3300"),
-        ("book/with spaces", "book_with_spaces"),
-        ("a" * 100, "a" * 64),
+        ("under_score", "under_score"),
+        ("has spaces", "has_spaces"),
+        ("slash/colon:dot.", "slash_colon_dot_"),
+        ("Ünïcødé", "_n_c_d_"),
     ],
-    ids=["already-legal", "illegal-characters", "over-length"],
 )
-def test_sanitize_custom_id(label, expected):
-    from book_records.utils import sanitize_custom_id
-
-    assert sanitize_custom_id(label) == expected
-
-
-# ── the handoff objects ───────────────────────────────────────────────
+def test_illegal_characters_become_underscores(label, expected):
+    """Anthropic's custom_id accepts only ^[a-zA-Z0-9_-]{1,64}$."""
+    assert sanitize_llm_index(label) == expected
 
 
-def test_a_book_record_is_written_as_json_under_its_index(bucket):
-    from book_records.schemas import BookRecord
-    from book_records.utils import save_book_record
+def test_a_long_label_is_truncated_to_the_custom_id_limit():
+    assert len(sanitize_llm_index("x" * 200)) == 64
 
-    save_book_record(
-        BookRecord(
-            custom_id="gutenberg-1",
-            index="gutenberg-1",
-            tag_text_pairs=[("h1", "T")],
-        )
+
+def test_a_book_index_survives_sanitising_unchanged():
+    """The whole corpus is gutenberg-N, so the common case must be a no-op."""
+    assert sanitize_llm_index(INDEX) == "gutenberg-3300"
+
+
+# ── save_book_tag_text_pairs ──────────────────────────────────────────
+
+
+def test_the_manifest_is_written_as_json_under_the_books_prefix(bucket):
+    book_tag_text_pairs = BookTagTextPairs(
+        llm_index="gutenberg-3300", index=INDEX, tag_text_pairs=BOOK_PAIRS
     )
 
-    written = _object(bucket, "standardize-batches/books/gutenberg-1.json")
-    assert written["ContentType"] == "application/json; charset=utf-8"
-    assert json.loads(written["Body"].read())["tag_text_pairs"] == [["h1", "T"]]
+    save_book_tag_text_pairs(book_tag_text_pairs)
+
+    saved = json.loads(s3_body(bucket, book_key(INDEX)))
+    assert saved["index"] == "gutenberg-3300"
+    assert saved["llm_index"] == "gutenberg-3300"
+    assert [tuple(pair) for pair in saved["tag_text_pairs"]] == BOOK_PAIRS
+    assert s3_content_type(bucket, book_key(INDEX)) == JSON_CONTENT_TYPE
 
 
-def test_the_batch_index_maps_custom_id_back_to_book_index(bucket):
-    from book_records.schemas import BookRecord
-    from book_records.utils import save_batch_index
-
-    books = [
-        BookRecord(custom_id="gutenberg-1", index="gutenberg-1", tag_text_pairs=[]),
-        BookRecord(custom_id="gutenberg-2", index="gutenberg-2", tag_text_pairs=[]),
-    ]
-
-    save_batch_index("msgbatch_abc", books)
-
-    written = json.loads(
-        _object(bucket, "standardize-batches/index.json")["Body"].read()
-    )
-    assert written == {
-        "batch_id": "msgbatch_abc",
-        "custom_ids": {"gutenberg-1": "gutenberg-1", "gutenberg-2": "gutenberg-2"},
-    }
+# ── get_pending_book_tag_text_pairs ───────────────────────────────────
 
 
-# ── the sweep ─────────────────────────────────────────────────────────
+def test_a_book_at_scraped_html_is_swept_up_and_gets_a_manifest(scraped_book, bucket):
+    scraped_book()
+
+    pending = get_pending_book_tag_text_pairs()
+
+    assert [book.index for book in pending] == [INDEX]
+    assert pending[0].llm_index == "gutenberg-3300"
+    assert pending[0].tag_text_pairs == BOOK_PAIRS
+    # The manifest lands during the sweep, not after the batch is opened.
+    assert json.loads(s3_body(bucket, book_key(INDEX)))["index"] == "gutenberg-3300"
 
 
-def test_nothing_is_collected_when_no_book_has_been_scraped(entries):
-    from book_records.utils import get_pending_book_records
-
-    assert get_pending_book_records() == []
+def test_an_empty_corpus_sweeps_up_nothing(entries):
+    assert get_pending_book_tag_text_pairs() == []
 
 
-def test_an_in_flight_corpus_stops_the_sweep_before_it_starts(
-    seed, scraped_book, entries, mocker
+def test_a_batch_already_in_flight_stops_the_sweep_before_it_starts(
+    scraped_book, seed, bucket
 ):
-    """Finding any book at STANDARDIZE_SUBMITTED ends the run outright — the
-    manifest sits at one fixed key, so a second batch would overwrite the index
-    the first one still needs."""
-    from book_records.utils import get_pending_book_records
-
+    """One fixed manifest key means a second batch would overwrite the index the
+    first one still needs. Finding any book in flight has to stop the run outright."""
+    scraped_book()
     seed(EntryStatus.STANDARDIZE_SUBMITTED, INDEX_2)
-    scraped_book(INDEX)
-    queried = mocker.spy(entries, "get_indexes")
 
-    assert get_pending_book_records() == []
-    assert [call.args[0] for call in queried.call_args_list] == [
-        EntryStatus.STANDARDIZE_SUBMITTED
-    ]
+    assert get_pending_book_tag_text_pairs() == []
+    # The eligible book was never even read, so no manifest was written for it.
+    with pytest.raises(Exception):
+        s3_body(bucket, book_key(INDEX))
 
 
-def test_one_record_is_built_and_saved_per_scraped_book(scraped_book, bucket):
-    from book_records.utils import get_pending_book_records
-
-    scraped_book(INDEX)
-    scraped_book(INDEX_2)
-
-    records = get_pending_book_records()
-
-    assert {record.index for record in records} == {str(INDEX), str(INDEX_2)}
-    assert {record.custom_id for record in records} == {str(INDEX), str(INDEX_2)}
-    # Each record is on S3 by the time the sweep returns, not batched to the end.
-    _object(bucket, f"standardize-batches/books/{INDEX}.json")
-    _object(bucket, f"standardize-batches/books/{INDEX_2}.json")
-
-
-def test_a_book_of_pure_prose_is_marked_skipped_and_left_out(scraped_book, statuses):
-    from book_records.utils import get_pending_book_records
-
+def test_a_book_with_no_headings_is_marked_skipped_and_left_out(
+    scraped_book, statuses
+):
+    """Nothing to classify, so it must not cost a request — but it must also stop
+    being swept up on every later run."""
     scraped_book(INDEX, PROSE_ONLY_HTML)
 
-    assert get_pending_book_records() == []
+    assert get_pending_book_tag_text_pairs() == []
     assert statuses(INDEX) == EntryStatus.SCRAPED_SKIPPED_NO_HEADINGS
 
 
-def test_one_heading_anywhere_is_enough_to_survive(scraped_book):
-    """The check is isdisjoint, not "mostly headings" — a single h-tag keeps the
-    book in the batch."""
-    from book_records.utils import get_pending_book_records
+def test_a_book_whose_html_is_missing_is_skipped_not_raised(seed, statuses):
+    """One unreadable book must not abort a corpus-wide sweep."""
+    seed(EntryStatus.SCRAPED_HTML, INDEX)
 
-    scraped_book(INDEX, "<body><p>prose</p><p>more</p><h6>One heading</h6></body>")
+    assert get_pending_book_tag_text_pairs() == []
+    # Skipped, but not reclassified: the row still says the html should be there.
+    assert statuses(INDEX) == EntryStatus.SCRAPED_HTML
 
-    assert len(get_pending_book_records()) == 1
 
-
-def test_a_book_whose_html_will_not_load_is_skipped_without_a_terminal_status(
-    seed, scraped_book, statuses
+def test_the_good_books_still_come_back_when_a_neighbour_fails(
+    scraped_book, seed, bucket
 ):
-    """Pins current behaviour, and it is a gap: the book keeps SCRAPED_HTML, so
-    every future sweep re-fetches it and fails again. Nothing records the failure
-    and nothing gives up on it."""
-    from book_records.utils import get_pending_book_records
+    scraped_book(INDEX_2, BOOK_HTML)
+    seed(EntryStatus.SCRAPED_HTML, INDEX)  # no html object for this one
 
-    seed(EntryStatus.SCRAPED_HTML, INDEX_2)  # no html object uploaded for this one
+    pending = get_pending_book_tag_text_pairs()
+
+    assert [book.index for book in pending] == [INDEX_2]
+
+
+def test_every_swept_book_gets_its_own_manifest(scraped_book, bucket):
     scraped_book(INDEX)
+    scraped_book(INDEX_2)
 
-    records = get_pending_book_records()
+    pending = get_pending_book_tag_text_pairs()
 
-    assert [record.index for record in records] == [str(INDEX)]
-    assert statuses(INDEX_2) == EntryStatus.SCRAPED_HTML
-
-
-def test_a_bad_book_does_not_stop_the_ones_after_it(seed, scraped_book):
-    from book_records.utils import get_pending_book_records
-
-    # "gutenberg-11" sorts before "gutenberg-3300", so the broken book is first.
-    seed(EntryStatus.SCRAPED_HTML, INDEX_2)
-    scraped_book(INDEX)
-
-    assert [record.index for record in get_pending_book_records()] == [str(INDEX)]
+    assert sorted(book.index for book in pending) == [INDEX_2, INDEX]
+    assert json.loads(s3_body(bucket, book_key(INDEX)))["index"] == "gutenberg-3300"
+    assert json.loads(s3_body(bucket, book_key(INDEX_2)))["index"] == "gutenberg-11"

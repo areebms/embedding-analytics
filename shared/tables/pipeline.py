@@ -22,20 +22,25 @@ class PipelineTable(BaseTable):
     def __init__(self, session):
         super().__init__(session, PIPELINE_TABLE)
 
-    def update_entry(self, platform_data, field, value):
-        super().update_entry({"platform_data": platform_data}, field, value)
+    def update_entry(self, book_id, field, value):
+        super().update_entry({"book_id": book_id}, field, value)
 
-    def update_entries(self, platform_data, data):
-        super().update_entries({"platform_data": platform_data}, data)
+    def update_entries(self, book_id, data, condition=None, condition_values=None):
+        return super().update_entries(
+            {"book_id": book_id}, data, condition, condition_values
+        )
 
-    def get_entry(self, platform_data, fields=["platform_data"]):
-        return super().get_entry({"platform_data": platform_data}, fields)
+    def add_to_set(self, book_id, field, values):
+        super().add_to_set({"book_id": book_id}, field, values)
 
-    def put_entry(self, platform_data, attributes=None):
-        item = {"platform_data": platform_data, **(attributes or {})}
+    def get_entry(self, book_id, fields=["book_id"]):
+        return super().get_entry({"book_id": book_id}, fields)
+
+    def put_entry(self, book_id, attributes=None):
+        item = {"book_id": book_id, **(attributes or {})}
         try:
             self.table.put_item(
-                Item=item, ConditionExpression="attribute_not_exists(platform_data)"
+                Item=item, ConditionExpression="attribute_not_exists(book_id)"
             )
             return True
         except ClientError as e:
@@ -43,12 +48,17 @@ class PipelineTable(BaseTable):
                 return False
             raise
 
-    def get_all_entries(self, fields=None):
-        scan_kwargs = {}
+    def get_all_entries(self, fields=None, **scan_kwargs):
+        """Every row, optionally projected and optionally filtered.
+        """
+        scan_kwargs = dict(scan_kwargs)
         if fields:
-            scan_kwargs = {
-                "ProjectionExpression": ", ".join([f"#{field}" for field in fields]),
-                "ExpressionAttributeNames": {f"#{field}": field for field in fields},
+            scan_kwargs["ProjectionExpression"] = ", ".join(
+                [f"#{field}" for field in fields]
+            )
+            scan_kwargs["ExpressionAttributeNames"] = {
+                **scan_kwargs.get("ExpressionAttributeNames", {}),
+                **{f"#{field}": field for field in fields},
             }
         items = []
         response = self.table.scan(**scan_kwargs)

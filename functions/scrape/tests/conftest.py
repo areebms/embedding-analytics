@@ -4,17 +4,23 @@ import pytest
 from moto import mock_aws
 
 
-os.environ.setdefault("AWS_REGION", "us-east-1")
-os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
-os.environ.setdefault("AWS_ACCESS_KEY_ID", "testing")
-os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "testing")
-os.environ.setdefault("S3_BUCKET", "test-bucket")
-os.environ.setdefault("PIPELINE_TABLE", "pipeline-test")
+os.environ.update(
+    AWS_REGION="us-east-1",
+    AWS_DEFAULT_REGION="us-east-1",
+    AWS_ACCESS_KEY_ID="testing",
+    AWS_SECRET_ACCESS_KEY="testing",
+    AWS_SESSION_TOKEN="testing",
+    S3_BUCKET="test-bucket",
+    PIPELINE_TABLE="pipeline-test",
+)
+
+os.environ.pop("AWS_PROFILE", None)
 
 from shared.commons import BookIndex
 
 
 INDEX = BookIndex(3300)
+SUBJECT = BookIndex(12345)
 
 # A bibrec table trimmed to the rows get_metadata actually reads. The <a> in the
 # language row is what drives the "*_link" key.
@@ -35,16 +41,16 @@ def _create_pipeline_table(dynamodb):
         TableName=os.environ["PIPELINE_TABLE"],
         BillingMode="PAY_PER_REQUEST",
         AttributeDefinitions=[
-            {"AttributeName": "platform_data", "AttributeType": "S"},
-            {"AttributeName": "pipeline_status", "AttributeType": "S"},
+            {"AttributeName": "book_id", "AttributeType": "S"},
+            {"AttributeName": "status", "AttributeType": "S"},
         ],
-        KeySchema=[{"AttributeName": "platform_data", "KeyType": "HASH"}],
+        KeySchema=[{"AttributeName": "book_id", "KeyType": "HASH"}],
         GlobalSecondaryIndexes=[
             {
-                "IndexName": "pipeline_status-index",
+                "IndexName": "status-index",
                 "KeySchema": [
-                    {"AttributeName": "pipeline_status", "KeyType": "HASH"},
-                    {"AttributeName": "platform_data", "KeyType": "RANGE"},
+                    {"AttributeName": "status", "KeyType": "HASH"},
+                    {"AttributeName": "book_id", "KeyType": "RANGE"},
                 ],
                 "Projection": {"ProjectionType": "KEYS_ONLY"},
             }
@@ -87,11 +93,13 @@ def bucket(aws):
 
 @pytest.fixture
 def seed(entries):
-    """Put one pipeline row at a given status, the way `scrape.py list` would."""
+    """Put one pipeline row at a given status, the way the SUBJECT stage would."""
     from shared.tables.pipeline_entries import PipelineEntry
 
-    def _seed(status, index=INDEX):
-        entries.put_entry(PipelineEntry(platform_data=index, pipeline_status=status))
+    def _seed(status, index=INDEX, subject_ids={SUBJECT}):
+        entries.put_entry(
+            PipelineEntry(book_id=index, subject_ids=subject_ids, status=status)
+        )
         return index
 
     return _seed

@@ -1,0 +1,23 @@
+# Version control
+.git
+.gitignore
+
+# Bytecode and test caches. These reach the *production* image through
+# `COPY ./shared shared` and `COPY functions/<fn>/src/ .`.
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.coverage
+**/htmlcov
+
+# Secrets. No Dockerfile COPYs .env today; this keeps a future one honest.
+.env
+.env.example
+
+# Not referenced by any COPY
+.devcontainer
+.claude
+docs
+*.md
+LICENSE
+**/.DS_Store

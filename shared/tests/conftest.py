@@ -5,11 +5,26 @@ import pytest
 from moto import mock_aws
 
 
-os.environ.setdefault("AWS_REGION", "us-east-1")
-os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
-os.environ.setdefault("S3_BUCKET", "test-bucket")
-os.environ.setdefault("TERM_CORPUS_TABLE", "corpus-term-test")
-os.environ.setdefault("PIPELINE_TABLE", "pipeline-test")
+# Set, not setdefault: the deploy gate runs this suite inside the image with
+# `docker run --env-file .env` (infra/deploy_lambdas.sh), so the real deployment
+# config is on the environment. Inheriting it pointed the suite at the production
+# bucket and table names, and at us-west-2 -- where moto's create_bucket fails with
+# IllegalLocationConstraintException, because a bucket outside us-east-1 needs an
+# explicit CreateBucketConfiguration. These are moto tests; they must not vary with
+# whatever .env happens to hold.
+os.environ.update(
+    AWS_REGION="us-east-1",
+    AWS_DEFAULT_REGION="us-east-1",
+    AWS_ACCESS_KEY_ID="testing",
+    AWS_SECRET_ACCESS_KEY="testing",
+    AWS_SESSION_TOKEN="testing",
+    S3_BUCKET="test-bucket",
+    PIPELINE_TABLE="pipeline-test",
+    TERM_CORPUS_TABLE="corpus-term-test",
+)
+# shared.session builds Session(profile_name=AWS_PROFILE); a profile named in .env
+# does not exist inside the image.
+os.environ.pop("AWS_PROFILE", None)
 
 
 def _create_pipeline_table(dynamodb):
@@ -17,18 +32,18 @@ def _create_pipeline_table(dynamodb):
         TableName=os.environ["PIPELINE_TABLE"],
         BillingMode="PAY_PER_REQUEST",
         AttributeDefinitions=[
-            {"AttributeName": "platform_data", "AttributeType": "S"},
-            {"AttributeName": "pipeline_status", "AttributeType": "S"},
+            {"AttributeName": "book_id", "AttributeType": "S"},
+            {"AttributeName": "status", "AttributeType": "S"},
         ],
         KeySchema=[
-            {"AttributeName": "platform_data", "KeyType": "HASH"},
+            {"AttributeName": "book_id", "KeyType": "HASH"},
         ],
         GlobalSecondaryIndexes=[
             {
-                "IndexName": "pipeline_status-index",
+                "IndexName": "status-index",
                 "KeySchema": [
-                    {"AttributeName": "pipeline_status", "KeyType": "HASH"},
-                    {"AttributeName": "platform_data", "KeyType": "RANGE"},
+                    {"AttributeName": "status", "KeyType": "HASH"},
+                    {"AttributeName": "book_id", "KeyType": "RANGE"},
                 ],
                 "Projection": {"ProjectionType": "KEYS_ONLY"},
             }

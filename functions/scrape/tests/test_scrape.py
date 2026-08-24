@@ -5,7 +5,8 @@ import json
 import pytest
 
 from conftest import INDEX
-from shared.tables.pipeline_entries import EntryStatus, html_key, metadata_key
+from shared.commons import BookIndex
+from shared.tables.pipeline_entries import EntryStatus, PipelineEntry, html_key, metadata_key
 
 
 ENGLISH_METADATA = {"language": ["English"], "author": ["Smith, Adam"]}
@@ -16,33 +17,38 @@ def _body(bucket, key):
     return bucket.Object(key).get()["Body"].read().decode("utf-8")
 
 
+def _status(entries, index=INDEX):
+    """What `scrape.get_status` used to answer: the status the row now carries."""
+    return entries.get_entry(index).status
+
+
 # ── metadata stage ────────────────────────────────────────────────────
 
 
-def test_metadata_uploads_json_and_advances_the_status(seed, bucket, mocker):
+def test_metadata_uploads_json_and_advances_the_status(seed, entries, bucket, mocker):
     import scrape
 
-    seed(EntryStatus.CREATED)
+    seed(EntryStatus.LISTED)
     mocker.patch.object(scrape, "get_metadata", return_value=ENGLISH_METADATA)
 
     status = scrape.scrape_book_metadata(INDEX)
 
     assert status == EntryStatus.SCRAPED_METADATA
     assert json.loads(_body(bucket, metadata_key(INDEX))) == ENGLISH_METADATA
-    assert scrape.get_status(INDEX) == EntryStatus.SCRAPED_METADATA
+    assert _status(entries) == EntryStatus.SCRAPED_METADATA
 
 
-def test_metadata_marks_a_non_english_book_skipped(seed, bucket, mocker):
+def test_metadata_marks_a_non_english_book_skipped(seed, entries, bucket, mocker):
     """The returned status is what the state machine's Choice branches on."""
     import scrape
 
-    seed(EntryStatus.CREATED)
+    seed(EntryStatus.LISTED)
     mocker.patch.object(scrape, "get_metadata", return_value=FRENCH_METADATA)
 
     status = scrape.scrape_book_metadata(INDEX)
 
     assert status == EntryStatus.SCRAPED_SKIPPED_NON_ENGLISH
-    assert scrape.get_status(INDEX) == EntryStatus.SCRAPED_SKIPPED_NON_ENGLISH
+    assert _status(entries) == EntryStatus.SCRAPED_SKIPPED_NON_ENGLISH
     # The metadata still lands: knowing why a book was skipped is worth the object.
     assert json.loads(_body(bucket, metadata_key(INDEX))) == FRENCH_METADATA
 
@@ -62,7 +68,7 @@ def test_metadata_is_idempotent_and_reports_the_current_status(seed, mocker):
 # ── content stage ─────────────────────────────────────────────────────
 
 
-def test_content_uploads_raw_html_and_advances_the_status(seed, bucket, mocker):
+def test_content_uploads_raw_html_and_advances_the_status(seed, entries, bucket, mocker):
     import scrape
 
     seed(EntryStatus.SCRAPED_METADATA)
@@ -72,18 +78,18 @@ def test_content_uploads_raw_html_and_advances_the_status(seed, bucket, mocker):
 
     assert status == EntryStatus.SCRAPED_HTML
     assert _body(bucket, html_key(INDEX)) == "<html>raw</html>"
-    assert scrape.get_status(INDEX) == EntryStatus.SCRAPED_HTML
+    assert _status(entries) == EntryStatus.SCRAPED_HTML
 
 
 def test_content_will_not_run_before_metadata(seed, mocker):
     import scrape
 
-    seed(EntryStatus.CREATED)
+    seed(EntryStatus.LISTED)
     get_html = mocker.patch.object(scrape, "get_html")
 
     status = scrape.scrape_book_content(INDEX)
 
-    assert status == EntryStatus.CREATED
+    assert status == EntryStatus.LISTED
     get_html.assert_not_called()
 
 
@@ -100,21 +106,29 @@ def test_content_will_not_run_for_a_skipped_book(seed, mocker):
 # ── seeding is a prerequisite ─────────────────────────────────────────
 
 
-def test_an_unseeded_book_names_itself_and_the_remedy(aws):
+def test_an_unseeded_book_names_itself_and_the_remedy(aws, mocker):
     import scrape
+
+    get_metadata = mocker.patch.object(scrape, "get_metadata")
 
     with pytest.raises(LookupError, match="gutenberg-404"):
-        scrape.get_status("gutenberg-404")
+        scrape.scrape_book_metadata(BookIndex(404))
+
+    get_metadata.assert_not_called()
 
 
-def test_a_row_with_no_status_is_a_distinct_error(entries):
+def test_a_row_with_no_status_reads_as_none_and_stops_the_stage(entries, mocker):
+    """`scrape.get_status` and its "no status" error are gone. A row the SUBJECT stage
+    never gave a status now parses with `status=None`, which is not LISTED, so the
+    metadata stage skips it instead of scraping a book it knows nothing about."""
     import scrape
-    from shared.tables.pipeline_entries import PipelineEntry
 
-    entries.put_entry(PipelineEntry(platform_data=INDEX))
+    entries.put_entry(PipelineEntry(book_id=INDEX, subject_ids={BookIndex(42)}))
+    get_metadata = mocker.patch.object(scrape, "get_metadata")
 
-    with pytest.raises(LookupError, match="no status"):
-        scrape.get_status(INDEX)
+    assert entries.get_entry(INDEX).status is None
+    assert scrape.scrape_book_metadata(INDEX) is None
+    get_metadata.assert_not_called()
 
 
 # ── subject listing ───────────────────────────────────────────────────
@@ -128,7 +142,7 @@ def test_subject_list_seeds_every_book_once(entries, mocker):
     first = scrape.scrape_subject_book_list("subject-42")
     again = scrape.scrape_subject_book_list("subject-42")  # put_entry is a conditional create
 
-    assert entries.get_indexes(EntryStatus.CREATED) == ["gutenberg-3300", "gutenberg-846"]
+    assert entries.get_indexes(EntryStatus.LISTED) == ["gutenberg-3300", "gutenberg-846"]
     assert first["created"] == 2
     assert again["created"] == 0
 

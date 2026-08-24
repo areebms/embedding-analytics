@@ -80,13 +80,14 @@ def _subject_page(book_ids):
     return FakeResponse(f"<html><body>{links}</body></html>")
 
 
-def test_get_book_ids_stops_after_a_short_page(mocker):
-    """Fewer results than a full page means there is no next page to ask for."""
+def test_get_book_ids_stops_when_a_page_adds_nothing_new(mocker):
+    """The walk ends on a page that yields no id it has not already seen -- not on a
+    short page. The same three books come back twice, so the second page ends it."""
     get = mocker.patch.object(retrieve, "get", return_value=_subject_page([1, 2, 3]))
     mocker.patch.object(retrieve, "sleep")
 
     assert retrieve.get_book_ids(42) == ["1", "2", "3"]
-    assert get.call_count == 1
+    assert get.call_count == 2
 
 
 def test_get_book_ids_asks_for_another_page_while_pages_come_back_full(mocker):
@@ -118,18 +119,23 @@ def test_get_book_ids_asks_for_another_page_while_pages_come_back_full(mocker):
     assert all(q["sort_order"] == ["downloads"] for q in queries)
 
 
-def test_get_book_ids_stops_on_a_partial_page(mocker):
-    """A page that is not exactly full is the last one, even if it added results."""
+def test_get_book_ids_keeps_walking_past_a_partial_page(mocker):
+    """A page that is not full still adds its books and still asks for the next one;
+    only a page with nothing new on it -- the third here -- ends the walk."""
     first = list(range(1, retrieve.MAX_BOOK_IDS_PER_PAGE + 1))
     get = mocker.patch.object(
         retrieve,
         "get",
-        side_effect=[_subject_page(first), _subject_page([100, 101])],
+        side_effect=[
+            _subject_page(first),
+            _subject_page([100, 101]),
+            _subject_page([100, 101]),
+        ],
     )
     mocker.patch.object(retrieve, "sleep")
 
     assert len(retrieve.get_book_ids(42)) == retrieve.MAX_BOOK_IDS_PER_PAGE + 2
-    assert get.call_count == 2
+    assert get.call_count == 3
 
 
 def test_get_book_ids_stops_at_the_subject_cap(mocker):

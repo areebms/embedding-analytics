@@ -1,35 +1,31 @@
 import logging
 
+from llm_classify_request.make_request import get_entries, submit
 from llm_parse_response.standardize import standardize_from_batch
 from shared.lambda_event import extract_field
-from submit import submit
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-STAGES = ("collect", "submit")
-
 
 def handler(event, context):
-    """Run one standardize stage. Both are corpus-wide, invoked by hand."""
+
     logger.info("Standardize request received", extra={"event": event})
 
-    stage = (event or {}).get("stage")
-    if stage not in STAGES:
-        logger.warning(
-            "Standardize request has no runnable stage", extra={"stage": stage}
-        )
-        raise ValueError(f"stage must be one of {list(STAGES)}")
+    batch_id = extract_field(event, "batch_id")
+    book_ids = extract_field(event, "book_ids")
 
-    if stage == "submit":
-        status = submit()
+    # The field carries the work, so it also picks the stage: a book list submits, a batch
+    # id collects. Truthiness rather than `is None` so that an empty `book_ids` -- a
+    # caller with no work to hand over -- is refused here rather than falling through to
+    # collect a batch that was never opened.
+    if bool(batch_id) == bool(book_ids):
+        raise ValueError("Exactly one of 'batch_id' or 'book_ids' must be provided.")
+
+    if book_ids:
+        status = submit(get_entries(book_ids))
     else:
-        batch_id = extract_field(event, "batch_id")
-        if not batch_id:
-            logger.warning("Standardize collect request missing batch_id")
-            raise ValueError("batch_id is required")
-
         status = standardize_from_batch(batch_id)
 
-    logger.info("Standardize completed", extra={"stage": stage, **status})
+    logger.info("Standardize completed", extra=status)
     return status

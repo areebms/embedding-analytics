@@ -1,298 +1,164 @@
-"""Tests for the collect stage: reading a batch's replies back onto the books.
+"""Reading a batch's replies back onto the books.
 
-standardize_tag_text_pairs is where a mistake would be silent rather than loud — a
-misaligned position would relabel real headings with the wrong levels and still write
-a plausible-looking book, so every way the reply can fail to line up raises here.
+standardize_tag_text_pairs is where a mistake would be silent rather than loud: a reply
+misaligned by one position relabels real headings with the wrong levels and still writes
+a plausible-looking book. Every way a reply can fail to line up raises instead.
 """
+
+import logging
 
 import pytest
 
-from conftest import BATCH_ID, BOOK_PAIRS, INDEX, INDEX_2, s3_body, succeeded_response
-from shared.tables.pipeline_entries import EntryStatus, standardized_html_key, text_key
-
-from book_records.batch_index import save_batch_index
-from book_records.schemas import BookTagTextPairs
-from llm_classify_request.constants import SYSTEM_PROMPT
+from shared.tables.pipeline_entries import EntryStatus
 from llm_parse_response.standardize import (
-    SEMANTIC_BLOCK_TO_LEVEL,
     get_llm_content_text,
     standardize_from_batch,
     standardize_tag_text_pairs,
 )
 
-
-# The reply for BOOK_PAIRS: title, then the two-part chapter heading.
-BOOK_REPLY = "0|title\n1|chapter\n2|subsection"
-
-BOOK_STANDARDIZED = [
-    ("h1", "The Wealth of Nations"),
-    ("p", "An inquiry into the nature and causes."),
-    ("h2", "BOOK I."),
-    ("h3", "OF THE CAUSES OF IMPROVEMENT."),
-    ("p", "The greatest improvement in the productive powers of labour."),
-]
+from conftest import (
+    BATCH_ID,
+    BOOK_PAIRS,
+    BOOK_REPLY,
+    INDEX,
+    INDEX_2,
+    status_of,
+    succeeded_response,
+)
 
 
-def book(index=INDEX, tag_text_pairs=None):
-    return BookTagTextPairs(
-        llm_index=str(index),
-        index=index,
-        tag_text_pairs=BOOK_PAIRS if tag_text_pairs is None else tag_text_pairs,
-    )
+# ── The reply, applied to a book ──────────────────────────────────────
 
 
-# ── the prompt and the level map are one contract ─────────────────────
+def test_headings_take_the_level_of_the_semantic_block_they_were_given():
+    assert standardize_tag_text_pairs(BOOK_REPLY, BOOK_PAIRS) == [
+        ("h1", "The Wealth of Nations"),
+        ("p", "An inquiry into the nature and causes."),
+        ("h2", "BOOK I."),
+        ("h3", "OF THE CAUSES OF IMPROVEMENT."),
+        ("p", "The greatest improvement in the productive powers of labour."),
+    ]
 
 
-def prompt_semantic_blocks():
-    for line in SYSTEM_PROMPT.splitlines():
-        if line.startswith("Valid semantic blocks:"):
-            _, _, listed = line.partition(":")
-            return {block.strip() for block in listed.split(",")}
-    raise AssertionError("SYSTEM_PROMPT no longer declares its valid semantic blocks")
+def test_the_source_heading_level_is_not_consulted():
+    """Levels in the scraped html were assigned by OCR font size, not document logic."""
+    pairs = [("h4", "The Wealth of Nations"), ("p", "Prose.")]
+
+    assert standardize_tag_text_pairs("0|title", pairs) == [
+        ("h1", "The Wealth of Nations"),
+        ("p", "Prose."),
+    ]
 
 
-def test_every_block_the_prompt_allows_has_a_heading_level():
-    """A block added to the prompt but not to the map is rejected at collect time,
-    after the whole corpus has already been classified and paid for."""
-    assert prompt_semantic_blocks() <= set(SEMANTIC_BLOCK_TO_LEVEL)
+def test_a_blank_line_inside_the_reply_is_ignored():
+    pairs = [("h1", "Title"), ("h2", "A chapter")]
+
+    assert standardize_tag_text_pairs("0|title\n\n1|chapter\n", pairs) == [
+        ("h1", "Title"),
+        ("h2", "A chapter"),
+    ]
 
 
-def test_every_block_the_map_knows_is_one_the_prompt_asks_for():
-    """The other direction: a level with no prompt line is a block the model will
-    never return, and reads as supported when it is not."""
-    assert set(SEMANTIC_BLOCK_TO_LEVEL) <= prompt_semantic_blocks()
+def test_a_line_with_no_separator_raises():
+    with pytest.raises(ValueError, match="no separator"):
+        standardize_tag_text_pairs("0 title", [("h1", "Title")])
 
 
-def test_every_level_is_one_of_the_three_the_artifact_uses():
-    assert set(SEMANTIC_BLOCK_TO_LEVEL.values()) <= {"h1", "h2", "h3"}
+def test_an_unknown_semantic_block_raises():
+    with pytest.raises(ValueError, match="unknown semantic block 'preamble'"):
+        standardize_tag_text_pairs("0|preamble", [("h1", "Title")])
 
 
-# ── get_llm_content_text ──────────────────────────────────────────────
+def test_a_heading_the_reply_skipped_raises():
+    """Better to lose the book from this batch than to write it mislabelled."""
+    with pytest.raises(ValueError, match="position 1"):
+        standardize_tag_text_pairs(
+            "0|title", [("h1", "Title"), ("h2", "A chapter")]
+        )
 
 
-def test_the_text_blocks_are_joined_in_order():
+# ── The reply, read out of the response ───────────────────────────────
+
+
+def test_content_text_joins_the_text_blocks():
     content = [{"type": "text", "text": "0|title"}, {"type": "text", "text": "1|chapter"}]
 
     assert get_llm_content_text(content) == "0|title\n1|chapter"
 
 
-def test_thinking_and_other_blocks_are_left_out_of_the_reply(caplog):
-    """Thinking is disabled in the request, so a thinking block arriving here means
-    the request changed — the reply is still readable, but it belongs in the log."""
+def test_content_text_skips_blocks_that_carry_no_reply(caplog):
     content = [
-        {"type": "thinking", "thinking": "weighing it up"},
+        {"type": "thinking", "thinking": "considering"},
+        {"type": "text", "text": ""},
         {"type": "text", "text": "0|title"},
     ]
 
-    with caplog.at_level("WARNING"):
+    with caplog.at_level(logging.WARNING):
         assert get_llm_content_text(content) == "0|title"
 
-    assert "thinking" in caplog.text
+    assert "skipping thinking block" in caplog.text
 
 
-def test_an_empty_text_block_is_skipped():
-    assert get_llm_content_text([{"type": "text", "text": ""}]) == ""
+# ── Settling a batch ──────────────────────────────────────────────────
 
 
-def test_no_content_at_all_reads_as_an_empty_reply():
-    assert get_llm_content_text([]) == ""
+def test_a_batch_still_running_is_left_alone(submitted_batch, collect_client, entries):
+    submitted_batch()
+    client = collect_client(processing_status="in_progress")
 
+    status = standardize_from_batch(BATCH_ID)
 
-# ── standardize_tag_text_pairs ────────────────────────────────────────
-
-
-def test_each_heading_takes_the_level_its_semantic_block_maps_to():
-    assert standardize_tag_text_pairs(BOOK_REPLY, BOOK_PAIRS) == BOOK_STANDARDIZED
-
-
-def test_paragraphs_pass_through_untouched():
-    pairs = [("p", "prose"), ("h1", "Title"), ("p", "more prose")]
-
-    assert standardize_tag_text_pairs("0|chapter", pairs) == [
-        ("p", "prose"),
-        ("h2", "Title"),
-        ("p", "more prose"),
-    ]
-
-
-@pytest.mark.parametrize(
-    "block, level",
-    sorted(SEMANTIC_BLOCK_TO_LEVEL.items()),
-)
-def test_every_semantic_block_the_model_may_return_is_mapped(block, level):
-    assert standardize_tag_text_pairs(f"0|{block}", [("h4", "x")]) == [(level, "x")]
-
-
-def test_the_block_name_is_read_case_and_whitespace_insensitively():
-    assert standardize_tag_text_pairs("  0 | Chapter  ", [("h4", "x")]) == [("h2", "x")]
-
-
-def test_blank_lines_in_the_reply_are_ignored():
-    assert standardize_tag_text_pairs("\n0|title\n\n1|chapter\n\n", BOOK_PAIRS[:3]) == [
-        ("h1", "The Wealth of Nations"),
-        ("p", "An inquiry into the nature and causes."),
-        ("h2", "BOOK I."),
-    ]
-
-
-def test_a_reply_naming_more_positions_than_there_are_headings_is_tolerated():
-    """An extra line costs nothing; a missing one is what would misalign the book."""
-    assert standardize_tag_text_pairs("0|title\n1|chapter\n2|section", [("h1", "x")]) == [
-        ("h1", "x")
-    ]
-
-
-def test_a_line_with_no_separator_is_refused():
-    with pytest.raises(ValueError, match="no separator in line: 0 title"):
-        standardize_tag_text_pairs("0 title", BOOK_PAIRS)
-
-
-def test_a_semantic_block_outside_the_agreed_set_is_refused():
-    """The model inventing a block is exactly the drift the prompt and the level map
-    sit side by side to prevent."""
-    with pytest.raises(ValueError, match="unknown semantic block 'preamble'"):
-        standardize_tag_text_pairs("0|preamble", BOOK_PAIRS)
-
-
-def test_a_position_that_is_not_a_number_is_refused():
-    with pytest.raises(ValueError):
-        standardize_tag_text_pairs("first|title", BOOK_PAIRS)
-
-
-def test_a_heading_the_model_never_classified_is_refused():
-    """Falling back to the original tag would put an OCR font-size guess into the
-    artifact and call it standardized."""
-    with pytest.raises(ValueError, match="no semantic block for heading position 1"):
-        standardize_tag_text_pairs("0|title", BOOK_PAIRS)
-
-
-def test_an_empty_reply_for_a_book_with_headings_is_refused():
-    with pytest.raises(ValueError, match="no semantic block for heading position 0"):
-        standardize_tag_text_pairs("", BOOK_PAIRS)
-
-
-def test_a_book_with_no_headings_needs_no_reply():
-    pairs = [("p", "prose"), ("p", "more prose")]
-
-    assert standardize_tag_text_pairs("", pairs) == pairs
-
-
-# ── standardize_from_batch ────────────────────────────────────────────
-
-
-def collect(mocker, client):
-    import llm_parse_response.standardize as standardize
-
-    mocker.patch.object(standardize, "get_client", return_value=client)
-    return standardize_from_batch(BATCH_ID)
-
-
-def test_a_batch_still_running_is_left_alone(mocker, batch_client, bucket, entries):
-    """This stage never waits on a batch, which is the whole reason it is a separate
-    invocation."""
-    client = batch_client("in_progress")
-
-    assert collect(mocker, client) == {
+    assert status == {
         "batch_id": BATCH_ID,
         "batch_status": "in_progress",
         "standardized": 0,
     }
+    assert status_of(entries, INDEX) == EntryStatus.STANDARDIZE_SUBMITTED
     client.messages.batches.results.assert_not_called()
 
 
-def test_a_finished_batch_writes_both_artifacts_and_advances_the_book(
-    mocker, batch_client, bucket, book_manifest, seed, statuses
+def test_results_are_keyed_by_custom_id_not_by_position(
+    submitted_batch, collect_client, entries
 ):
-    seed(EntryStatus.STANDARDIZE_SUBMITTED, INDEX)
-    book_manifest(INDEX)
-    save_batch_index(BATCH_ID, [book(INDEX)])
-    client = batch_client("ended", [succeeded_response("gutenberg-3300", BOOK_REPLY)])
-
-    result = collect(mocker, client)
-
-    assert result == {"batch_id": BATCH_ID, "batch_status": "ended", "standardized": 1}
-    assert s3_body(bucket, text_key(INDEX)).startswith("The Wealth of Nations\n\n")
-    assert "<h3>OF THE CAUSES OF IMPROVEMENT.</h3>" in s3_body(
-        bucket, standardized_html_key(INDEX)
-    )
-    assert statuses(INDEX) == EntryStatus.STANDARDIZED
-
-
-def test_a_whole_batch_of_books_is_settled_one_at_a_time(
-    mocker, batch_client, bucket, book_manifest, seed, statuses
-):
-    """A corpus of flattened text does not fit in memory at once, so each book is
-    loaded, rendered and released before the next."""
-    for index in (INDEX, INDEX_2):
-        seed(EntryStatus.STANDARDIZE_SUBMITTED, index)
-        book_manifest(index)
-    save_batch_index(BATCH_ID, [book(INDEX), book(INDEX_2)])
-    client = batch_client(
-        "ended",
-        [
-            succeeded_response("gutenberg-3300", BOOK_REPLY),
-            succeeded_response("gutenberg-11", BOOK_REPLY),
-        ],
+    """The Batches API returns results in any order."""
+    submitted_batch(indexes=(INDEX, INDEX_2))
+    collect_client(
+        responses=[succeeded_response(str(INDEX_2)), succeeded_response(str(INDEX))]
     )
 
-    assert collect(mocker, client)["standardized"] == 2
-    assert statuses(INDEX) == EntryStatus.STANDARDIZED
-    assert statuses(INDEX_2) == EntryStatus.STANDARDIZED
+    status = standardize_from_batch(BATCH_ID)
+
+    assert status["standardized"] == 2
+    assert status_of(entries, INDEX) == EntryStatus.STANDARDIZED
+    assert status_of(entries, INDEX_2) == EntryStatus.STANDARDIZED
 
 
-def test_a_reply_for_a_book_not_in_the_manifest_is_passed_over(
-    mocker, batch_client, bucket, book_manifest, seed, statuses, caplog
+def test_a_result_for_a_book_this_batch_never_carried_is_passed_over(
+    submitted_batch, collect_client, entries, caplog
 ):
-    """The manifest is the only record of which llm_index means which book. A reply
-    it does not name has no book to be written to."""
-    seed(EntryStatus.STANDARDIZE_SUBMITTED, INDEX)
-    book_manifest(INDEX)
-    save_batch_index(BATCH_ID, [book(INDEX)])
-    client = batch_client(
-        "ended",
-        [
-            succeeded_response("gutenberg-99999", BOOK_REPLY),
-            succeeded_response("gutenberg-3300", BOOK_REPLY),
-        ],
-    )
+    submitted_batch()
+    collect_client(responses=[succeeded_response("gutenberg-9999")])
 
-    with caplog.at_level("WARNING"):
-        assert collect(mocker, client)["standardized"] == 1
+    with caplog.at_level(logging.WARNING):
+        status = standardize_from_batch(BATCH_ID)
 
-    assert "gutenberg-99999" in caplog.text
-    assert statuses(INDEX) == EntryStatus.STANDARDIZED
+    assert status["standardized"] == 0
+    assert "unknown llm_index gutenberg-9999" in caplog.text
+    assert status_of(entries, INDEX) == EntryStatus.STANDARDIZE_SUBMITTED
 
 
-def test_collecting_a_batch_the_manifest_does_not_describe_is_refused(
-    mocker, batch_client, bucket
+def test_a_book_the_batch_answered_for_nobody_stays_in_flight(
+    submitted_batch, collect_client, entries, caplog
 ):
-    save_batch_index("msgbatch_older", [book(INDEX)])
-    client = batch_client("ended", [succeeded_response("gutenberg-3300", BOOK_REPLY)])
+    """It keeps STANDARDIZE_SUBMITTED, so re-running the subject will not resubmit it
+    behind the operator's back -- the batch is settled by hand from the log line."""
+    submitted_batch(indexes=(INDEX, INDEX_2))
 
-    with pytest.raises(ValueError, match="manifest is for batch msgbatch_older"):
-        collect(mocker, client)
+    collect_client(responses=[succeeded_response(str(INDEX))])
+    with caplog.at_level(logging.WARNING):
+        status = standardize_from_batch(BATCH_ID)
 
-
-def test_a_book_whose_reply_does_not_line_up_stops_the_run(
-    mocker, batch_client, bucket, book_manifest, seed, statuses
-):
-    """Better a failed collect that can be rerun from the archived results than a
-    corpus half-written with mislabelled headings."""
-    seed(EntryStatus.STANDARDIZE_SUBMITTED, INDEX)
-    book_manifest(INDEX)
-    save_batch_index(BATCH_ID, [book(INDEX)])
-    client = batch_client("ended", [succeeded_response("gutenberg-3300", "0|title")])
-
-    with pytest.raises(ValueError, match="no semantic block for heading position 1"):
-        collect(mocker, client)
-
-    assert statuses(INDEX) == EntryStatus.STANDARDIZE_SUBMITTED
-
-
-def test_an_ended_batch_with_no_results_reports_nothing_standardized(
-    mocker, batch_client, bucket
-):
-    save_batch_index(BATCH_ID, [])
-
-    assert collect(mocker, batch_client("ended", []))["standardized"] == 0
+    assert status["standardized"] == 1
+    assert status_of(entries, INDEX_2) == EntryStatus.STANDARDIZE_SUBMITTED
+    assert "1 book(s) had no result" in caplog.text
+    assert str(INDEX_2) in caplog.text

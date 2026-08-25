@@ -12,11 +12,10 @@ from bs4 import (
     Tag,
 )
 
-from shared.s3 import get_s3_loader
-from shared.tables.pipeline_entries import html_key
-
 from book_records.constants import HEADING_ELEMENTS
 from book_records.schemas import TagTextPair
+from shared.s3 import get_s3_loader
+from shared.tables.pipeline_entries import PipelineEntry
 
 # The Project Gutenberg license wrapper: never part of the book itself.
 PG_BOILERPLATE_IDS = ("pg-header", "pg-footer")
@@ -129,12 +128,7 @@ def strip_non_book_elements(soup: Tag) -> Tag:
     return soup
 
 
-def prepare_book_body(html: str) -> Tag:
-    """Parse a book's HTML and return the element flatten_html_elements should walk."""
+def load_tag_text_pairs(entry: PipelineEntry) -> list[TagTextPair]:
+    html = get_s3_loader().load_text(entry.s3_html_key)
     soup = strip_non_book_elements(BeautifulSoup(html, "html.parser"))
-    return soup.body or soup
-
-
-def load_tag_text_pairs(index: str) -> list[TagTextPair]:
-    html = get_s3_loader().load_text(html_key(index))
-    return list(flatten_html_elements(prepare_book_body(html)))
+    return list(flatten_html_elements(soup.body or soup))

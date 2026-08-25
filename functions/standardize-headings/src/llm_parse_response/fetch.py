@@ -21,6 +21,8 @@ from book_records.schemas import BookTagTextPairs
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+BATCH_ENDED = "ended"
+
 
 def get_batch_status(client: Anthropic, batch_id: str) -> str:
     batch = client.messages.batches.retrieve(batch_id)

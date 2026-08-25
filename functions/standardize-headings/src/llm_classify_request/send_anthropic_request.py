@@ -74,7 +74,8 @@ def convert_to_anthropic_request(
     )
 
 
-def send_message_batch(book_tag_text_pairs: list[BookTagTextPairs]) -> str:
+def send_message_batch(book_tag_text_pairs: list[BookTagTextPairs]) -> tuple[str, str]:
+    """Open one batch. Returns its id and the processing_status it opened at."""
     client = get_client()
     request_data = [
         convert_to_anthropic_request(book_tag_text_pair).model_dump()
@@ -83,4 +84,4 @@ def send_message_batch(book_tag_text_pairs: list[BookTagTextPairs]) -> str:
 
     batch = client.messages.batches.create(requests=request_data)
     logger.info("batch %s: %d request(s) submitted", batch.id, len(request_data))
-    return batch.id
+    return batch.id, batch.processing_status

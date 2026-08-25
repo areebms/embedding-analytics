@@ -6,24 +6,47 @@ import pytest
 from moto import mock_aws
 
 
-os.environ.setdefault("AWS_REGION", "us-east-1")
-os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
-os.environ.setdefault("AWS_ACCESS_KEY_ID", "testing")
-os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "testing")
-os.environ.setdefault("S3_BUCKET", "test-bucket")
-os.environ.setdefault("PIPELINE_TABLE", "pipeline-test")
+# Set, not setdefault: the deploy gate runs this suite inside the image with
+# `docker run --env-file .env` (infra/deploy_lambdas.sh), so the real deployment config
+# is on the environment. Inheriting it points the suite at the production bucket and
+# table, and at a region where create_bucket needs the CreateBucketConfiguration these
+# fixtures deliberately do not pass. These are moto tests; they must not vary with
+# whatever .env happens to hold.
+os.environ.update(
+    AWS_REGION="us-east-1",
+    AWS_DEFAULT_REGION="us-east-1",
+    AWS_ACCESS_KEY_ID="testing",
+    AWS_SECRET_ACCESS_KEY="testing",
+    AWS_SESSION_TOKEN="testing",
+    S3_BUCKET="test-bucket",
+    PIPELINE_TABLE="pipeline-test",
+    ANTHROPIC_API_KEY="test-key",
+)
+# shared.session builds Session(profile_name=AWS_PROFILE); a profile named in .env does
+# not exist inside the image.
+os.environ.pop("AWS_PROFILE", None)
+
+from anthropic.types import Message, TextBlock, Usage
+from anthropic.types.messages import (
+    MessageBatch,
+    MessageBatchErroredResult,
+    MessageBatchIndividualResponse,
+    MessageBatchRequestCounts,
+    MessageBatchSucceededResult,
+)
+from anthropic.types.shared import ErrorResponse, InvalidRequestError
 
 from shared.commons import BookIndex
 
 
 INDEX = BookIndex(3300)
 INDEX_2 = BookIndex(11)
+SUBJECT = BookIndex(12345)
 
 BATCH_ID = "msgbatch_test123"
 
-# A book shaped the way scrape leaves one: the Project Gutenberg licence wrapper
-# around the real text, three headings, and prose between them. Reduces to
-# h1/p/h2/h2/p once the wrapper is stripped.
+# A book shaped the way scrape leaves one: the Project Gutenberg licence wrapper around
+# the real text, three headings, and prose between them.
 BOOK_HTML = """<!DOCTYPE html>
 <html>
   <body>
@@ -38,8 +61,8 @@ BOOK_HTML = """<!DOCTYPE html>
 </html>
 """
 
-# What BOOK_HTML flattens to. Three headings, so a classification reply for this
-# book is three lines.
+# What BOOK_HTML flattens to. Three headings, so a classification reply for this book is
+# three lines.
 BOOK_PAIRS = [
     ("h1", "The Wealth of Nations"),
     ("p", "An inquiry into the nature and causes."),
@@ -47,6 +70,9 @@ BOOK_PAIRS = [
     ("h2", "OF THE CAUSES OF IMPROVEMENT."),
     ("p", "The greatest improvement in the productive powers of labour."),
 ]
+
+# The reply BOOK_PAIRS earns: one line per heading, in order.
+BOOK_REPLY = "0|title\n1|chapter\n2|subsection\n"
 
 # The same page with every heading removed: what a book of pure prose looks like.
 PROSE_ONLY_HTML = """<html><body>
@@ -64,40 +90,21 @@ def _create_pipeline_table(dynamodb):
         TableName=os.environ["PIPELINE_TABLE"],
         BillingMode="PAY_PER_REQUEST",
         AttributeDefinitions=[
-            {"AttributeName": "platform_data", "AttributeType": "S"},
-            {"AttributeName": "pipeline_status", "AttributeType": "S"},
+            {"AttributeName": "book_id", "AttributeType": "S"},
+            {"AttributeName": "status", "AttributeType": "S"},
         ],
-        KeySchema=[{"AttributeName": "platform_data", "KeyType": "HASH"}],
+        KeySchema=[{"AttributeName": "book_id", "KeyType": "HASH"}],
         GlobalSecondaryIndexes=[
             {
-                "IndexName": "pipeline_status-index",
+                "IndexName": "status-index",
                 "KeySchema": [
-                    {"AttributeName": "pipeline_status", "KeyType": "HASH"},
-                    {"AttributeName": "platform_data", "KeyType": "RANGE"},
+                    {"AttributeName": "status", "KeyType": "HASH"},
+                    {"AttributeName": "book_id", "KeyType": "RANGE"},
                 ],
                 "Projection": {"ProjectionType": "KEYS_ONLY"},
             }
         ],
     )
-
-
-def _create_bucket(session):
-    """us-east-1 is the one region CreateBucket must not be told about; every other
-    region requires the constraint.
-
-    Both arms are live: the setdefault above only applies when the variable is
-    unset, and the deploy gate runs this suite as `docker run --env-file .env`,
-    where .env sets AWS_REGION=us-west-2. Creating the bucket unconditionally
-    raises IllegalLocationConstraintException there, so the suite would pass
-    locally and error in the gate it exists to clear.
-    """
-    region = os.environ["AWS_REGION"]
-    constraint = (
-        {}
-        if region == "us-east-1"
-        else {"CreateBucketConfiguration": {"LocationConstraint": region}}
-    )
-    session.resource("s3").create_bucket(Bucket=os.environ["S3_BUCKET"], **constraint)
 
 
 @pytest.fixture
@@ -116,7 +123,9 @@ def aws():
     with mock_aws():
         session = boto3.Session(region_name=os.environ["AWS_REGION"])
         _create_pipeline_table(session.resource("dynamodb"))
-        _create_bucket(session)
+        # No CreateBucketConfiguration: us-east-1 is the one region CreateBucket must
+        # not be told about, and the environment above pins the suite there.
+        session.resource("s3").create_bucket(Bucket=os.environ["S3_BUCKET"])
 
         yield session
 
@@ -138,27 +147,18 @@ def seed(entries):
     """Put one pipeline row at a given status, the way the scrape stages would."""
     from shared.tables.pipeline_entries import PipelineEntry
 
-    def _seed(status, index=INDEX):
-        entries.put_entry(PipelineEntry(platform_data=index, pipeline_status=status))
+    def _seed(status, index=INDEX, subject_ids={SUBJECT}):
+        entries.put_entry(
+            PipelineEntry(book_id=index, subject_ids=subject_ids, status=status)
+        )
         return index
 
     return _seed
 
 
 @pytest.fixture
-def statuses(entries):
-    """Read a book's current pipeline_status back out of the table."""
-
-    def _status(index=INDEX):
-        entry = entries.get_entry(index, ["platform_data", "pipeline_status"])
-        return None if entry is None else entry.pipeline_status
-
-    return _status
-
-
-@pytest.fixture
 def scraped_book(seed, bucket):
-    """A book at SCRAPED_HTML with its raw html in the bucket: what submit sweeps."""
+    """A book at SCRAPED_HTML with its raw html in the bucket: what SEND is handed."""
     from shared.tables.pipeline_entries import EntryStatus, html_key
 
     def _scraped_book(index=INDEX, html=BOOK_HTML):
@@ -169,27 +169,6 @@ def scraped_book(seed, bucket):
     return _scraped_book
 
 
-@pytest.fixture
-def book_manifest(bucket):
-    """The per-book manifest submit leaves behind for collect to render from."""
-    from book_records.schemas import BookTagTextPairs
-    from book_records.utils import sanitize_llm_index
-
-    def _book_manifest(index=INDEX, tag_text_pairs=None):
-        book_tag_text_pairs = BookTagTextPairs(
-            llm_index=sanitize_llm_index(index),
-            index=index,
-            tag_text_pairs=BOOK_PAIRS if tag_text_pairs is None else tag_text_pairs,
-        )
-        bucket.put_object(
-            Key=f"standardize-headings/books/{index}.json",
-            Body=book_tag_text_pairs.model_dump_json().encode("utf-8"),
-        )
-        return book_tag_text_pairs
-
-    return _book_manifest
-
-
 def s3_body(bucket, key):
     return bucket.Object(key).get()["Body"].read().decode("utf-8")
 
@@ -198,31 +177,20 @@ def s3_content_type(bucket, key):
     return bucket.Object(key).get()["ContentType"]
 
 
+def status_of(entries, index=INDEX):
+    return entries.get_entry(index).status
+
+
 # ── Anthropic ─────────────────────────────────────────────────────────
 
 
-@pytest.fixture
-def anthropic_client():
-    """The Anthropic SDK, mocked the way publish mocks Pinecone: moto covers S3 and
-    DynamoDB, but nothing fakes the Batches API, so the client is a MagicMock."""
-    client = MagicMock()
-    client.messages.batches.create.return_value = MagicMock(id=BATCH_ID)
-    return client
-
-
-def succeeded_response(custom_id, text, stop_reason="end_turn"):
+def succeeded_response(custom_id, text=BOOK_REPLY, stop_reason="end_turn"):
     """One finished batch result, built from the real SDK types.
 
-    Not a MagicMock: yield_anthropic_content calls response.to_json() before it
-    looks at the result, and serialize_content_block branches on isinstance. A
-    mock would satisfy both without proving either works against the SDK.
+    Not a MagicMock: yield_anthropic_content calls response.to_json() before it looks at
+    the result, and serialize_content_block branches on isinstance. A mock would satisfy
+    both without proving either works against the SDK.
     """
-    from anthropic.types import Message, TextBlock, Usage
-    from anthropic.types.messages import (
-        MessageBatchIndividualResponse,
-        MessageBatchSucceededResult,
-    )
-
     return MessageBatchIndividualResponse(
         custom_id=custom_id,
         result=MessageBatchSucceededResult(
@@ -242,12 +210,6 @@ def succeeded_response(custom_id, text, stop_reason="end_turn"):
 
 
 def errored_response(custom_id, message="request too large"):
-    from anthropic.types.messages import (
-        MessageBatchErroredResult,
-        MessageBatchIndividualResponse,
-    )
-    from anthropic.types.shared import ErrorResponse, InvalidRequestError
-
     return MessageBatchIndividualResponse(
         custom_id=custom_id,
         result=MessageBatchErroredResult(
@@ -263,11 +225,44 @@ def errored_response(custom_id, message="request too large"):
 
 
 @pytest.fixture
-def batch_client():
-    """An Anthropic client whose batch retrieve/results answer with real SDK objects."""
-    from anthropic.types.messages import MessageBatch, MessageBatchRequestCounts
+def send_client(monkeypatch):
+    """The client SEND opens its batch with.
 
-    def _batch_client(processing_status="ended", responses=()):
+    moto covers S3 and DynamoDB, but nothing fakes the Batches API, so the client itself
+    is a MagicMock -- patched over get_client, which would otherwise build a real one.
+    """
+    client = MagicMock()
+    client.messages.batches.create.return_value = MagicMock(
+        id=BATCH_ID, processing_status="in_progress"
+    )
+    monkeypatch.setattr(
+        "llm_classify_request.send_anthropic_request.get_client", lambda: client
+    )
+    return client
+
+
+@pytest.fixture
+def submitted_batch(scraped_book, send_client):
+    """Books taken through SEND: manifests written, status STANDARDIZE_SUBMITTED.
+
+    Going through the real stage rather than planting a manifest, so what RETRIEVE reads
+    back is what SEND actually wrote.
+    """
+    import app
+
+    def _submitted_batch(indexes=(INDEX,), html=BOOK_HTML):
+        for index in indexes:
+            scraped_book(index, html)
+        return app.handler({"book_ids": [str(index) for index in indexes]}, None)
+
+    return _submitted_batch
+
+
+@pytest.fixture
+def collect_client(monkeypatch):
+    """The client RETRIEVE settles a batch with, answering with real SDK objects."""
+
+    def _collect_client(processing_status="ended", responses=()):
         responses = list(responses)
         batch = MessageBatch(
             id=BATCH_ID,
@@ -290,6 +285,9 @@ def batch_client():
         client = MagicMock()
         client.messages.batches.retrieve.return_value = batch
         client.messages.batches.results.return_value = iter(responses)
+        monkeypatch.setattr(
+            "llm_parse_response.standardize.get_client", lambda: client
+        )
         return client
 
-    return _batch_client
+    return _collect_client

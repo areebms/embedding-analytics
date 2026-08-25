@@ -9,7 +9,6 @@ from shared.session import get_session
 S3_BUCKET = os.getenv("S3_BUCKET")
 
 
-
 def upload_file(session, s3_key, path):
     session.client("s3").upload_file(
         path,
@@ -18,13 +17,21 @@ def upload_file(session, s3_key, path):
         ExtraArgs={"ContentType": "application/octet-stream"},
     )
 
+
 _s3_loader = None
+
 
 def get_s3_loader():
     global _s3_loader
     if _s3_loader is None:
         _s3_loader = S3Loader(get_session())
     return _s3_loader
+
+
+def upload_json(s3_key, file_bytes):
+    return get_s3_loader().upload_object(
+        s3_key, file_bytes, "application/json; charset=utf-8"
+    )
 
 
 class S3Loader:

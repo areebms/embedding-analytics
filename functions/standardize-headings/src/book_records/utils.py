@@ -1,12 +1,7 @@
 import logging
 
 from shared.s3 import get_s3_loader
-from shared.tables.pipeline_entries import (
-    EntryStatus,
-    PipelineEntry,
-    get_pipeline_entries,
-)
-
+from shared.tables.pipeline_entries import EntryStatus, get_pipeline_entries
 from book_records.constants import (
     HEADING_ELEMENTS,
     JSON_CONTENT_TYPE,
@@ -24,59 +19,36 @@ def sanitize_llm_index(book_label: str) -> str:
     return LLM_INDEX_ILLEGAL.sub("_", book_label)[:64]
 
 
-def save_book_tag_text_pairs(book_tag_text_pairs: BookTagTextPairs) -> None:
-    get_s3_loader().upload_object(
-        f"{S3_STANDARDIZE_PREFIX}/books/{book_tag_text_pairs.index}.json",
-        book_tag_text_pairs.model_dump_json(),
-        content_type=JSON_CONTENT_TYPE,
-    )
-
-
-def get_pending_book_tag_text_pairs() -> list[BookTagTextPairs]:
-    pipeline_entries = get_pipeline_entries()
-
-    submitted_indexes = pipeline_entries.get_indexes(EntryStatus.STANDARDIZE_SUBMITTED)
-    if submitted_indexes:
-        logger.info(
-            "submit: %d book(s) still in flight; nothing submitted",
-            len(submitted_indexes),
+def save_book_tag_text_pairs(books_tag_text_pairs: list[BookTagTextPairs]) -> None:
+    for book_tag_text_pairs in books_tag_text_pairs:
+        get_s3_loader().upload_object(
+            f"{S3_STANDARDIZE_PREFIX}/books/{book_tag_text_pairs.index}.json",
+            book_tag_text_pairs.model_dump_json(),
+            content_type=JSON_CONTENT_TYPE,
         )
-        return []
 
-    scraped_indexes = pipeline_entries.get_indexes(EntryStatus.SCRAPED_HTML)
-    logger.info(
-        "submit: %d book(s) at %s", len(scraped_indexes), EntryStatus.SCRAPED_HTML
-    )
-    if not scraped_indexes:
-        return []
+
+def get_book_tag_text_pairs(entries) -> list[BookTagTextPairs]:
 
     book_tag_text_pairs = []
 
-    for index in scraped_indexes:
-        try:
-            tag_text_pairs = load_tag_text_pairs(index)
-        except Exception as error:
-            logger.warning("%s could not load html: %s", index, error)
-            continue
+    for entry in entries:
+        tag_text_pairs = load_tag_text_pairs(entry)
 
         tags = {tag for tag, _ in tag_text_pairs}
         if tags.isdisjoint(HEADING_ELEMENTS):
-            pipeline_entries.update_entries(
-                PipelineEntry(
-                    platform_data=index,
-                    pipeline_status=EntryStatus.SCRAPED_SKIPPED_NO_HEADINGS,
-                )
+            get_pipeline_entries().set_status(
+                entry.book_id, EntryStatus.SCRAPED_SKIPPED_NO_HEADINGS
             )
-            logger.info("%s has no headings; skipping.", index)
+            logger.info("%s has no headings; skipping.", entry.book_id)
             continue
 
         book_tag_text_pairs.append(
             BookTagTextPairs(
-                llm_index=sanitize_llm_index(index),
-                index=index,
+                llm_index=sanitize_llm_index(entry.book_id),
+                index=entry.book_id,
                 tag_text_pairs=tag_text_pairs,
             )
         )
-        save_book_tag_text_pairs(book_tag_text_pairs[-1])
 
     return book_tag_text_pairs

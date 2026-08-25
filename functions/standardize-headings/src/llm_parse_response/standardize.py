@@ -2,15 +2,15 @@ import logging
 
 from shared.tables.pipeline_entries import (
     EntryStatus,
-    PipelineEntry,
     get_pipeline_entries,
 )
 
 from book_records.batch_index import load_batch_index
 from book_records.constants import HEADING_ELEMENTS
 from book_records.schemas import TagTextPair
-from llm_classify_request.send_request import get_client
+from llm_classify_request.send_anthropic_request import get_client
 from llm_parse_response.fetch import (
+    BATCH_ENDED,
     get_batch_status,
     load_book_tag_text_pairs,
     yield_anthropic_content,
@@ -83,13 +83,14 @@ def standardize_from_batch(batch_id):
     """Settle one submitted batch, if it has finished.
 
     Safe to call repeatedly: it returns immediately while the batch is still
-    running, and a book already written has left STANDARDIZE_SUBMITTED so a later
-    call passes over it.
+    running, and a re-run over a settled batch renders the same artifacts from the
+    same manifest rather than skipping the books it already wrote. The repeated
+    status write is the no-op -- the guard only lets a status move forward.
     """
     client = get_client()
 
     batch_status = get_batch_status(client, batch_id)
-    if batch_status != "ended":
+    if batch_status != BATCH_ENDED:
         return {"batch_id": batch_id, "batch_status": batch_status, "standardized": 0}
 
     llm_index_mapping = dict(load_batch_index(batch_id).llm_index_mapping)
@@ -110,13 +111,17 @@ def standardize_from_batch(batch_id):
         save_html(index, standardized_tag_text_pairs)
         save_text(index, standardized_tag_text_pairs)
 
-        get_pipeline_entries().update_entries(
-            PipelineEntry(
-                platform_data=index,
-                pipeline_status=EntryStatus.STANDARDIZED,
-            )
-        )
+        get_pipeline_entries().set_status(index, EntryStatus.STANDARDIZED)
         standardized += 1
+
+    if llm_index_mapping:
+        logger.warning(
+            "batch %s: %d book(s) had no result and remain at %s: %s",
+            batch_id,
+            len(llm_index_mapping),
+            EntryStatus.STANDARDIZE_SUBMITTED,
+            sorted(str(index) for index in llm_index_mapping.values()),
+        )
 
     logger.info("batch %s: %d standardized", batch_id, standardized)
     return {

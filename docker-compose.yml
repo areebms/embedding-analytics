@@ -1,102 +1,92 @@
 services:
   lambda-scrape:
-    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${AWS_ECR_REPO}/lambda-scrape:0.1
+    image: lambda-scrape:local
     env_file:
-    - .env
+      - .env
     build:
       context: .
       dockerfile: functions/scrape/Dockerfile
-      target: test
-      args:
-        AWS_URI_PREFIX: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+      target: lambda
     volumes:
       - ./functions/scrape/src:/var/task
       - ./shared:/var/task/shared
+    ports:
+      - "9010:8080"
     
   lambda-standardize-headings:
-    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${AWS_ECR_REPO}/lambda-standardize-headings:0.1
+    image: lambda-standardize-headings:local
     env_file:
     - .env
     build:
       context: .
       dockerfile: functions/standardize-headings/Dockerfile
-      target: local
-      args:
-        AWS_URI_PREFIX: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+      target: lambda
     volumes:
       - ./functions/standardize-headings/src:/var/task
       - ./shared:/var/task/shared
+    ports:
+      - "9030:8080"
 
   lambda-tokenize:
-    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${AWS_ECR_REPO}/lambda-tokenize:0.1
+    image: lambda-tokenize:local
     env_file:
     - .env
     build:
       context: .
       dockerfile: functions/tokenize/Dockerfile
       target: local
-      args:
-        AWS_URI_PREFIX: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
     volumes:
       - ./functions/tokenize/src/app.py:/var/task/app.py
       - ./functions/tokenize/src/main.py:/var/task/main.py
       - ./functions/tokenize/src/ignored_nouns.txt:/var/task/ignored_nouns.txt
 
   lambda-train-kvector:
-    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${AWS_ECR_REPO}/lambda-train-kvector:0.1
+    image: lambda-train-kvector:local
     env_file:
     - .env
     build:
       context: .
       target: local
       dockerfile: functions/train-kvector/Dockerfile
-      args:
-        AWS_URI_PREFIX: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
     volumes:
       - ./functions/train-kvector/src/app.py:/var/task/app.py
       - ./functions/train-kvector/src/main.py:/var/task/main.py
 
   lambda-align-kvectors:
-    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${AWS_ECR_REPO}/lambda-align-kvectors:0.1
+    image: lambda-align-kvectors:local
     env_file:
     - .env
     build:
       context: .
       dockerfile: functions/align-kvectors/Dockerfile
-      args:
-        AWS_URI_PREFIX: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
     volumes:
       - ./functions/align-kvectors/src/app.py:/var/task/app.py
       - ./functions/align-kvectors/src/create_book_centroid.py:/var/task/create_book_centroid.py
       - ./functions/align-kvectors/src/procrustes_utils.py:/var/task/procrustes_utils.py
 
   lambda-publish:
-    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${AWS_ECR_REPO}/lambda-publish:0.1
+    image: lambda-publish:local
     env_file:
     - .env
     build:
       context: .
       target: local
       dockerfile: functions/publish/Dockerfile
-      args:
-        AWS_URI_PREFIX: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
     volumes:
       - ./functions/publish/src/app.py:/var/task/app.py
       - ./functions/publish/src/publish_to_api.py:/var/task/publish_to_api.py
       - ./functions/publish/src/publish_utils.py:/var/task/publish_utils.py
 
   lambda-api:
-    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${AWS_ECR_REPO}/lambda-api:0.1
+    image: lambda-api:local
     env_file:
     - .env
     build:
       context: .
       dockerfile: functions/api/Dockerfile
       target: local
-      args:
-        AWS_URI_PREFIX: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
     volumes:
       - ./functions/api/src:/var/task
       - ./shared:/var/task/shared
     ports:
-    - "8000:8000"
+      - "8000:8000"

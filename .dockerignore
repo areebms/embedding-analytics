@@ -10,14 +10,18 @@
 **/.coverage
 **/htmlcov
 
-# Secrets. No Dockerfile COPYs .env today; this keeps a future one honest.
 .env
 .env.example
 
-# Not referenced by any COPY
+**/cdk.out
+
+.venv
+.vscode
 .devcontainer
 .claude
 docs
-*.md
+infra
+docker-compose.yml
+**/*.md
 LICENSE
 **/.DS_Store

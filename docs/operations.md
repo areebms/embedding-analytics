@@ -371,6 +371,7 @@ AWS_ECR_REPO=
 LAMBDA_ROLE_ARN=
 LAMBDA_PREFIX=
 STEP_FUNCTION_ROLE_ARN=
+PUT_EVENT_ROLE_ARN=    # assumed by EventBridge, starts the standardize machine
 S3_BUCKET=
 S3_TEST_DATA_PREFIX=    # e.g. test-data/ (integration tests)
 PIPELINE_TABLE=         # DynamoDB, pipeline state
@@ -381,35 +382,116 @@ REDIS_PREFIX=
 PRODUCTION_DOMAIN=      # Frontend URL, for CORS
 OPENAI_API_KEY=         # Required for /parse-describe
 PINECONE_API_KEY=       # Required by publish
+ANTHROPIC_API_KEY=      # Required by standardize-headings
 PINECONE_INDEX_NAME=
 ```
 
 ### Prerequisites
 
 Docker + Docker Compose, AWS CLI, [`yq`](https://github.com/mikefarah/yq) (parses
-`services.yaml`), [`envsubst`](https://www.gnu.org/software/gettext/) (renders the
-state machine template). Redis optional.
+`services.yaml` for `deploy_lambdas.sh`), and Python 3.13. Redis optional.
+
+The CDK app and the `cdk` CLI both install from one file:
+
+```bash
+python3.13 -m pip install -r infra/requirements.txt
+```
+
+`aws-cdk-cli` is the CDK CLI published on PyPI, with its own bundled Node runtime — there
+is no `package.json`, no `npx`, and no global install, so the CLI version is pinned in the
+same file as the library. Use `python3.13` specifically: bare `python3` is 3.8 here and
+dies on `StrEnum` in `shared/`.
+
+> **Secrets.** CDK reads `ANTHROPIC_API_KEY` from `.env` at synth time and writes it into
+> `infra/cdk.out/*.template.json`, which `cdk deploy` uploads to the CDK staging bucket.
+> Under `deploy_lambdas.sh` it never left the machine. Moving it to SSM and referencing it
+> with `ssm.StringParameter.value_for_string_parameter` would put only the parameter name
+> in the template; see the TODO in `infra/config.py`.
 
 > **Apple Silicon:** `deploy_lambdas.sh` forces `--platform linux/amd64` via
 > `docker buildx`. Make sure buildx is available.
 
 ### Deploying
 
-`deploy_lambdas.sh` takes service names, builds for `linux/amd64`, runs the
-service's suite inside a dedicated `test` stage of its Dockerfile against the
-production dependency set, pushes to ECR, then creates or updates the function —
-skipping the update if image and configuration are unchanged. A failing test
-aborts before any image is pushed.
+Two paths, split by service. `scrape` and `standardize-headings` are CDK; the other five
+are still `deploy_lambdas.sh`.
 
 ```bash
-./infra/deploy_lambdas.sh scrape tokenize train-kvector align-kvectors publish api
-./infra/deploy_step_function.sh
+./infra/deploy.sh                        # all three stacks, standardize before relay
+./infra/deploy.sh scrape                 # the scrape pipeline, alone
+./infra/deploy.sh standardize            # the standardize pipeline, alone
+./infra/deploy.sh relay                  # just the rule
+./infra/deploy_lambdas.sh tokenize train-kvector align-kvectors publish api
 ```
 
-Services can define a `smoke_cmd` in `services.yaml` that runs against the
-production image before it is pushed.
+`infra/deploy.sh` runs each service's suite inside the `test` stage of its Dockerfile,
+then hands off to `cdk deploy`, which builds the `lambda` stage as a content-hashed image
+asset, pushes it, and applies the stack. A failing test aborts before anything is built or
+pushed. Arguments go to `cdk deploy`; a leading `--` replaces the subcommand, so
+`./infra/deploy.sh -- diff` is a test-gated `cdk diff`.
 
----
+**The optional first argument is the point of the split.** With no target both suites run
+and all three stacks deploy; with one, only that pipeline's suite runs and only its stack
+is touched — a `standardize-headings` test that is red cannot hold up a `scrape` release,
+and a scrape deploy produces no changeset over the standardize machine. A targeted deploy
+passes `--exclusively`, so `deploy.sh relay` does not follow the stack dependency into
+`-standardize` and publish an image whose suite this invocation never ran.
+
+That isolation reaches the images too, which is less obvious. The Docker build context has
+to be the repo root — every Dockerfile copies `shared/` out of it — and everything left in
+the context lands in the asset hash, so by default a change anywhere in the repo
+republishes every Lambda image. `.dockerignore` drops `infra/`, `docker-compose.yml` and
+the local `.venv/` for that reason, and `PipelineStack` excludes the sibling `functions/`
+directories per image, along with that service's own `tests/`, `pytest.ini` and
+`requirements-test.txt`, and `shared/tests/` — none of which the `lambda` stage COPYs, and
+all of which would otherwise republish an identical image on a test-only edit. The
+per-service exclusions cannot move to `.dockerignore`, which is context-wide and shared by
+both images and by the `test` build. Excluding the tests from the asset does not weaken the
+gate: `deploy.sh` builds `--target test` in its own `docker buildx` invocation, reading the
+real tree.
+
+In the scrape and standardize Dockerfiles those copies live in the `lambda` stage, not in
+`base`: that stage is the single statement of what ships, and it names `shared/`'s runtime
+modules (`shared/*.py` and `shared/tables`) rather than taking the directory wholesale, so
+`shared/tests` stays out of the running image as well as out of the hash. Excluding it by
+deleting it further down would not work — layers only ever add, and a `RUN rm` leaves the
+bytes in the layer beneath. A new *subpackage* under `shared/` needs a line added to both
+Dockerfiles; a new top-level module is covered by the glob. An omission cannot reach
+production silently: `test` builds `FROM lambda`, so the suite runs against the exact image
+that ships and the gate fails first.
+
+What remains in a service's asset context is `shared/`'s runtime modules and its own `src/`
+and `Dockerfile`: editing a CDK stack rebuilds nothing, and editing one service rebuilds
+only that one. Touching `shared/` still rebuilds both, correctly — the seven services agree
+on `shared/tables/pipeline_entries.py` against one DynamoDB table, and pinning them apart
+would let two of them disagree about the schema.
+
+`deploy_lambdas.sh` takes service names, builds for `linux/amd64`, runs the
+service's suite inside a dedicated `test` stage of its Dockerfile against the
+production dependency set, creates the ECR repository if it does not exist yet,
+pushes to it, then creates or updates the function — skipping the update if
+image and configuration are unchanged. A failing test aborts before any image is
+pushed.
+
+The name it takes is the `services.yaml` key, and that key is the service's whole
+identity: the function deploys as `${LAMBDA_PREFIX}-<key>`, the Dockerfile is read from
+`functions/<key>/`, and the ECR image is `lambda-<key>`. Only the values that vary —
+`memory`, `timeout`, `env` — are written per service, and a name the file does not list
+is rejected rather than deployed on the defaults. `infra/config.py` derives the same
+three names from the same key, so the two paths cannot drift on naming either.
+
+A service may declare an `env` list in `services.yaml`, naming the variables it
+needs at runtime; the script reads each value from `.env` and passes the set as
+the function's environment, aborting if any is unset. `AWS_REGION` is never listed:
+Lambda injects it into every runtime and rejects it as a reserved key.
+
+The CDK app (`infra/config.py`) reads the same `env` lists from the same `services.yaml`,
+with the same abort on a missing value, so the two paths cannot drift on sizing or
+configuration. They differ in one place: **under `deploy_lambdas.sh`, a service with no
+`env` key is left alone**, because `--environment` replaces a function's whole variable
+map rather than merging into it, so deploying such a service must not clear variables set
+outside the script. CDK always declares the full map, so a converted service must list
+every variable it needs. Both in-scope services already did.
 
 ## Cross-stage decisions
 
@@ -450,8 +532,16 @@ pipeline needed it rather than copied from where the API needed it.
 
 ### Deploys are test-gated
 
-`deploy_lambdas.sh` builds a dedicated `test` stage of each service's Dockerfile
-and runs the suite inside it, against the production dependency set, before any
-image is built or pushed. A failing test aborts the deploy rather than shipping
-and alerting. Applies uniformly to every stage in [Deploying](#deploying), not
-just one.
+Both deploy paths build a dedicated `test` stage of each service's Dockerfile and run
+the suite inside it, against the production dependency set, before any image is built or
+pushed. A failing test aborts the deploy rather than shipping and alerting. Applies
+uniformly to every stage in [Deploying](#deploying), not just one.
+
+`deploy_lambdas.sh` does this inline. On the CDK side it is why `infra/deploy.sh` exists
+at all: `cdk deploy` builds only the Dockerfile's `lambda` stage and has no notion of a
+`test` stage, so a bare `cdk deploy` would silently drop the gate. Run `./infra/deploy.sh`,
+not `cdk deploy`.
+
+A targeted deploy runs only that pipeline's suite, so it also passes `--exclusively`: the
+gate cannot be bypassed by a stack dependency quietly pulling in a second image that this
+invocation never tested.

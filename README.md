@@ -80,7 +80,7 @@ graph TD
 | Cloud | AWS Lambda, Step Functions, S3, DynamoDB, ECR |
 | NLP/Data | spaCy, NLTK, WordNet, BeautifulSoup |
 | Testing | pytest, coverage gating, Docker test stages |
-| Infrastructure | Docker, Docker Compose, Bash |
+| Infrastructure | AWS CDK (Python), Docker, Docker Compose, Bash |
 
 Six independent containerized Lambda stages for scraping, tokenization, model training, vector alignment, publishing, and API serving. A Step Functions Map state trains N seeded models in parallel and converges into a single alignment stage. S3 holds intermediate artifacts; a publish stage writes results to DynamoDB. Fully serverless, no always-on infrastructure. Per-service pytest suites run inside a dedicated Docker test stage before any image is pushed, and the API suite enforces an 85% coverage floor.
 
@@ -107,10 +107,10 @@ docker compose build
 docker compose up lambda-api    # --> http://localhost:8000
 ```
 
-`.env` needs real values first. The image names in `docker-compose.yml` interpolate `AWS_ACCOUNT_ID`
-and `AWS_REGION`, and the API reads the DynamoDB tables that `publish` writes, so a clone with an
-empty `.env` will build and start but answer every query against an empty vocabulary. There is no
-bundled fixture corpus yet — running the system on your own texts means running the pipeline first.
+`.env` needs real values first. The API reads the DynamoDB tables that `publish` writes, so a clone
+with an empty `.env` will build and start but answer every query against an empty vocabulary. There
+is no bundled fixture corpus yet — running the system on your own texts means running the pipeline
+first.
 To see it working on the five-book corpus without any of that, use the
 [live demo](https://www.embedding-analytics.com).
 

@@ -1,0 +1,233 @@
+{
+    "Comment": "Seed a Gutenberg subject and scrape every book it lists — one execution takes a subject from a subject id to SCRAPED_HTML, then announces that its books are ready and ends. It does not standardize them, and does not wait for anything that does. Deployed as ${LAMBDA_PREFIX}-scrape-pipeline by the ${LAMBDA_PREFIX}-scrape stack (infra/stacks/pipeline_stack.py, instantiated in infra/app.py); the rule that turns the announcement into a standardize execution is a stack of its own, infra/stacks/relay_stack.py, so neither pipeline is deployed or rolled back by a change to the other. The placeholders below are filled in by CDK definition_substitutions.",
+    "StartAt": "list-subject-books",
+    "QueryLanguage": "JSONata",
+    "States": {
+        "list-subject-books": {
+            "Type": "Task",
+            "Comment": "Creates a pipeline entry per book.",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Arguments": {
+                "FunctionName": "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${LAMBDA_PREFIX}-scrape:$LATEST",
+                "Payload": {
+                    "subject": "{% $states.input.subject %}",
+                    "stage": "SUBJECT"
+                }
+            },
+            "Output": {
+                "subject": "{% $states.result.Payload.subject %}",
+                "found": "{% $states.result.Payload.found %}",
+                "created": "{% $states.result.Payload.created %}",
+                "indexes": "{% $states.result.Payload.indexes %}"
+            },
+            "Retry": [
+                {
+                    "ErrorEquals": [
+                        "Lambda.ServiceException",
+                        "Lambda.AWSLambdaException",
+                        "Lambda.SdkClientException",
+                        "Lambda.TooManyRequestsException"
+                    ],
+                    "IntervalSeconds": 1,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2,
+                    "JitterStrategy": "FULL"
+                }
+            ],
+            "Next": "scrape-books"
+        },
+        "scrape-books": {
+            "Type": "Map",
+            "Comment": "MaxConcurrency 1: gutenberg.org is a single volunteer-run host, so books go through one at a time, as the scrape.py CLI does. It is also what makes the pace states below a throttle rather than decoration — with parallel iterations they would overlap and the request rate would be whatever concurrency allowed.",
+            "Items": "{% $states.input.indexes %}",
+            "MaxConcurrency": 1,
+            "ItemSelector": {
+                "index": "{% $states.context.Map.Item.Value %}"
+            },
+            "Output": {
+                "subject": "{% $states.input.subject %}",
+                "books": "{% $count($states.result) %}",
+                "failed": "{% $count($states.result[$exists(error)]) %}",
+                "book_ids": "{% [$states.result[$contains(status, 'SCRAPED_HTML')].index] %}"
+            },
+            "ItemProcessor": {
+                "ProcessorConfig": {
+                    "Mode": "INLINE"
+                },
+                "StartAt": "throttle-metadata-scrape",
+                "States": {
+                    "throttle-metadata-scrape": {
+                        "Type": "Wait",
+                        "Comment": "Every gutenberg.org request is preceded by a pace, this one included, so the book boundary is throttled like any other request. Pacing before the fetch rather than after is what lets book-failed stay a Succeed: an iteration that ends early still cannot make the next book fetch immediately, because that book opens with its own pace.",
+                        "Seconds": 3,
+                        "Next": "scrape-metadata"
+                    },
+                    "scrape-metadata": {
+                        "Type": "Task",
+                        "Resource": "arn:aws:states:::lambda:invoke",
+                        "Arguments": {
+                            "FunctionName": "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${LAMBDA_PREFIX}-scrape:$LATEST",
+                            "Payload": {
+                                "index": "{% $states.input.index %}",
+                                "stage": "METADATA"
+                            }
+                        },
+                        "Output": {
+                            "index": "{% $states.result.Payload.book_id %}",
+                            "status": "{% $states.result.Payload.status %}"
+                        },
+                        "Retry": [
+                            {
+                                "ErrorEquals": [
+                                    "Lambda.ServiceException",
+                                    "Lambda.AWSLambdaException",
+                                    "Lambda.SdkClientException",
+                                    "Lambda.TooManyRequestsException"
+                                ],
+                                "IntervalSeconds": 1,
+                                "MaxAttempts": 3,
+                                "BackoffRate": 2,
+                                "JitterStrategy": "FULL"
+                            }
+                        ],
+                        "Catch": [
+                            {
+                                "ErrorEquals": [
+                                    "States.ALL"
+                                ],
+                                "Next": "book-failed",
+                                "Output": {
+                                    "index": "{% $states.input.index %}",
+                                    "error": "{% $states.errorOutput.Error %}"
+                                }
+                            }
+                        ],
+                        "Next": "throttle-content-scrape"
+                    },
+                    "throttle-content-scrape": {
+                        "Type": "Wait",
+                        "Seconds": 3,
+                        "Next": "scrape-content"
+                    },
+                    "scrape-content": {
+                        "Type": "Task",
+                        "Comment": "Runs unconditionally: scrape_book_content guards on its own precondition and returns the book's existing status untouched, so a book that cannot advance -- non-English, or already taken to SCRAPED_HTML by an earlier run -- costs one read and no fetch. That guard is the only gate; a Choice here would be a second copy of it written against a status literal, which is exactly how this machine broke before.",
+                        "Resource": "arn:aws:states:::lambda:invoke",
+                        "Arguments": {
+                            "FunctionName": "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${LAMBDA_PREFIX}-scrape:$LATEST",
+                            "Payload": {
+                                "index": "{% $states.input.index %}",
+                                "stage": "CONTENT"
+                            }
+                        },
+                        "Output": {
+                            "index": "{% $states.result.Payload.book_id %}",
+                            "status": "{% $states.result.Payload.status %}"
+                        },
+                        "Retry": [
+                            {
+                                "ErrorEquals": [
+                                    "Lambda.ServiceException",
+                                    "Lambda.AWSLambdaException",
+                                    "Lambda.SdkClientException",
+                                    "Lambda.TooManyRequestsException"
+                                ],
+                                "IntervalSeconds": 1,
+                                "MaxAttempts": 3,
+                                "BackoffRate": 2,
+                                "JitterStrategy": "FULL"
+                            }
+                        ],
+                        "Catch": [
+                            {
+                                "ErrorEquals": [
+                                    "States.ALL"
+                                ],
+                                "Next": "book-failed",
+                                "Output": {
+                                    "index": "{% $states.input.index %}",
+                                    "error": "{% $states.errorOutput.Error %}"
+                                }
+                            }
+                        ],
+                        "End": true
+                    },
+                    "book-failed": {
+                        "Type": "Succeed",
+                        "Comment": "One book failing must not discard the rest of the subject, which is what an uncaught error in an inline Map would do. The book keeps its status, so the next run retries it; the error rides out in the Map result and is counted in `failed`."
+                    }
+                }
+            },
+            "Next": "books-to-standardize?"
+        },
+        "books-to-standardize?": {
+            "Type": "Choice",
+            "Comment": "An empty book_ids is an ordinary outcome -- every book non-English, already standardized, or caught this run -- and not a refusal. Gating here is what keeps the announcement off that path, and that is what lets the rule downstream match on detail-type alone: the event exists only when there is work, so nothing ever has to reach into detail to decide whether to act on it. The standardize machine's SEND requires the field too, so an empty list would raise there -- two falsy fields are neither of the handler's two entry points -- and land that execution on standardize-submit-failed, turning a subject that simply had no work red.",
+            "Choices": [
+                {
+                    "Condition": "{% $count($states.input.book_ids) = 0 %}",
+                    "Next": "subject-done"
+                }
+            ],
+            "Default": "announce-books-scraped"
+        },
+        "announce-books-scraped": {
+            "Type": "Task",
+            "Comment": "Says that a subject's books reached SCRAPED_HTML, and ends. It does not say who should care: this machine no longer names ${LAMBDA_PREFIX}-standardize anywhere, and a rule on the default bus is what turns this event into that machine's execution. The call used to live here -- first as startExecution.sync:2, which made this execution the child's owner and could stop it mid-batch, then as plain startExecution, which fixed that but still hard-coded what happens next. An announcement leaves this machine about scraping and gives a second consumer somewhere to attach. book_ids rides in the event rather than being rediscovered downstream, which is what keeps SEND's work list required and non-empty and keeps BooksInFlightError meaningful -- EventBridge delivers at least once, so a duplicate event starts a second execution over books already at STANDARDIZE_SUBMITTED, and that refusal is what stops a second batch being paid for. A book an earlier run left at SCRAPED_HTML still comes back here: re-running the subject sends it through scrape-content, which reports the status unchanged, and the book_ids filter keeps it without refetching anything. What does strand a book is a caught error in this run -- book-failed carries no status, so the filter drops it until the next run. Falling off the subject listing used to be the other way: the listing is ranked by downloads, so a re-run rebuilt the work list from a live ranking and a book that had drifted past MAX_BOOKS_PER_SUBJECT vanished from it. A subject already at the cap is now served from the table instead of re-listed, so indexes is a superset of every earlier run's.",
+            "Resource": "arn:aws:states:::events:putEvents",
+            "Arguments": {
+                "Entries": [
+                    {
+                        "Source": "embedding-analytics.scrape",
+                        "DetailType": "Subject Books Scraped",
+                        "Detail": {
+                            "subject": "{% $states.input.subject %}",
+                            "book_ids": "{% $states.input.book_ids %}",
+                            "scrape_execution": "{% $states.context.Execution.Id %}"
+                        }
+                    }
+                ]
+            },
+            "Output": {
+                "subject": "{% $states.input.subject %}",
+                "books": "{% $states.input.books %}",
+                "failed": "{% $states.input.failed %}",
+                "failed_entries": "{% $states.result.FailedEntryCount %}"
+            },
+            "Catch": [
+                {
+                    "ErrorEquals": [
+                        "States.ALL"
+                    ],
+                    "Next": "announce-failed",
+                    "Output": {
+                        "error": "{% $states.errorOutput.Error %}",
+                        "cause": "{% $states.errorOutput.Cause %}"
+                    }
+                }
+            ],
+            "Next": "announce-delivered?"
+        },
+        "announce-delivered?": {
+            "Type": "Choice",
+            "Comment": "PutEvents reports a rejected entry in FailedEntryCount and succeeds the task anyway, so without this the one failure that matters -- the event never reaching the bus -- reads as a finished subject that then silently never standardizes. Checking for greater than zero rather than equal to one because Entries is a list and a later consumer may add to it.",
+            "Choices": [
+                {
+                    "Condition": "{% $states.input.failed_entries > 0 %}",
+                    "Next": "announce-failed"
+                }
+            ],
+            "Default": "subject-done"
+        },
+        "announce-failed": {
+            "Type": "Fail",
+            "Comment": "The event did not reach the bus -- PutEvents raised, or accepted the call and rejected the entry. Either way nothing downstream will ever hear that this subject has books waiting, and the scrape is already paid for, so this is not a subject to report as done. No Retry above: a blind re-emit of an event that may in fact have been delivered starts a second standardize execution, and while BooksInFlightError makes that safe rather than expensive, a Fail an operator can see beats noise nobody reads. The Error is a fixed name rather than the one that was caught, for the same reason standardize-submit-failed uses one: the putEvents integration raises States.* names, a Fail state may not carry a reserved name, and an alarm on this machine needs something stable to key on. What was caught rides in the Cause. The ternary is what lets one Fail serve both ways in: only the Catch above sets error and cause, so on the announce-delivered? path they are undefined and the count is the whole story. Reading them unguarded, as this state first did, handed the Fail an undefined Error on exactly the path the Choice exists to catch.",
+            "Error": "AnnounceFailed",
+            "Cause": "{% $exists($states.input.error) ? $states.input.error & ': ' & $states.input.cause : 'PutEvents accepted the call and rejected the entry; FailedEntryCount ' & $string($states.input.failed_entries) %}"
+        },
+        "subject-done": {
+            "Type": "Succeed",
+            "Comment": "The subject is scraped, and if any book reached SCRAPED_HTML the event saying so is on the bus. Not that it has been standardized, and not that anything acted on the event -- this machine has no way to know either, by design."
+        }
+    }
+}

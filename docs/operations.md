@@ -20,56 +20,298 @@ output transforms, keeping orchestration logic out of the handlers.
 { "index": "gutenberg-3300", "seeds": [1, 2, 3, 4, 5] }
 ```
 
-The state machine template lives at `infra/step-function.template.json`, rendered
-with `AWS_REGION`, `AWS_ACCOUNT_ID`, and `LAMBDA_PREFIX`.
+The state machine definition lives at `infra/step-functions/pipeline.asl.json`, rendered
+with `AWS_REGION`, `AWS_ACCOUNT_ID`, and `LAMBDA_PREFIX`. **Nothing in the repo deploys
+it any more.** The scrape/standardize flow moved to CDK and took `deploy_step_function.sh`
+with it, and this machine's per-book training stages have not been converted, so no stack
+in `infra/app.py` claims it.
 
-### The scrape machine (pending deployment)
+That is not the same as absent: `${LAMBDA_PREFIX}-pipeline` is live in the account and
+still the path a per-book run takes. It is the *edit* path that is gone. Until the stages
+are converted, a change to this file reaches AWS only by hand — substitute the three
+placeholders yourself, then:
 
-`infra/scrape-pipeline.step-function.template.json` takes a whole Gutenberg subject
-and scrapes every book in it. **It has no safe deploy path yet.** Until it gets one,
-drive the subject flow through the `list` stage directly — see
-[scrape](../functions/scrape/README.md). The template is kept as the recorded design.
+```bash
+aws stepfunctions update-state-machine \
+    --state-machine-arn "arn:aws:states:${AWS_REGION}:${AWS_ACCOUNT_ID}:stateMachine:${LAMBDA_PREFIX}-pipeline" \
+    --definition file://rendered.json
+```
 
-> **Do not deploy it with the `STEP_FUNCTION_TEMPLATE` override.** `deploy_step_function.sh`
-> will happily render any template that variable points at, but the state machine name it
-> deploys to is fixed at `${LAMBDA_PREFIX}-pipeline`. That ARN already exists, so the
-> script takes the update path and **replaces the training pipeline with the scrape
-> machine** — no new machine, no error, no warning. Teaching the script a name per
-> template is the prerequisite for deploying this one.
+### The scrape machine
+
+`infra/step-functions/scrape-pipeline.asl.json` takes a whole Gutenberg subject and
+scrapes every book in it, then announces that its books are ready. It names no other
+machine. An EventBridge rule matches that announcement and starts
+`infra/step-functions/standardize.asl.json`, which opens the Anthropic batch.
+
+The two pipelines are separate CDK stacks, and what joins them is a third:
+
+| Stack | Owns |
+| --- | --- |
+| `${LAMBDA_PREFIX}-scrape` | the `scrape` Lambda and the `-scrape-pipeline` machine |
+| `${LAMBDA_PREFIX}-standardize` | the `standardize-headings` Lambda and the `-standardize` machine |
+| `${LAMBDA_PREFIX}-relay` | the `-standardize-trigger` rule, and nothing else |
+
+Both pipeline stacks are the same `PipelineStack`
+(`infra/stacks/pipeline_stack.py`), instantiated twice in `infra/app.py` with a different
+service and ASL file. **No stack references a resource in another**, so no template carries
+an `Fn::ImportValue` and CloudFormation never holds one stack up on another's export: each
+is deployed, rolled back and destroyed on its own, and `cdk destroy
+${LAMBDA_PREFIX}-relay` severs the two pipelines without either of them changing.
+
+The price of that is the ordering the old single stack derived for free. The rule names its
+target by ARN rather than by construct reference, so nothing verifies the machine exists —
+and `PutTargets` accepts an ARN that resolves to nothing and fails only at delivery,
+silently. `infra/app.py` therefore declares a stack-level dependency of `-relay` on
+`-standardize`, which orders the deploy through the cloud assembly manifest without
+creating the export. `cdk deploy --all` and [`infra/deploy.sh`](#deploying) both honour it;
+a hand-written `cdk deploy '*-relay' --exclusively` against an account with no standardize
+machine does not.
 
 ```text
-seed-subject (stage=list)          input: { "subject": "12345" }
+${LAMBDA_PREFIX}-scrape-pipeline        input: { "subject": "12345" }
+  |
+list-subject-books (stage=SUBJECT)
   |
 scrape-books  Map, MaxConcurrency 1, over the seeded indexes
   |
-  +-- scrape (stage=metadata) → ready-for-content? → wait 3s → scrape (stage=content)
+  +-- pace 3s → scrape (stage=METADATA) → pace 3s → scrape (stage=CONTENT)
+  |             \ Catch → book-failed          \ Catch → book-failed
+  |
+books-to-standardize?  no book at SCRAPED_HTML → subject-done
+  |
+announce-books-scraped  events:putEvents ──┐   Catch → announce-failed (Fail)
+  |                                        |
+announce-delivered?  FailedEntryCount > 0 ─┘
+  |                                        |
+subject-done                               v
+                            EventBridge default bus
+                              source      embedding-analytics.scrape
+                              detail-type Subject Books Scraped
+                              detail      { subject, book_ids, scrape_execution }
+                                           |
+                            ${LAMBDA_PREFIX}-standardize-trigger  (rule)
+                              InputTransformer → { book_ids, subject }
+                                           |
+                                           v
+${LAMBDA_PREFIX}-standardize   input: { "book_ids": [...] }
+  |
+standardize-submit ({book_ids})   BooksInFlightError → standardize-blocked (Succeed)
+  |                               anything else      → standardize-submit-failed (Fail)
+  |
+batch-ended? ⇄ wait-for-batch → standardize-collect ({batch_id}), until it ends
+  |                                 a raise here fails the execution at this task,
+  |                                 uncaught, so redrive can reschedule it
+  |
+standardize-done   out: { batch_id, book_count, batch_status, standardized }
 ```
 
-Three things about it are deliberate:
+The two halves are one job but not one shape. The scrape half is bounded — at most
+`MAX_BOOKS_PER_SUBJECT` books, each a fixed handful of states — while the batch poll
+below it has no bound at all: it runs a `Wait` and a `Task` every 300s for as long as
+Anthropic takes, which can be hours. A Standard workflow's history caps at 25,000
+events, and fused they shared one budget, sized by the half nobody can size. Split,
+each gets its own. The split also isolates the failure: a poll that dies now fails a
+machine that does nothing but poll, so restarting it restarts only the poll — see
+[Recovering a batch](#recovering-a-batch).
+
+### The scrape machine announces, it does not call
+
+`announce-books-scraped` emits one EventBridge event and ends. This machine names no
+other machine; `${LAMBDA_PREFIX}-standardize-trigger` is what turns the event into an
+execution, and it lives in its own stack.
+
+The call was here twice before, and each move fixed a different problem.
+`startExecution.sync:2` made the scrape execution the child's **owner** rather than its
+caller — stop or time out the parent and Step Functions stops the child, which on the
+poll loop abandons an open, already-paid-for Anthropic batch. Plain `startExecution`
+fixed the lifecycle but still hard-coded what happens after a scrape, in the ASL of a
+machine that should only be about scraping. An announcement fixes that, and gives a
+second consumer of "a subject finished scraping" somewhere to attach.
+
+Four things carry it:
+
+- **The event carries `book_ids`.** The alternative — a bare signal, with `SEND` finding
+  its own work through `status-index` — was available and cheap, but it would have cost
+  `SEND` its required, non-empty work list and left two concurrent sweeps racing to
+  submit the same books. Carrying the list keeps `get_entries` refusing in-flight books,
+  and that refusal is what makes at-least-once delivery safe: a duplicate event starts a
+  second execution over books already at `STANDARDIZE_SUBMITTED`, which raises
+  `BooksInFlightError` and lands on `standardize-blocked`. Nothing is paid for twice.
+- **`books-to-standardize?` keeps the event off the empty path**, which is what lets the
+  rule match on `detail-type` alone. This matters more than it looks: an EventBridge
+  pattern cannot reach into a stringified field, so a rule on
+  `Step Functions Execution Status Change` could not have told a subject with books from
+  one without — `detail.output` arrives as a JSON *string*. The event only exists when
+  there is work, so the question never has to be asked.
+- **`announce-delivered?` is not optional.** `PutEvents` reports a rejected entry in
+  `FailedEntryCount` and succeeds the task anyway. Without the `Choice` the one failure
+  that matters — the announcement never reaching the bus — reads as a finished subject
+  that then silently never standardizes.
+- **The join got weaker, and that is the price.** An EventBridge target cannot set an
+  execution name, so the old `<subject>-<parent execution name>` and its
+  `ExecutionAlreadyExists` catch are both gone. `subject` rides in the event detail and
+  through the transformer into the standardize machine's *input*, where it shows on the
+  execution in the console — but the execution list can no longer be scanned by subject.
+
+**Nothing watches the standardize machine.** A failed collect ends red on its own
+machine, strands books at `STANDARDIZE_SUBMITTED`, and no scrape execution turns red with
+it. An alarm on `ExecutionsFailed` for `${LAMBDA_PREFIX}-standardize` is the minimum cover
+and does not exist yet. It matters more than an alarm usually does, because
+[Recovering a batch](#recovering-a-batch) has a clock on it: a failed execution is
+redrivable for 14 days after it ends, and nobody is told it failed.
+
+`STEP_FUNCTION_ROLE_ARN` needs `lambda:InvokeFunction` on
+`${LAMBDA_PREFIX}-standardize-headings`, which only the standardize machine calls, and
+`events:PutEvents` on the default bus, which only the scrape machine uses. It needs no
+`states:` permission at all any more — no machine here starts another. `PUT_EVENT_ROLE_ARN`
+is the new one: trusted by `events.amazonaws.com`, holding `states:StartExecution` on
+`${LAMBDA_PREFIX}-standardize`, and it is the rule that assumes it, not a state machine.
+Between them these are much smaller than the `.sync` era needed — that integration is
+built on a managed EventBridge rule, so it also required `states:DescribeExecution`,
+`states:StopExecution`, and `events:PutRule` / `PutTargets` / `DescribeRule` on
+`StepFunctionsGetEventsForStepFunctionsExecutionRule`.
+
+`states:RedriveExecution` on `execution:${LAMBDA_PREFIX}-standardize:*` belongs to whoever
+runs [Recovering a batch](#recovering-a-batch) — a human, or whatever runs on their
+behalf. It is not a machine permission and does not go on `STEP_FUNCTION_ROLE_ARN`: no
+state in either machine redrives anything.
+
+Five things about the scrape half are deliberate:
 
 - **`MaxConcurrency: 1`** — gutenberg.org is a single volunteer-run host, so books go
-  through one at a time, no ruder than the `scrape.py` CLI.
-- **The `Choice` is positive**, advancing only on `SCRAPED_METADATA`, which is
-  `scrape_book_content`'s own precondition — so a resume short-circuits books an
-  earlier run already took to `SCRAPED_HTML` instead of paying a wait and a no-op.
+  through one at a time, no ruder than the `scrape.py` CLI. It is also what makes the
+  pace states below a throttle rather than decoration: parallel iterations would overlap
+  and the request rate would be whatever concurrency allowed.
+- **Every gutenberg request is preceded by a pace**, a book's first one included, so the
+  book boundary is throttled like every other request. Pacing *before* the fetch rather
+  than after is also what lets `book-failed` stay a `Succeed` — an iteration that ends
+  early cannot make the next book fetch immediately, because that book opens with its
+  own pace. The cost is that the pace is unconditional: a book needing no network still
+  pays 3s and an invocation that does one DynamoDB read, so re-running a fully-scraped
+  100-book subject costs about ten minutes of wall clock and no gutenberg traffic at
+  all — the listing walk is skipped too, once the subject is at the cap described below.
+- **The machine does not re-decide what the handler already decides.**
+  `scrape_book_content` guards on its own precondition and returns the book's existing
+  status untouched, so `stage=CONTENT` runs unconditionally. The `Choice` that used to
+  gate it was a second copy of that guard written against a status literal, and it broke
+  silently when `EntryStatus` gained rank prefixes (`0100_SCRAPED_METADATA`). The one
+  status comparison left — the `Map`'s `book_ids` filter — matches on a substring for
+  the same reason.
 - **A failed book does not fail the subject.** An uncaught error in an inline `Map`
   discards every remaining iteration, so each task `Catch`es to a `Succeed`; the book
-  keeps its `pipeline_status` for the next run and the count surfaces as `failed`.
+  keeps its `status` for the next run and the count surfaces as `failed`. It is also
+  what lets `announce-books-scraped` run at all — a `Fail` would abort the `Map`,
+  leaving the subject scraped and never announced.
+- **The `Map` hands the standardize machine its work list.** Its `Output` filters the
+  per-book results to `SCRAPED_HTML` and passes them as that machine's whole input, so
+  `SEND` reads exactly those rows in one `BatchGetItem` instead of Scanning the table for
+  the subject twice. A book an earlier run left unsubmitted still comes back — both
+  scrape stages report the status they find rather than refetching, so it leaves the
+  `Map` still marked `SCRAPED_HTML` and the filter keeps it. Only one thing drops a book now: a caught error this run, since
+  `book-failed` carries no `status` for the filter to match. Re-ranking used to be the
+  other — a book that slid past the cap fell out of the listing and so out of
+  `indexes` — which is why a subject already holding its cap is served from the table
+  instead of re-listed.
 
-The `list` stage seeds at most `MAX_BOOKS_PER_SUBJECT` (100) books, taking the most
+`SEND` and `RETRIEVE` report the same `batch_status` field, so one `Choice` covers both
+"nothing was submitted" and "the batch is still running" — `SEND` reports `ended` when
+it opened no batch, and the poll loop is simply never entered. `batch-ended?` is written
+as the negative, so an unfamiliar `processing_status` keeps polling rather than reporting
+the batch done.
+
+Two guards sit around `standardize-submit`, and both exist because the interesting
+failures happen *after* the scrape has already been paid for:
+
+- **`books-to-standardize?` gates the empty work list**, and it stays in the parent so an
+  empty list costs no child execution at all. A subject where no book reached
+  `SCRAPED_HTML` — every book non-English, or already standardized — is an ordinary
+  outcome, but `SEND` requires `book_ids` and raises without it. Handing it an empty list
+  raised `ValueError` in the handler — two falsy fields are neither entry point — and put
+  the execution on `standardize-submit-failed`, turning a subject that simply had no work
+  red. The gate keeps the handler's required field required and stops the machine being
+  started with an empty work list.
+- **`standardize-blocked` is scoped to `BooksInFlightError`.** As a `States.ALL` catch it
+  also swallowed a half-finished submit: `submit` opens the batch before it writes the
+  manifest and before it moves any status, so a raise in that window left a batch that was
+  paid for, had no manifest to settle against, and whose books were still at
+  `SCRAPED_HTML` — reported as a `Succeed`. Everything that is not the in-flight refusal
+  now ends at `standardize-submit-failed`.
+
+`standardize-collect` is the exception: it catches nothing at all, which is what makes
+the poll loop restartable — see [Recovering a batch](#recovering-a-batch) at the end of
+this section.
+
+The `SUBJECT` stage seeds at most `MAX_BOOKS_PER_SUBJECT` (100) books, taking the most
 downloaded first. That is a deliberate cap on how much of a subject enters the corpus,
 not a limit of the invocation: four 25-book pages at 1s each finish well inside the
 120s timeout. Raising the cap raises the runtime with it — past roughly 800 books the
-invocation is killed mid-list, so seed those with `scrape.py list --subject …`, which
-has no timeout.
+invocation is killed mid-list, so seed those with `scrape.py SUBJECT --subject …`,
+which has no timeout.
 
-Every state carries its own `Retry`: up to 3 attempts at `Lambda.ServiceException`,
+Once a subject already holds that many books, the stage stops listing it: it serves
+`indexes` from the table and returns without a single gutenberg request. The cap is the
+ceiling on what a subject contributes, so a subject sitting at it has nothing left to
+discover — a second walk could only re-rank the same books, never add one. Skipping it
+is also what keeps a re-run from stranding a book. The listing is sorted by download
+count, so re-walking it rebuilds the work list from a *live* ranking: a book scraped by
+an earlier run that had since drifted past rank 100 dropped out of `indexes`, never
+reached the `Map`, and sat at `SCRAPED_HTML` forever. Reading the table instead makes
+`indexes` a superset of every previous run's work list. A re-run reports
+`created: 0`, which on this path means the listing was never walked rather than that it
+was walked and yielded nothing new.
+
+Every Lambda task carries its own `Retry`: up to 3 attempts at `Lambda.ServiceException`,
 `Lambda.AWSLambdaException`, `Lambda.SdkClientException`, and
 `Lambda.TooManyRequestsException` — AWS/Lambda-service-level failures — with 1s
 initial backoff, `BackoffRate` 2, and full jitter. An exception the pipeline code
 itself raises is not in that list, so it fails the run rather than retrying
 silently; see [Retries are scoped to the transient class only](#retries-are-scoped-to-the-transient-class-only)
-for the same split applied at the API layer.
+for the same split applied at the API layer. `announce-books-scraped` is the one task with
+no `Retry` at all, for the reason given above: a blind re-emit of an event that may already
+have been delivered is worse than a `Fail` an operator can see.
+
+### Recovering a batch
+
+A raise inside `RETRIEVE` that survives the retrier strands every book it had not reached
+at `STANDARDIZE_SUBMITTED`, and `get_entries` refuses any later run of any subject holding
+one of them. The batch is already paid for and nothing else will settle it, so there has to
+be a way back in.
+
+That way is `redrive-execution`, which restarts an unsuccessful Standard execution from the
+state that failed and reschedules it with the input that state recorded — here, the
+`batch_id` the poll loop was carrying. The whole recovery is the execution's own ARN:
+
+```bash
+aws stepfunctions redrive-execution \
+    --execution-arn "arn:aws:states:${AWS_REGION}:${AWS_ACCOUNT_ID}:execution:${LAMBDA_PREFIX}-standardize:<name>"
+```
+
+Three things in the machine exist to keep that command working:
+
+- **`standardize-collect` has no `Catch`.** A caught error would end the execution on a
+  `Fail` state, and redrive re-enters a `Fail` and fails again — the execution would be
+  redrivable in name only. The raise has to fail the execution *at the task* for redrive to
+  have something to reschedule. This is the one place in either machine where an uncaught
+  raise is the design rather than an oversight.
+- **`standardize-submit` keeps its `Catch`, and that is the same argument inverted.** Its
+  `Fail` makes the submit path deliberately un-redrivable, which is correct: `submit` opens
+  the batch before it writes the manifest and before it moves any status, so a redrive that
+  reran it would find the books still at `SCRAPED_HTML` and open — and pay for — a second
+  batch.
+- **The machine has one entry point.** `{ book_ids }` and nothing else. The `{ batch_id }`
+  entry point that used to open this machine was a hand-rolled second copy of redrive, and
+  it could not coexist with it: keeping the `Catch` that spelled the id into a `Cause` is
+  exactly what stopped redrive from working.
+
+Two limits are worth knowing, given that nothing yet alarms on the failure. Redrive is
+available for **14 days** after the execution ends, and the redriven attempt appends to
+the same execution history, which must stay under 24,999 events — a 36h poll at 300s is
+a few thousand, so only repeated redrives approach it. Past 14 days, or for a batch
+orphaned by `standardize-submit-failed` rather than by the poll, the fallback is invoking
+the Lambda directly with `{"batch_id": "..."}`, which settles an ended batch in one call;
+the id is recoverable from `client.messages.batches.list()` for 29 days after the batch
+was created.
 
 ---
 
@@ -109,6 +351,7 @@ convention, not an API-specific mechanism.
 | Function | Memory | Timeout | Rationale |
 |---|---:|---:|---|
 | `scrape` | 256 MB | 120s | I/O-bound HTTP fetch |
+| `standardize-headings` | 1024 MB | 600s | Holds every pending book's flattened text while building one batch |
 | `tokenize` | 512 MB | 120s | spaCy model needs headroom |
 | `train-kvector` | 1536 MB | 600s | CPU-bound Word2Vec training |
 | `align-kvectors` | 256 MB | 120s | NumPy/SciPy on pre-loaded vectors |

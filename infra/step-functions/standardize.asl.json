@@ -1,0 +1,133 @@
+{
+  "Comment": "Open one Anthropic batch over a list of books and poll it until it settles. Deployed as ${LAMBDA_PREFIX}-standardize, started by the ${LAMBDA_PREFIX}-standardize-trigger rule off the scrape machine's 'Subject Books Scraped' event. One entry point, { book_ids }: a poll that dies is resumed with `aws stepfunctions redrive-execution` rather than a second start, which is why standardize-collect carries no Catch. Nothing consumes its result; a failed execution here is the only signal, and it is also the handle redrive needs -- for 14 days after the execution ends. The 36h TimeoutSeconds resets to 0 on redrive, so a resumed poll loop gets the whole budget again. See docs/operations.md for why this is a separate machine from the scrape.",
+  "StartAt": "standardize-submit",
+  "QueryLanguage": "JSONata",
+  "TimeoutSeconds": 129600,
+  "States": {
+    "standardize-submit": {
+      "Type": "Task",
+      "Comment": "Opens one batch over exactly the books it is handed and returns without waiting. The payload field is the whole dispatch -- app.py runs this stage because book_ids is present, and never reads a stage name, so there is nothing here to label. A book already at STANDARDIZE_SUBMITTED refuses the whole call with BooksInFlightError, so an open batch is never paid for twice. Deliberately without the States.ALL retrier collect carries: submit opens the batch before it writes the manifest and before it moves any status, so a retry inside that window finds the books still at SCRAPED_HTML and opens a second batch that is paid for twice. The Catch to a Fail below is the same argument again, aimed at redrive: a Fail state re-enters and fails again, so this path is deliberately not redrivable and a reflexive redrive-execution cannot rerun the submit.",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${LAMBDA_PREFIX}-standardize-headings:$LATEST",
+        "Payload": {
+          "book_ids": "{% $states.input.book_ids %}"
+        }
+      },
+      "Output": {
+        "batch_id": "{% $states.result.Payload.batch_id %}",
+        "book_count": "{% $states.result.Payload.book_count %}",
+        "batch_status": "{% $states.result.Payload.batch_status %}",
+        "standardized": 0
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["BooksInFlightError"],
+          "Next": "standardize-blocked",
+          "Output": {
+            "error": "{% $states.errorOutput.Error %}",
+            "cause": "{% $states.errorOutput.Cause %}"
+          }
+        },
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "standardize-submit-failed",
+          "Output": {
+            "error": "{% $states.errorOutput.Error %}",
+            "cause": "{% $states.errorOutput.Cause %}"
+          }
+        }
+      ],
+      "Next": "batch-ended?"
+    },
+    "standardize-blocked": {
+      "Type": "Succeed",
+      "Comment": "A book on this subject already belongs to an open batch. Nothing was opened and no status moved, so re-running the subject once that batch collects picks up where this left off. Scoped to that one error on purpose -- States.ALL here reported a half-finished submit as a Succeed.",
+      "Output": {
+        "blocked": true,
+        "error": "{% $states.input.error %}",
+        "cause": "{% $states.input.cause %}"
+      }
+    },
+    "standardize-submit-failed": {
+      "Type": "Fail",
+      "Comment": "Anything else submit raises. It opens the batch before writing the manifest and before moving any status, so a raise in that window leaves a paid-for batch with nothing to settle it against. The Error is a fixed name rather than the one that was caught: re-raising gives a States.* error back to a Fail state whose Error may not carry a reserved name, and an alarm on this machine needs something stable to key on. What was caught rides in the Cause. Redriving an execution that ended here re-enters this state and fails again, which is the intended answer: the batch it may have opened is settled by invoking the Lambda directly with its batch_id, never by rerunning the submit.",
+      "Error": "StandardizeSubmitFailed",
+      "Cause": "{% $states.input.error & ': ' & $states.input.cause %}"
+    },
+    "batch-ended?": {
+      "Type": "Choice",
+      "Comment": "Both calls report batch_status, so both enter here; the submit call reports 'ended' when it opened no batch and the loop is never entered. Written as the negative so an unfamiliar processing_status keeps polling rather than reporting the batch done.",
+      "Choices": [
+        {
+          "Condition": "{% $states.input.batch_status != 'ended' %}",
+          "Next": "wait-for-batch"
+        }
+      ],
+      "Default": "standardize-done"
+    },
+    "wait-for-batch": {
+      "Type": "Wait",
+      "Comment": "The batch may run for hours, so the waiting belongs here rather than in a Lambda holding an open invocation. Each collect rebuilds its state from the batch id, so a poll landing on a cold container is correct.",
+      "Seconds": 300,
+      "Next": "standardize-collect"
+    },
+    "standardize-collect": {
+      "Type": "Task",
+      "Comment": "Returns immediately while the batch is still running, and settles it once it has ended. Selected by the payload carrying batch_id, not by a stage name. The States.ALL retrier is what stops one transient raise -- an Anthropic 5xx, an S3 blip, a DynamoDB throttle -- from ending a poll loop that runs for hours and stranding a batch that is already paid for. Safe because every attempt rebuilds its state from the batch id and re-renders from the manifest, so a retry repeats work rather than corrupting it; the cost is that a permanent error takes all three attempts before the execution fails. It carries no Catch on purpose. A raise that survives the retrier has to fail the execution *at this task*, because that is the only thing redrive can reschedule -- caught to a Fail state instead, the execution would be redrivable in name only, re-entering the Fail and failing again. Failing here means `aws stepfunctions redrive-execution` reschedules this task with the batch_id it recorded and the poll loop picks up where it stopped, so nothing has to carry the id back by hand.",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${LAMBDA_PREFIX}-standardize-headings:$LATEST",
+        "Payload": {
+          "batch_id": "{% $states.input.batch_id %}"
+        }
+      },
+      "Output": {
+        "batch_id": "{% $states.input.batch_id %}",
+        "book_count": "{% $states.input.book_count %}",
+        "batch_status": "{% $states.result.Payload.batch_status %}",
+        "standardized": "{% $states.result.Payload.standardized %}"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        },
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Next": "batch-ended?"
+    },
+    "standardize-done": {
+      "Type": "Succeed",
+      "Comment": "Out: { batch_id, book_count, batch_status, standardized }, whether or not a batch was opened -- both paths already emit that shape, so the input passes through."
+    }
+  }
+}

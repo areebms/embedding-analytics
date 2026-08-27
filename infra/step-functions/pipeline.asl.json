@@ -10,11 +10,11 @@
         "FunctionName": "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${LAMBDA_PREFIX}-scrape:$LATEST",
         "Payload": {
           "index": "{% $states.input.index %}",
-          "stage": "metadata"
+          "stage": "METADATA"
         }
       },
       "Output": {
-        "index": "{% $states.result.Payload.index %}",
+        "index": "{% $states.result.Payload.book_id %}",
         "status": "{% $states.result.Payload.status %}",
         "seeds": "{% $states.input.seeds %}"
       },
@@ -60,11 +60,11 @@
         "FunctionName": "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${LAMBDA_PREFIX}-scrape:$LATEST",
         "Payload": {
           "index": "{% $states.input.index %}",
-          "stage": "content"
+          "stage": "CONTENT"
         }
       },
       "Output": {
-        "index": "{% $states.result.Payload.index %}",
+        "index": "{% $states.result.Payload.book_id %}",
         "status": "{% $states.result.Payload.status %}",
         "seeds": "{% $states.input.seeds %}"
       },

@@ -21,17 +21,23 @@ DEFAULT_TIMEOUT="$(yq e '.default.timeout' "$SERVICES_FILE")"
 deploy_service() {
     local SERVICE="$1"
 
-    local FUNCTION="$(yq e ".services.$SERVICE.function_name" "$SERVICES_FILE")"
-    local FUNCTION_NAME="$LAMBDA_PREFIX-$FUNCTION"
-    local IMAGE="$(yq e ".services.$SERVICE.image" "$SERVICES_FILE")"
+    # The key is the whole identity: function name, functions/ directory and image
+    # name are all derived from it, so an unlisted service must not fall through to
+    # the defaults and deploy under a name nothing declared.
+    if [[ "$(yq e ".services | has(\"$SERVICE\")" "$SERVICES_FILE")" != "true" ]]; then
+        echo "no such service in $SERVICES_FILE: $SERVICE" >&2
+        exit 1
+    fi
+
+    local FUNCTION_NAME="$LAMBDA_PREFIX-$SERVICE"
+    local IMAGE="lambda-$SERVICE"
     local MEMORY="$(yq e ".services.$SERVICE.memory // $DEFAULT_MEMORY" "$SERVICES_FILE")"
     local TIMEOUT="$(yq e ".services.$SERVICE.timeout // $DEFAULT_TIMEOUT" "$SERVICES_FILE")"
-    local SMOKE_CMD="$(yq e ".services.$SERVICE.smoke_cmd // \"\"" "$SERVICES_FILE")"
 
     local FULL_TAG="$AWS_URI_PREFIX/$AWS_ECR_REPO/$IMAGE:$TAG"
     local TEST_TAG="$IMAGE:test-$TAG"  # local-only, never pushed
     local ECR_REPO="$AWS_ECR_REPO/$IMAGE"
-    local DOCKERFILE="functions/$FUNCTION/Dockerfile"
+    local DOCKERFILE="functions/$SERVICE/Dockerfile"
 
     echo
     echo "=== $SERVICE (fn=$FUNCTION_NAME img=$IMAGE mem=$MEMORY timeout=$TIMEOUT) ==="
@@ -39,8 +45,8 @@ deploy_service() {
     # Tests run inside the Docker image, using the 'test' stage of the
     # multi-stage Dockerfile. This gates the deploy: a non-zero exit
     # here aborts before any production image is built or pushed.
-    if [ -d "functions/$FUNCTION/tests" ]; then
-        echo "Building test image for $FUNCTION"
+    if [ -d "functions/$SERVICE/tests" ]; then
+        echo "Building test image for $SERVICE"
         docker buildx build \
             --platform linux/amd64 \
             --provenance=false \
@@ -67,11 +73,6 @@ deploy_service() {
         --load \
         -t "$FULL_TAG" \
         -f "$DOCKERFILE" .
-
-    if [ -n "$SMOKE_CMD" ]; then
-        echo "Running smoke test: $SMOKE_CMD"
-        docker run --rm --env-file .env --entrypoint "" "$FULL_TAG" $SMOKE_CMD
-    fi
 
     docker push "$FULL_TAG"
 

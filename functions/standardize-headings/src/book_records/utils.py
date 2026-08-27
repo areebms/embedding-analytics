@@ -1,4 +1,7 @@
+import json
 import logging
+
+from botocore.exceptions import ClientError
 
 from shared.s3 import get_s3_loader
 from shared.tables.pipeline_entries import EntryStatus, get_pipeline_entries
@@ -17,6 +20,19 @@ logger.setLevel(logging.INFO)
 
 def sanitize_llm_index(book_label: str) -> str:
     return LLM_INDEX_ILLEGAL.sub("_", book_label)[:64]
+
+
+def load_book_record(entry) -> tuple[str | None, str | None]:
+    try:
+        record = json.loads(get_s3_loader().load_text(entry.s3_metadata_key))
+    except ClientError:
+        logger.warning("%s: no metadata record; classifying without it", entry.book_id)
+        return None, None
+
+    def joined(field):
+        return "; ".join(record.get(field, [])) or None
+
+    return joined("title"), joined("author")
 
 
 def save_book_tag_text_pairs(books_tag_text_pairs: list[BookTagTextPairs]) -> None:
@@ -43,11 +59,15 @@ def get_book_tag_text_pairs(entries) -> list[BookTagTextPairs]:
             logger.info("%s has no headings; skipping.", entry.book_id)
             continue
 
+        title, author = load_book_record(entry)
+
         book_tag_text_pairs.append(
             BookTagTextPairs(
                 llm_index=sanitize_llm_index(entry.book_id),
                 index=entry.book_id,
                 tag_text_pairs=tag_text_pairs,
+                title=title,
+                author=author,
             )
         )
 

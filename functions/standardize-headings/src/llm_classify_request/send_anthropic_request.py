@@ -33,7 +33,10 @@ def get_client() -> anthropic.Anthropic:
 
 
 def to_anthropic_message(
-    book_id: BookIndex, tag_text_pairs: list[TagTextPair]
+    book_id: BookIndex,
+    tag_text_pairs: list[TagTextPair],
+    title: str | None = None,
+    author: str | None = None,
 ) -> AnthropicRequestMessage:
     headings: list[tuple[str, str]] = []
     gaps: list[int] = []
@@ -50,7 +53,12 @@ def to_anthropic_message(
         f"{position}|{tag}|{excerpt}|{gap}"
         for position, ((tag, excerpt), gap) in enumerate(zip(headings, gaps))
     )
-    return AnthropicRequestMessage(content=f"Book: {book_id}\n\n{heading_lines}")
+    preamble = f"Book: {book_id}"
+    if title:
+        preamble += f"\nKnown title (from the library record): {title}"
+    if author:
+        preamble += f"\nKnown author: {author}"
+    return AnthropicRequestMessage(content=f"{preamble}\n\n{heading_lines}")
 
 
 def convert_to_anthropic_request(
@@ -67,7 +75,10 @@ def convert_to_anthropic_request(
             max_tokens=max_tokens,
             messages=[
                 to_anthropic_message(
-                    book_tag_text_pairs.index, book_tag_text_pairs.tag_text_pairs
+                    book_tag_text_pairs.index,
+                    book_tag_text_pairs.tag_text_pairs,
+                    book_tag_text_pairs.title,
+                    book_tag_text_pairs.author,
                 )
             ],
         ),

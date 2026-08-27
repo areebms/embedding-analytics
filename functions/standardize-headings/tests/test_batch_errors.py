@@ -99,6 +99,24 @@ def test_one_line_per_heading_carrying_the_prose_gap_after_it():
     )
 
 
+def test_the_library_record_anchors_the_title():
+    """Without it the classifier infers which heading is the book's, and a "Contents"
+    heading is a tempting wrong answer."""
+    message = to_anthropic_message(
+        INDEX, BOOK_PAIRS, "The Wealth of Nations", "Smith, Adam, 1723-1790"
+    )
+
+    assert message.content.startswith(
+        f"Book: {INDEX}\n"
+        "Known title (from the library record): The Wealth of Nations\n"
+        "Known author: Smith, Adam, 1723-1790\n\n"
+    )
+
+
+def test_a_book_with_no_record_is_still_classified():
+    assert to_anthropic_message(INDEX, BOOK_PAIRS).content.startswith(f"Book: {INDEX}\n\n")
+
+
 def test_heading_text_is_truncated_and_stripped_of_the_separator():
     pairs = [("h1", "A|title\nsplit over lines"), ("h2", "x" * 200)]
 
@@ -142,14 +160,18 @@ def client_returning(*responses):
     return client
 
 
-def test_an_errored_result_raises_with_what_anthropic_said(aws):
+def test_an_errored_result_is_skipped_not_raised(aws, caplog):
+    """Raising would end the iteration, leaving every book after it in the stream
+    uncollected -- permanently, since a re-run stops at the same item."""
     client = client_returning(errored_response(str(INDEX), "request too large"))
 
-    with pytest.raises(Exception, match="invalid_request_error: request too large"):
-        drain(client)
+    with caplog.at_level(logging.WARNING):
+        assert drain(client) == []
+
+    assert "invalid_request_error: request too large" in caplog.text
 
 
-def test_a_result_that_neither_succeeded_nor_errored_raises(aws):
+def test_a_result_that_neither_succeeded_nor_errored_is_skipped(aws, caplog):
     from anthropic.types.messages import (
         MessageBatchCanceledResult,
         MessageBatchIndividualResponse,
@@ -160,17 +182,21 @@ def test_a_result_that_neither_succeeded_nor_errored_raises(aws):
         result=MessageBatchCanceledResult(type="canceled"),
     )
 
-    with pytest.raises(Exception, match="batch result canceled"):
-        drain(client_returning(response))
+    with caplog.at_level(logging.WARNING):
+        assert drain(client_returning(response)) == []
+
+    assert "result canceled" in caplog.text
 
 
-def test_a_truncated_reply_raises_rather_than_being_applied(aws):
+def test_a_truncated_reply_is_never_applied(aws, caplog):
     """It would be missing its last heading lines, and standardize would apply the ones
-    it did get to the wrong headings."""
+    it did get to the wrong headings. Skipped, so the rest of the batch still settles."""
     response = succeeded_response(str(INDEX), stop_reason="max_tokens")
 
-    with pytest.raises(Exception, match="truncated at max_tokens"):
-        drain(client_returning(response))
+    with caplog.at_level(logging.WARNING):
+        assert drain(client_returning(response)) == []
+
+    assert "truncated at max_tokens" in caplog.text
 
 
 @pytest.mark.parametrize(

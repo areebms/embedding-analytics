@@ -7,7 +7,7 @@ from shared.tables.pipeline_entries import (
 
 from book_records.batch_index import load_batch_index
 from book_records.constants import HEADING_ELEMENTS
-from book_records.schemas import TagTextPair
+from book_records.schemas import StandardizedBlock, TagTextPair
 from llm_classify_request.send_anthropic_request import get_client
 from llm_parse_response.fetch import (
     BATCH_ENDED,
@@ -24,6 +24,10 @@ SEMANTIC_BLOCK_TO_LEVEL = {
     "title": "h1",
     "front_matter": "h3",
     "back_matter": "h3",
+    "contents": "h3",
+    "index": "h3",
+    "errata": "h3",
+    "advertisement": "h3",
     "part": "h2",
     "chapter": "h2",
     "section": "h3",
@@ -41,9 +45,32 @@ def get_llm_content_text(llm_content):
     return "\n".join(texts)
 
 
+TITLE_BLOCK = "title"
+HEADING_LEVELS = frozenset(SEMANTIC_BLOCK_TO_LEVEL.values())
+
+
+def merge_title_headings(blocks: list[StandardizedBlock]) -> list[StandardizedBlock]:
+    """Fold a title page's lines back into the one heading they spell out.
+    """
+    merged: list[StandardizedBlock] = []
+    for entry in blocks:
+        joinable = (
+            merged
+            and entry.block == TITLE_BLOCK
+            and merged[-1].block == TITLE_BLOCK
+            and entry.tag in HEADING_LEVELS
+            and merged[-1].tag in HEADING_LEVELS
+        )
+        if joinable:
+            merged[-1] = merged[-1]._replace(text=f"{merged[-1].text} {entry.text}")
+            continue
+        merged.append(entry)
+    return merged
+
+
 def standardize_tag_text_pairs(
     llm_response: str, tag_text_pairs: list[TagTextPair]
-) -> list[TagTextPair]:
+) -> list[StandardizedBlock]:
 
     semantic_blocks = {}
     for line in llm_response.strip().splitlines():
@@ -59,43 +86,50 @@ def standardize_tag_text_pairs(
                 f"unknown semantic block {semantic_block!r} in line: {line}"
             )
 
-        semantic_blocks[int(position_text.strip())] = SEMANTIC_BLOCK_TO_LEVEL[
-            semantic_block
-        ]
+        semantic_blocks[int(position_text.strip())] = semantic_block
 
-    standardized_tag_text_pairs = []
+    standardized_blocks = []
     position = 0
+    current_block = None
     for tag, block_text in tag_text_pairs:
         if tag not in HEADING_ELEMENTS:
-            standardized_tag_text_pairs.append((tag, block_text))
+            standardized_blocks.append(
+                StandardizedBlock(tag, block_text, current_block)
+            )
             continue
         if position not in semantic_blocks:
             raise ValueError(
                 f"llm assigned no semantic block for heading position {position}"
             )
-        standardized_tag_text_pairs.append((semantic_blocks.pop(position), block_text))
+        current_block = semantic_blocks.pop(position)
         position += 1
+        standardized_blocks.append(
+            StandardizedBlock(
+                SEMANTIC_BLOCK_TO_LEVEL[current_block], block_text, current_block
+            )
+        )
 
-    return standardized_tag_text_pairs
+    return merge_title_headings(standardized_blocks)
 
 
 def standardize_from_batch(batch_id):
     """Settle one submitted batch, if it has finished.
-
-    Safe to call repeatedly: it returns immediately while the batch is still
-    running, and a re-run over a settled batch renders the same artifacts from the
-    same manifest rather than skipping the books it already wrote. The repeated
-    status write is the no-op -- the guard only lets a status move forward.
     """
     client = get_client()
 
     batch_status = get_batch_status(client, batch_id)
     if batch_status != BATCH_ENDED:
-        return {"batch_id": batch_id, "batch_status": batch_status, "standardized": 0}
+        return {
+            "batch_id": batch_id,
+            "batch_status": batch_status,
+            "standardized": 0,
+            "failed": [],
+        }
 
     llm_index_mapping = dict(load_batch_index(batch_id).llm_index_mapping)
 
     standardized = 0
+    failed = []
 
     for llm_index, content in yield_anthropic_content(client, batch_id):
         index = llm_index_mapping.pop(llm_index, None)
@@ -103,13 +137,19 @@ def standardize_from_batch(batch_id):
             logger.warning("batch %s: unknown llm_index %s", batch_id, llm_index)
             continue
 
-        book_tag_text_pairs = load_book_tag_text_pairs(index)
-        standardized_tag_text_pairs = standardize_tag_text_pairs(
-            get_llm_content_text(content), book_tag_text_pairs.tag_text_pairs
-        )
+        try:
+            book_tag_text_pairs = load_book_tag_text_pairs(index)
+            standardized_tag_text_pairs = standardize_tag_text_pairs(
+                get_llm_content_text(content), book_tag_text_pairs.tag_text_pairs
+            )
 
-        save_html(index, standardized_tag_text_pairs)
-        save_text(index, standardized_tag_text_pairs)
+            save_html(index, standardized_tag_text_pairs, book_tag_text_pairs.title)
+            save_text(index, standardized_tag_text_pairs)
+        except Exception:
+            logger.exception("batch %s: %s could not be rendered; left at %s",
+                             batch_id, index, EntryStatus.STANDARDIZE_SUBMITTED)
+            failed.append(str(index))
+            continue
 
         get_pipeline_entries().set_status(index, EntryStatus.STANDARDIZED)
         standardized += 1
@@ -123,9 +163,12 @@ def standardize_from_batch(batch_id):
             sorted(str(index) for index in llm_index_mapping.values()),
         )
 
-    logger.info("batch %s: %d standardized", batch_id, standardized)
+    logger.info(
+        "batch %s: %d standardized, %d failed", batch_id, standardized, len(failed)
+    )
     return {
         "batch_id": batch_id,
         "batch_status": batch_status,
         "standardized": standardized,
+        "failed": failed,
     }

@@ -12,7 +12,11 @@ from bs4 import (
     Tag,
 )
 
-from book_records.constants import HEADING_ELEMENTS
+from book_records.constants import (
+    HEADING_ELEMENTS,
+    INLINE_ELEMENTS,
+    REFERENCE_MARKER_CLASSES,
+)
 from book_records.schemas import TagTextPair
 from shared.s3 import get_s3_loader
 from shared.tables.pipeline_entries import PipelineEntry
@@ -48,13 +52,28 @@ def clean_text(text: str) -> str:
     return WHITESPACE.sub(" ", text).strip()
 
 
-def clean_element_text(element: Tag) -> str:
-    return clean_text(element.get_text(" "))
+def clean_element_text(node: Tag | str) -> str:
+    """Descendant text, separated only where the markup implies a break.
+    """
+    if isinstance(node, NavigableString):
+        return "" if isinstance(node, NON_TEXT_STRINGS) else str(node)
+
+    parts = []
+    for child in node.children:
+        text = clean_element_text(child)
+        if not text:
+            continue
+        is_block = isinstance(child, Tag) and child.name not in INLINE_ELEMENTS
+        parts.append(f" {text} " if is_block else text)
+    return "".join(parts)
 
 
 def as_paragraph_elements(texts: Iterable[str]) -> Iterator[TagTextPair]:
-    """Label each text as body prose, dropping any that cleaned away to nothing."""
-    return (("p", text) for text in texts if text)
+    """Label each text as body prose, dropping any that cleans away to nothing."""
+    for text in texts:
+        cleaned = clean_text(text)
+        if cleaned:
+            yield "p", cleaned
 
 
 def list_item_texts(element: Tag) -> Iterator[str]:
@@ -71,18 +90,15 @@ def definition_list_texts(element: Tag) -> Iterator[str]:
 
 def table_row_texts(element: Tag) -> Iterator[str]:
     """One text per row, cells joined by spaces.
-
-    Column layout carries no meaning here.
     """
     for row in element.find_all("tr"):
         cells = [clean_element_text(cell) for cell in row.find_all(["td", "th"])]
-        yield clean_text(" ".join(cell for cell in cells if cell))
+        yield " ".join(cell for cell in cells if cell)
 
 
 def blank_line_separated_texts(element: Tag) -> Iterator[str]:
     """Blank lines are the only paragraph breaks <blockquote> and <pre> give us."""
-    for paragraph in BLANK_LINE.split(element.get_text(" ")):
-        yield clean_text(paragraph)
+    yield from BLANK_LINE.split(clean_element_text(element))
 
 
 def flatten_html_elements(element: Tag) -> Iterator[TagTextPair]:
@@ -91,7 +107,8 @@ def flatten_html_elements(element: Tag) -> Iterator[TagTextPair]:
         if isinstance(child, NavigableString):
             yield from as_paragraph_elements([clean_text(str(child))])
         elif child.name in HEADING_ELEMENTS:
-            if text := clean_element_text(child):
+            text = clean_text(clean_element_text(child))
+            if text:
                 yield child.name, text
         elif child.name == "p":
             yield from as_paragraph_elements([clean_element_text(child)])
@@ -118,9 +135,17 @@ def strip_pg_boilerplate(soup: Tag) -> Tag:
     return soup
 
 
+def strip_page_markers(soup: Tag) -> Tag:
+
+    for element in soup.find_all("span", class_=REFERENCE_MARKER_CLASSES):
+        element.decompose()
+    return soup
+
+
 def strip_non_book_elements(soup: Tag) -> Tag:
     """Remove everything that is not book text in place, returning the same node."""
     strip_pg_boilerplate(soup)
+    strip_page_markers(soup)
     for element in soup.find_all(SKIP_TAGS):
         element.decompose()
     for string in soup.find_all(string=lambda s: isinstance(s, NON_TEXT_STRINGS)):

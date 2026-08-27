@@ -37,7 +37,7 @@ for the next run even if the table says `SCRAPED_HTML`. And a book that falls be
 `MAX_BOOKS_PER_SUBJECT` in the listing stops being handed over at all.
 
 1. Loads each book's raw `html/{index}.html` and reduces it to `(tag, text)` prose
-   blocks, dropping the Project Gutenberg license wrapper
+   blocks, dropping the Project Gutenberg license wrapper and the printed page numbers
 2. Builds one heading detail line per heading: position, original tag, truncated
    excerpt, and the word count before the next heading
 3. Marks books with no headings at all `SCRAPED_SKIPPED_NO_HEADINGS`
@@ -124,6 +124,125 @@ created.
 The blank lines in `text/{index}.txt` are load-bearing: [tokenize](../tokenize/) segments
 sentences within each block, so a heading that ends without a period stays off the front
 of the paragraph following it.
+
+## Inline elements imply no whitespace
+
+Gutenberg wraps drop caps, small caps and printed page numbers in `<span>`. Separating
+every descendant string — what `get_text(" ")` does — therefore splits words rather than
+joining them: `Labour, like all other things` came out as `L abour , like all other
+things`, and `J. McCreery` as `J. M c Creery`. `element_text` separates only at
+block-level boundaries, so inline markup closes up and a nested list still keeps `Outer`
+off `Inner`.
+
+Page numbers have to go in the same change, not after it. They sit *between* two words of
+a sentence, so once inline elements stop implying a space the number fuses onto the next
+word — `regulate this iv distribution` becomes `regulate this ivdistribution`, long
+enough to survive [train-kvector](../train-kvector/)'s `len(word) > 3` filter where the
+separated form was harmlessly discarded. Stripping them alone, or closing the spaces
+alone, each leaves the text worse than doing both.
+
+## The semantic block outlives the heading level
+
+The level is lossy by design — `front_matter`, `back_matter`, `contents`, `index`,
+`section` and `subsection` all render as `h3` — so a level cannot tell an index from a
+chapter. `standardize_tag_text_pairs` returns `StandardizedBlock(tag, text, block)`
+instead of a bare pair, and prose inherits the block of the heading above it. That
+inheritance is what makes a *whole* index droppable rather than only its heading.
+
+**Nothing is deleted from `html-standardized/`.** Each element carries its
+classification as `data-block`, so a consumer skips what it does not want instead of
+being handed a different book than the next consumer got. One artifact then serves the
+trainer, a passage index, and a plain reader. `text/` is the exception, because it feeds
+the trainer and nothing else: it leaves out `UNTRAINABLE_BLOCKS`.
+
+The page also declares `lang="en"` and titles itself with the book's merged `title`
+heading rather than its index. The language is fixed rather than read off the source
+because the corpus is: scrape sends any book whose metadata is not English to the
+terminal `SCRAPED_SKIPPED_NON_ENGLISH` (`functions/scrape/src/scrape.py:105`), so nothing
+else can reach this stage.
+
+```html
+<html lang="en">
+<title>ON THE PRINCIPLES OF POLITICAL ECONOMY, AND TAXATION.</title>
+<h2 data-block="chapter">CHAPTER I.</h2>
+<h3 data-block="subsection">ON VALUE.</h3>
+<p data-block="subsection">The value of a commodity…</p>
+<h3 data-block="index">INDEX.</h3>
+</html>
+```
+
+**`back_matter` is deliberately not one of them.** The classification prompt sends
+appendices, conclusions and epilogues there too, and those are the author's own prose —
+excluding it would have deleted Adam Smith's `APPENDIX TO BOOK IV` and the whole
+`Footnotes` section of gutenberg-30107. The apparatus that genuinely is not the book gets
+its own blocks instead: `contents`, `index`, `errata`, `advertisement`. `contents` is
+split off `front_matter` for the same reason — a table of contents is a list of page
+numbers, a preface is the author writing.
+
+An index is the case worth naming. It is not merely noise: it is the book's own
+vocabulary in alphabetical order, so a `window=10` skip-gram over it manufactures
+co-occurrences between exactly the terms the corpus is queried on — `banks` beside
+`agriculture` because B follows A.
+
+Because the three new blocks are new prompt vocabulary, a book only gains the exclusion
+once it has been classified against the current `SYSTEM_PROMPT`. Replaying an older batch
+is safe but leaves its index in.
+
+## A title page is one heading, however it was typeset
+
+A title page sets each line as its own element, so `ON / THE PRINCIPLES / OF / POLITICAL
+ECONOMY, / AND / TAXATION.` reaches the classifier as six headings. It calls each one
+`title` and is right every time — it is asked about headings one at a time and cannot see
+they are one heading. `merge_title_headings` folds consecutive `title` headings back
+together afterwards, which is why the merge does not disturb the positions the reply is
+keyed on.
+
+## The library record anchors the title
+
+`SEND` puts the title and author from `metadata/{index}.json` above the heading list.
+Without them the classifier has to infer which heading is the book's own, and
+gutenberg-30107 — whose title page is not transcribed as a heading at all — came back
+titled `Contents`. `render_html` prefers the record over any heading for the same reason.
+A book with no record still classifies, just without the anchor.
+
+The prompt's rules are **not independent**, which is worth knowing before editing one.
+Adding the title-page rule on its own scored 22% against the evaluation set: it makes the
+model readier to treat a run of headings as one unit, and without the precedence rule to
+stop it, it swallows `CHAPTER I. / ON VALUE. / CHAPTER II. / …` as a contents listing.
+The four rules together score 100%. See [tests/eval](tests/eval/README.md), and run it at
+n≥3 — Sonnet 5 has no `temperature`, and the same prompt has returned both 100% and 21%.
+
+## One bad reply must not strand the batch
+
+Both halves of `RETRIEVE` isolate per book. `yield_anthropic_content` logs and skips an
+errored, cancelled or truncated result instead of raising, and `standardize_from_batch`
+catches anything the render throws. A skipped book is never yielded, so it keeps
+`STANDARDIZE_SUBMITTED` and is named in the returned `failed` list for a later collect.
+
+The alternative is worse than it looks. Raising ends the results iteration, so every book
+after it in the stream goes uncollected — and permanently, because a re-run streams the
+same results and stops at the same item. The batch could never settle, with a paid-for
+batch behind it and redrive's 14-day clock running.
+
+A truncated reply is still never *applied*: it is missing its last lines, and the ones it
+did return would land on the wrong headings.
+
+## Re-rendering a collected batch
+
+`rerender.py` re-extracts from `html/`, replays the classification saved under
+`batch-results/`, and rewrites both artifacts — no Anthropic call, because that batch was
+already paid for. It is the repair path for an extractor change: `SEND` cannot be re-run
+over these books (it takes books at `SCRAPED_HTML`, and they are at `STANDARDIZED`), and
+re-submitting would open a second, separately billed batch.
+
+The replay is keyed by heading *position*, so it holds only while a change leaves the
+heading sequence intact. Each book's freshly extracted headings are counted against the
+manifest being replaced, and a book whose count moved is refused rather than rendered
+with every classification off by one — that book needs a real batch.
+
+```bash
+python3.13 src/llm_parse_response/rerender.py msgbatch_...
+```
 
 ## Layout
 

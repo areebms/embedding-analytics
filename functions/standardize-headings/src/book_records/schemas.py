@@ -1,3 +1,5 @@
+from typing import NamedTuple
+
 from pydantic import BaseModel
 
 from shared.tables.pipeline_entries import BookIndexField
@@ -5,10 +7,18 @@ from shared.tables.pipeline_entries import BookIndexField
 TagTextPair = tuple[str, str]
 
 
+class StandardizedBlock(NamedTuple):
+    tag: str
+    text: str
+    block: str | None
+
+
 class BookTagTextPairs(BaseModel):
     llm_index: str
     index: BookIndexField
     tag_text_pairs: list[TagTextPair]
+    title: str | None = None
+    author: str | None = None
 
 
 class BatchDetail(BaseModel):

@@ -92,6 +92,7 @@ def test_retrieve_renders_the_artifacts_and_advances_the_status(
         "batch_id": BATCH_ID,
         "batch_status": "ended",
         "standardized": 1,
+        "failed": [],
     }
     assert status_of(entries, INDEX) == EntryStatus.STANDARDIZED
     assert s3_content_type(bucket, standardized_html_key(INDEX)) == "text/html; charset=utf-8"
@@ -106,9 +107,9 @@ def test_retrieve_rewrites_headings_to_the_levels_the_llm_assigned(
     app.handler({"batch_id": BATCH_ID}, None)
 
     html = s3_body(bucket, standardized_html_key(INDEX))
-    assert "<h1>The Wealth of Nations</h1>" in html
-    assert "<h2>BOOK I.</h2>" in html
-    assert "<h3>OF THE CAUSES OF IMPROVEMENT.</h3>" in html
+    assert '<h1 data-block="title">The Wealth of Nations</h1>' in html
+    assert '<h2 data-block="chapter">BOOK I.</h2>' in html
+    assert '<h3 data-block="subsection">OF THE CAUSES OF IMPROVEMENT.</h3>' in html
 
 
 def test_retrieve_keeps_blocks_blank_line_separated_in_the_text_artifact(
@@ -122,6 +123,45 @@ def test_retrieve_keeps_blocks_blank_line_separated_in_the_text_artifact(
 
     text = s3_body(bucket, text_key(INDEX))
     assert text == "\n\n".join(text for _, text in BOOK_PAIRS) + "\n"
+
+
+def test_apparatus_is_left_out_of_the_text_artifact(
+    submitted_batch, collect_client, bucket
+):
+    """An index is worse for training than plain noise -- it is the book's own
+    vocabulary in alphabetical order, so a skip-gram window over it invents
+    co-occurrences between exactly the terms the corpus is queried on."""
+    submitted_batch()
+    collect_client(
+        responses=[
+            succeeded_response(str(INDEX), text="0|title\n1|chapter\n2|index\n")
+        ]
+    )
+
+    app.handler({"batch_id": BATCH_ID}, None)
+
+    text = s3_body(bucket, text_key(INDEX))
+    assert "OF THE CAUSES OF IMPROVEMENT." not in text
+    assert "The greatest improvement" not in text, "prose under it goes too"
+    assert "An inquiry into the nature and causes." in text, "the body stays"
+
+
+def test_apparatus_is_still_in_the_html_artifact(
+    submitted_batch, collect_client, bucket
+):
+    """Only `text/` feeds the trainer; the html is the readable whole book."""
+    submitted_batch()
+    collect_client(
+        responses=[
+            succeeded_response(str(INDEX), text="0|title\n1|chapter\n2|index\n")
+        ]
+    )
+
+    app.handler({"batch_id": BATCH_ID}, None)
+
+    assert "OF THE CAUSES OF IMPROVEMENT." in s3_body(
+        bucket, standardized_html_key(INDEX)
+    )
 
 
 def test_retrieve_saves_the_raw_batch_response(

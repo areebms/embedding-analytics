@@ -88,11 +88,23 @@ def yield_anthropic_content(
             if result.type == "errored":
                 error = result.error.error
                 detail = f" ({error.type}: {error.message})"
-            raise Exception(f"batch result {result.type}{detail}")
+            logger.warning(
+                "batch %s: %s result %s%s",
+                batch_id,
+                response.custom_id,
+                result.type,
+                detail,
+            )
+            continue
 
         message = result.message
         if message.stop_reason == "max_tokens":
-            raise Exception("response truncated at max_tokens")
+            logger.warning(
+                "batch %s: %s response truncated at max_tokens",
+                batch_id,
+                response.custom_id,
+            )
+            continue
 
         yield response.custom_id, [
             serialize_content_block(block) for block in message.content

@@ -4,17 +4,13 @@ import json
 
 import pytest
 
-from conftest import INDEX
+from conftest import INDEX, s3_body
 from shared.commons import BookIndex
 from shared.tables.pipeline_entries import EntryStatus, PipelineEntry, html_key, metadata_key
 
 
 ENGLISH_METADATA = {"language": ["English"], "author": ["Smith, Adam"]}
 FRENCH_METADATA = {"language": ["French"], "author": ["Rousseau, Jean-Jacques"]}
-
-
-def _body(bucket, key):
-    return bucket.Object(key).get()["Body"].read().decode("utf-8")
 
 
 def _status(entries, index=INDEX):
@@ -34,7 +30,7 @@ def test_metadata_uploads_json_and_advances_the_status(seed, entries, bucket, mo
     status = scrape.scrape_book_metadata(INDEX)
 
     assert status == EntryStatus.SCRAPED_METADATA
-    assert json.loads(_body(bucket, metadata_key(INDEX))) == ENGLISH_METADATA
+    assert json.loads(s3_body(bucket, metadata_key(INDEX))) == ENGLISH_METADATA
     assert _status(entries) == EntryStatus.SCRAPED_METADATA
 
 
@@ -50,7 +46,7 @@ def test_metadata_marks_a_non_english_book_skipped(seed, entries, bucket, mocker
     assert status == EntryStatus.SCRAPED_SKIPPED_NON_ENGLISH
     assert _status(entries) == EntryStatus.SCRAPED_SKIPPED_NON_ENGLISH
     # The metadata still lands: knowing why a book was skipped is worth the object.
-    assert json.loads(_body(bucket, metadata_key(INDEX))) == FRENCH_METADATA
+    assert json.loads(s3_body(bucket, metadata_key(INDEX))) == FRENCH_METADATA
 
 
 def test_metadata_is_idempotent_and_reports_the_current_status(seed, mocker):
@@ -77,7 +73,7 @@ def test_content_uploads_raw_html_and_advances_the_status(seed, entries, bucket,
     status = scrape.scrape_book_content(INDEX)
 
     assert status == EntryStatus.SCRAPED_HTML
-    assert _body(bucket, html_key(INDEX)) == "<html>raw</html>"
+    assert s3_body(bucket, html_key(INDEX)) == "<html>raw</html>"
     assert _status(entries) == EntryStatus.SCRAPED_HTML
 
 

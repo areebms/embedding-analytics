@@ -4,7 +4,7 @@ import logging
 from time import sleep
 
 from shared.commons import BookIndex
-from shared.s3 import get_s3_loader, upload_json
+from shared.s3 import upload_html, upload_json
 from shared.tables.pipeline_entries import (
     EntryStatus,
     PipelineEntry,
@@ -128,13 +128,9 @@ def scrape_book_content(book_id):
         )
         return pipeline_entry.status
 
-    s3_loader = get_s3_loader()
-
     html_content = get_html(book_id.source_id)
 
-    s3_loader.upload_object(
-        pipeline_entry.s3_html_key, html_content, "text/html; charset=utf-8"
-    )
+    upload_html(pipeline_entry.s3_html_key, html_content)
 
     update_status(book_id, EntryStatus.SCRAPED_HTML)
     logger.info("%s html scraped.", book_id)

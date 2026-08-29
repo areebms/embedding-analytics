@@ -26,29 +26,7 @@ os.environ.update(
 # does not exist inside the image.
 os.environ.pop("AWS_PROFILE", None)
 
-
-def _create_pipeline_table(dynamodb):
-    dynamodb.create_table(
-        TableName=os.environ["PIPELINE_TABLE"],
-        BillingMode="PAY_PER_REQUEST",
-        AttributeDefinitions=[
-            {"AttributeName": "book_id", "AttributeType": "S"},
-            {"AttributeName": "status", "AttributeType": "S"},
-        ],
-        KeySchema=[
-            {"AttributeName": "book_id", "KeyType": "HASH"},
-        ],
-        GlobalSecondaryIndexes=[
-            {
-                "IndexName": "status-index",
-                "KeySchema": [
-                    {"AttributeName": "status", "KeyType": "HASH"},
-                    {"AttributeName": "book_id", "KeyType": "RANGE"},
-                ],
-                "Projection": {"ProjectionType": "KEYS_ONLY"},
-            }
-        ],
-    )
+from shared.tests_utils import create_pipeline_table
 
 
 def _create_corpus_term_table(dynamodb):
@@ -81,7 +59,7 @@ def moto_dynamo():
         s3 = session.resource("s3")
 
         _create_corpus_term_table(dynamodb)
-        _create_pipeline_table(dynamodb)
+        create_pipeline_table(dynamodb)
         s3.create_bucket(Bucket=os.environ["S3_BUCKET"])
 
         yield session

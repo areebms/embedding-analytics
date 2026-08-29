@@ -73,7 +73,7 @@ Settles the batch that `SEND` created, if it has finished. Given a `batch_id`:
 
 1. Reads the batch's status. **If it has not ended, returns immediately** — this stage
    never waits on a batch, which is the whole reason it is a separate invocation
-2. Streams the results, resolving each `llm_index` to a book through the batch index
+2. Streams the results, matching each reply's `custom_id` to a book in the batch index
 3. Loads that one book's manifest, maps the classified semantic blocks back onto its
    headings, and renders both artifacts
 4. Uploads both, then advances the book to `STANDARDIZED` in a single atomic update
@@ -97,7 +97,7 @@ from the manifest `SEND` already wrote.
 
 | S3 artifact | Written by | Contents |
 |---|---|---|
-| `standardize-headings/batch-details/{batch_id}.json` | `SEND` | One batch's `llm_index` → book index map, plus the `llm_batch_id` it belongs to |
+| `standardize-headings/batch-details/{batch_id}.json` | `SEND` | The book ids one batch was opened over, plus the `llm_batch_id` it belongs to |
 | `standardize-headings/books/{index}.json` | `SEND` | One book's `(tag, text)` blocks |
 | `html-standardized/{index}.html` | `RETRIEVE` | `h1`/`h2`/`h3`/`p` only, no attributes and no styling |
 | `text/{index}.txt` | `RETRIEVE` | Body text, one block per paragraph/heading, blocks separated by a blank line |

@@ -70,7 +70,7 @@ def convert_to_anthropic_request(
     max_tokens = min(MAX_OUTPUT_TOKENS, max(256, heading_count * 12 + 100))
 
     return AnthropicRequest(
-        custom_id=book_tag_text_pairs.llm_index,
+        custom_id=str(book_tag_text_pairs.index),
         params=AnthropicRequestParams(
             max_tokens=max_tokens,
             messages=[

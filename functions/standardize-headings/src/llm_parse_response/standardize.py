@@ -126,15 +126,15 @@ def standardize_from_batch(batch_id):
             "failed": [],
         }
 
-    llm_index_mapping = dict(load_batch_index(batch_id).llm_index_mapping)
+    pending = {str(index): index for index in load_batch_index(batch_id).book_ids}
 
     standardized = 0
     failed = []
 
-    for llm_index, content in yield_anthropic_content(client, batch_id):
-        index = llm_index_mapping.pop(llm_index, None)
+    for custom_id, content in yield_anthropic_content(client, batch_id):
+        index = pending.pop(custom_id, None)
         if index is None:
-            logger.warning("batch %s: unknown llm_index %s", batch_id, llm_index)
+            logger.warning("batch %s: unknown custom_id %s", batch_id, custom_id)
             continue
 
         try:
@@ -154,13 +154,13 @@ def standardize_from_batch(batch_id):
         get_pipeline_entries().set_status(index, EntryStatus.STANDARDIZED)
         standardized += 1
 
-    if llm_index_mapping:
+    if pending:
         logger.warning(
             "batch %s: %d book(s) had no result and remain at %s: %s",
             batch_id,
-            len(llm_index_mapping),
+            len(pending),
             EntryStatus.STANDARDIZE_SUBMITTED,
-            sorted(str(index) for index in llm_index_mapping.values()),
+            sorted(pending),
         )
 
     logger.info(

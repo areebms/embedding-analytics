@@ -8,7 +8,6 @@ from shared.tables.pipeline_entries import EntryStatus, get_pipeline_entries
 from book_records.constants import (
     HEADING_ELEMENTS,
     JSON_CONTENT_TYPE,
-    LLM_INDEX_ILLEGAL,
     S3_STANDARDIZE_PREFIX,
 )
 from book_records.html_text_tags import load_tag_text_pairs
@@ -16,10 +15,6 @@ from book_records.schemas import BookTagTextPairs
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-
-
-def sanitize_llm_index(book_label: str) -> str:
-    return LLM_INDEX_ILLEGAL.sub("_", book_label)[:64]
 
 
 def load_book_record(entry) -> tuple[str | None, str | None]:
@@ -63,7 +58,6 @@ def get_book_tag_text_pairs(entries) -> list[BookTagTextPairs]:
 
         book_tag_text_pairs.append(
             BookTagTextPairs(
-                llm_index=sanitize_llm_index(entry.book_id),
                 index=entry.book_id,
                 tag_text_pairs=tag_text_pairs,
                 title=title,

@@ -7,6 +7,8 @@ their status until it settles. Most of what is asserted here is a refusal to ope
 import logging
 from types import SimpleNamespace
 
+import re
+
 import pytest
 
 import app
@@ -79,9 +81,8 @@ def test_a_client_is_built_when_the_key_is_set():
 # ── The request that gets sent ────────────────────────────────────────
 
 
-def book(index=INDEX, tag_text_pairs=None, llm_index=None):
+def book(index=INDEX, tag_text_pairs=None):
     return BookTagTextPairs(
-        llm_index=str(index) if llm_index is None else llm_index,
         index=index,
         tag_text_pairs=BOOK_PAIRS if tag_text_pairs is None else tag_text_pairs,
     )
@@ -140,9 +141,15 @@ def test_a_very_long_book_is_capped():
     assert request.params.max_tokens == 16000
 
 
-def test_a_custom_id_anthropic_would_reject_raises_here():
-    with pytest.raises(ValidationError):
-        convert_to_anthropic_request(book(llm_index="not a valid id"))
+def test_a_book_id_is_always_a_valid_anthropic_custom_id():
+    """The request carries the book id with no sanitising step in between. That holds
+    because `BookIndex` is built as `gutenberg-<int>` and so cannot contain a character
+    outside Anthropic's ^[a-zA-Z0-9_-]{1,64}$ -- if that ever stops being true, the
+    batch is rejected at the API rather than here."""
+    custom_id = convert_to_anthropic_request(book()).custom_id
+
+    assert custom_id == str(INDEX)
+    assert re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", custom_id)
 
 
 # ── Reading results back ──────────────────────────────────────────────
@@ -238,9 +245,7 @@ def test_a_block_type_the_sdk_adds_later_is_logged_not_guessed_at(caplog):
 def test_a_manifest_round_trips_under_its_own_batch_id(aws):
     save_batch_index(BATCH_ID, [book(), book(INDEX_2)])
 
-    mapping = load_batch_index(BATCH_ID).llm_index_mapping
-
-    assert mapping == {str(INDEX): INDEX, str(INDEX_2): INDEX_2}
+    assert load_batch_index(BATCH_ID).book_ids == [INDEX, INDEX_2]
 
 
 def test_a_manifest_belonging_to_another_batch_raises(bucket):
@@ -252,7 +257,7 @@ def test_a_manifest_belonging_to_another_batch_raises(bucket):
         Key=f"standardize-headings/batch-details/{BATCH_ID}.json",
         Body=BatchDetail(
             llm_batch_id="msgbatch_other",
-            llm_index_mapping={str(INDEX): str(INDEX)},
+            book_ids=[str(INDEX)],
         ).model_dump_json().encode("utf-8"),
     )
 

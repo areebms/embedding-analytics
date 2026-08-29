@@ -45,7 +45,6 @@ def test_send_writes_the_book_manifest_it_submitted(scraped_book, send_client, b
 
     manifest = json.loads(s3_body(bucket, f"standardize-headings/books/{index}.json"))
     assert manifest["index"] == str(index)
-    assert manifest["llm_index"] == str(index)
     assert [tuple(pair) for pair in manifest["tag_text_pairs"]] == BOOK_PAIRS
 
 
@@ -59,7 +58,7 @@ def test_send_writes_one_batch_manifest_per_batch(scraped_book, send_client, buc
     manifest = json.loads(s3_body(bucket, key))
     assert manifest == {
         "llm_batch_id": BATCH_ID,
-        "llm_index_mapping": {str(index): str(index)},
+        "book_ids": [str(index)],
     }
     assert s3_content_type(bucket, key) == "application/json; charset=utf-8"
 

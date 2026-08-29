@@ -13,10 +13,7 @@ def save_batch_index(
 ) -> None:
     batch_index = BatchDetail(
         llm_batch_id=batch_id,
-        llm_index_mapping={
-            book_tag_text_pair.llm_index: book_tag_text_pair.index
-            for book_tag_text_pair in book_tag_text_pairs
-        },
+        book_ids=[pair.index for pair in book_tag_text_pairs],
     )
     get_s3_loader().upload_object(
         get_batch_index_key(batch_id),

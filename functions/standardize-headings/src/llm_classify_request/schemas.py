@@ -1,8 +1,7 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
-from book_records.constants import LLM_INDEX_ILLEGAL
 from llm_classify_request.constants import MODEL, SYSTEM_PROMPT
 
 
@@ -23,10 +22,3 @@ class AnthropicRequestParams(BaseModel):
 class AnthropicRequest(BaseModel):
     custom_id: str = Field(max_length=64)
     params: AnthropicRequestParams
-
-    @field_validator("custom_id")
-    @classmethod
-    def custom_id_must_match_anthropic_format(cls, value):
-        if not value or LLM_INDEX_ILLEGAL.search(value):
-            raise ValueError(f"custom_id {value!r} must match ^[a-zA-Z0-9_-]{{1,64}}$")
-        return value

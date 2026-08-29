@@ -14,7 +14,6 @@ class StandardizedBlock(NamedTuple):
 
 
 class BookTagTextPairs(BaseModel):
-    llm_index: str
     index: BookIndexField
     tag_text_pairs: list[TagTextPair]
     title: str | None = None
@@ -23,4 +22,4 @@ class BookTagTextPairs(BaseModel):
 
 class BatchDetail(BaseModel):
     llm_batch_id: str
-    llm_index_mapping: dict[str, BookIndexField]  # TODO: we may not need to store both IDs for contingency.
+    book_ids: list[BookIndexField]

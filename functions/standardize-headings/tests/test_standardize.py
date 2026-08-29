@@ -257,7 +257,7 @@ def test_a_result_for_a_book_this_batch_never_carried_is_passed_over(
         status = standardize_from_batch(BATCH_ID)
 
     assert status["standardized"] == 0
-    assert "unknown llm_index gutenberg-9999" in caplog.text
+    assert "unknown custom_id gutenberg-9999" in caplog.text
     assert status_of(entries, INDEX) == EntryStatus.STANDARDIZE_SUBMITTED
 
 

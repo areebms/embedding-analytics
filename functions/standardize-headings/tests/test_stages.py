@@ -106,9 +106,9 @@ def test_retrieve_rewrites_headings_to_the_levels_the_llm_assigned(
     app.handler({"batch_id": BATCH_ID}, None)
 
     html = s3_body(bucket, standardized_html_key(INDEX))
-    assert '<h1 data-block="title">The Wealth of Nations</h1>' in html
+    assert '<h3 data-block="drop">The Wealth of Nations</h3>' in html
     assert '<h2 data-block="chapter">BOOK I.</h2>' in html
-    assert '<h3 data-block="subsection">OF THE CAUSES OF IMPROVEMENT.</h3>' in html
+    assert '<h3 data-block="section">OF THE CAUSES OF IMPROVEMENT.</h3>' in html
 
 
 def test_retrieve_keeps_blocks_blank_line_separated_in_the_text_artifact(
@@ -121,10 +121,10 @@ def test_retrieve_keeps_blocks_blank_line_separated_in_the_text_artifact(
     app.handler({"batch_id": BATCH_ID}, None)
 
     text = s3_body(bucket, text_key(INDEX))
-    assert text == "\n\n".join(text for _, text in BOOK_PAIRS) + "\n"
+    assert text == "\n\n".join(text for _, text in BOOK_PAIRS[2:]) + "\n"
 
 
-def test_apparatus_is_left_out_of_the_text_artifact(
+def test_paratext_is_left_out_of_the_text_artifact(
     submitted_batch, collect_client, bucket
 ):
     """An index is worse for training than plain noise -- it is the book's own
@@ -133,7 +133,7 @@ def test_apparatus_is_left_out_of_the_text_artifact(
     submitted_batch()
     collect_client(
         responses=[
-            succeeded_response(str(INDEX), text="0|title\n1|chapter\n2|index\n")
+            succeeded_response(str(INDEX), text="0|section\n1|chapter\n2|drop\n")
         ]
     )
 
@@ -145,14 +145,14 @@ def test_apparatus_is_left_out_of_the_text_artifact(
     assert "An inquiry into the nature and causes." in text, "the body stays"
 
 
-def test_apparatus_is_still_in_the_html_artifact(
+def test_paratext_is_still_in_the_html_artifact(
     submitted_batch, collect_client, bucket
 ):
     """Only `text/` feeds the trainer; the html is the readable whole book."""
     submitted_batch()
     collect_client(
         responses=[
-            succeeded_response(str(INDEX), text="0|title\n1|chapter\n2|index\n")
+            succeeded_response(str(INDEX), text="0|section\n1|chapter\n2|drop\n")
         ]
     )
 

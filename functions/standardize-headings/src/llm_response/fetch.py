@@ -13,15 +13,13 @@ from anthropic.types import (
 from anthropic.types.messages import MessageBatchIndividualResponse
 
 from shared.commons import BookIndex
-from shared.s3 import get_s3_loader
+from shared.s3 import load_text, upload_json
 
-from book_records.constants import JSON_CONTENT_TYPE, S3_STANDARDIZE_PREFIX
+from book_records.keys import batch_result_key, book_pairs_key
 from book_records.schemas import BookTagTextPairs
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-
-BATCH_ENDED = "ended"
 
 
 def get_batch_status(client: Anthropic, batch_id: str) -> str:
@@ -39,18 +37,15 @@ def get_batch_status(client: Anthropic, batch_id: str) -> str:
 
 
 def load_book_tag_text_pairs(index: BookIndex) -> BookTagTextPairs:
-    return BookTagTextPairs.model_validate_json(
-        get_s3_loader().load_text(f"{S3_STANDARDIZE_PREFIX}/books/{index}.json")
-    )
+    return BookTagTextPairs.model_validate_json(load_text(book_pairs_key(index)))
 
 
 def save_batch_response(
     batch_id: str, response: MessageBatchIndividualResponse
 ) -> None:
-    get_s3_loader().upload_object(
-        f"{S3_STANDARDIZE_PREFIX}/batch-results/{batch_id}/{response.custom_id}.json",
+    upload_json(
+        batch_result_key(batch_id, response.custom_id),
         response.to_json(indent=None),
-        content_type=JSON_CONTENT_TYPE,
     )
 
 

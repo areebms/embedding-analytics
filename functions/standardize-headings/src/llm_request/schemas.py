@@ -2,7 +2,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from llm_classify_request.constants import MODEL, SYSTEM_PROMPT
+from constants import MODEL, SYSTEM_PROMPT
 
 
 class AnthropicRequestMessage(BaseModel):

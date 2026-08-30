@@ -16,16 +16,16 @@ from anthropic.types import RedactedThinkingBlock, TextBlock, ThinkingBlock, Too
 from pydantic import ValidationError
 from shared.tables.pipeline_entries import EntryStatus
 
-from book_records.batch_index import load_batch_index, save_batch_index
+from book_records.io import load_batch_index, save_batch_index
 from book_records.schemas import BookTagTextPairs
-from llm_classify_request.make_request import BooksInFlightError, get_entries
-from llm_classify_request.send_anthropic_request import (
+from llm_request.make_request import BooksInFlightError, get_entries
+from llm_request.send_anthropic_request import (
     HeadingSemanticBlockError,
     convert_to_anthropic_request,
     get_client,
     to_anthropic_message,
 )
-from llm_parse_response.fetch import serialize_content_block, yield_anthropic_content
+from llm_response.fetch import serialize_content_block, yield_anthropic_content
 
 from conftest import (
     BATCH_ID,

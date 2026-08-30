@@ -5,16 +5,17 @@ import anthropic
 
 from shared.commons import BookIndex
 
-from book_records.constants import HEADING_ELEMENTS
 from book_records.schemas import BookTagTextPairs, TagTextPair
-from llm_classify_request.constants import HEADING_TEXT_TRUNCATE
-from llm_classify_request.schemas import (
+from constants import (
+    HEADING_ELEMENTS,
+    HEADING_TEXT_TRUNCATE,
+    MAX_OUTPUT_TOKENS,
+)
+from llm_request.schemas import (
     AnthropicRequest,
     AnthropicRequestMessage,
     AnthropicRequestParams,
 )
-
-MAX_OUTPUT_TOKENS = 16000
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -32,27 +33,39 @@ def get_client() -> anthropic.Anthropic:
     return anthropic.Anthropic()
 
 
+def max_output_tokens(heading_count: int) -> int:
+    """The reply is one short line per heading, so the budget is set from the count."""
+    return min(MAX_OUTPUT_TOKENS, max(256, heading_count * 12 + 100))
+
+
+def heading_gaps(tag_text_pairs) -> list[tuple[str, str, int]]:
+    """The headings of a book, each with the prose that follows it.
+
+    The third field is the word count of the plain text separating a heading from the
+    next one. It is the signal a table of contents gives itself away by -- its entries
+    have nothing between them at all -- which is why every heading line carries it.
+    """
+    headings = []
+    for tag, text in tag_text_pairs:
+        if tag in HEADING_ELEMENTS:
+            headings.append((tag, text, 0))
+        elif headings:
+            last_tag, last_text, gap = headings[-1]
+            headings[-1] = (last_tag, last_text, gap + len(text.split()))
+    return headings
+
+
 def to_anthropic_message(
     book_id: BookIndex,
     tag_text_pairs: list[TagTextPair],
     title: str | None = None,
     author: str | None = None,
 ) -> AnthropicRequestMessage:
-    headings: list[tuple[str, str]] = []
-    gaps: list[int] = []
-
-    for tag, text in tag_text_pairs:
-        if tag in HEADING_ELEMENTS:
-            excerpt = text[:HEADING_TEXT_TRUNCATE].replace("|", "/").replace("\n", " ")
-            headings.append((tag, excerpt))
-            gaps.append(0)
-        elif gaps:
-            gaps[-1] += len(text.split())
-
-    heading_lines = "\n".join(
-        f"{position}|{tag}|{excerpt}|{gap}"
-        for position, ((tag, excerpt), gap) in enumerate(zip(headings, gaps))
-    )
+    lines = []
+    for position, (tag, text, gap) in enumerate(heading_gaps(tag_text_pairs)):
+        excerpt = text[:HEADING_TEXT_TRUNCATE].replace("|", "/").replace("\n", " ")
+        lines.append(f"{position}|{tag}|{excerpt}|{gap}")
+    heading_lines = "\n".join(lines)
     preamble = f"Book: {book_id}"
     if title:
         preamble += f"\nKnown title (from the library record): {title}"
@@ -67,7 +80,7 @@ def convert_to_anthropic_request(
     heading_count = sum(
         1 for tag, _ in book_tag_text_pairs.tag_text_pairs if tag in HEADING_ELEMENTS
     )
-    max_tokens = min(MAX_OUTPUT_TOKENS, max(256, heading_count * 12 + 100))
+    max_tokens = max_output_tokens(heading_count)
 
     return AnthropicRequest(
         custom_id=str(book_tag_text_pairs.index),

@@ -1,7 +1,7 @@
 import logging
 
-from llm_classify_request.make_request import get_entries, submit
-from llm_parse_response.standardize import standardize_from_batch
+from llm_request.make_request import get_entries, submit
+from llm_response.standardize import standardize_from_batch
 from shared.lambda_event import extract_field
 
 logger = logging.getLogger(__name__)

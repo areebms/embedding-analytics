@@ -4,7 +4,7 @@
 **Libraries:** BeautifulSoup, Anthropic (Claude Sonnet 5)
 
 Classifies every heading in a subject's books into a semantic block and rewrites each
-book as `h1`/`h2`/`h3` prose. The work runs in two stages, selected by the field the
+book as `h2`/`h3` prose. The work runs in two stages, selected by the field the
 payload carries, because the Anthropic Batch API is asynchronous: `book_ids` runs `SEND`,
 which opens a batch and returns without waiting, and `batch_id` runs `RETRIEVE`, which
 settles it once it has ended.
@@ -99,7 +99,7 @@ from the manifest `SEND` already wrote.
 |---|---|---|
 | `standardize-headings/batch-details/{batch_id}.json` | `SEND` | The book ids one batch was opened over, plus the `llm_batch_id` it belongs to |
 | `standardize-headings/books/{index}.json` | `SEND` | One book's `(tag, text)` blocks |
-| `html-standardized/{index}.html` | `RETRIEVE` | `h1`/`h2`/`h3`/`p` only, no attributes and no styling |
+| `html-standardized/{index}.html` | `RETRIEVE` | `h2`/`h3`/`p` only, no attributes and no styling |
 | `text/{index}.txt` | `RETRIEVE` | Body text, one block per paragraph/heading, blocks separated by a blank line |
 
 The book manifests are one object per book rather than one per batch: the extracted text
@@ -143,9 +143,8 @@ alone, each leaves the text worse than doing both.
 
 ## The semantic block outlives the heading level
 
-The level is lossy by design — `front_matter`, `back_matter`, `contents`, `index`,
-`section` and `subsection` all render as `h3` — so a level cannot tell an index from a
-chapter. `standardize_tag_text_pairs` returns `StandardizedBlock(tag, text, block)`
+The level is lossy by design — `section` and `drop` both render as `h3` — so a
+level cannot tell an index from a chapter. `standardize_tag_text_pairs` returns `StandardizedBlock(tag, text, block)`
 instead of a bare pair, and prose inherits the block of the heading above it. That
 inheritance is what makes a *whole* index droppable rather than only its heading.
 
@@ -155,61 +154,61 @@ being handed a different book than the next consumer got. One artifact then serv
 trainer, a passage index, and a plain reader. `text/` is the exception, because it feeds
 the trainer and nothing else: it leaves out `UNTRAINABLE_BLOCKS`.
 
-The page also declares `lang="en"` and titles itself with the book's merged `title`
-heading rather than its index. The language is fixed rather than read off the source
+The page also declares `lang="en"` and titles itself from the library record rather
+than its index. The language is fixed rather than read off the source
 because the corpus is: scrape sends any book whose metadata is not English to the
 terminal `SCRAPED_SKIPPED_NON_ENGLISH` (`functions/scrape/src/scrape.py:105`), so nothing
 else can reach this stage.
 
 ```html
 <html lang="en">
-<title>ON THE PRINCIPLES OF POLITICAL ECONOMY, AND TAXATION.</title>
+<title>On the Principles of Political Economy, and Taxation</title>
 <h2 data-block="chapter">CHAPTER I.</h2>
-<h3 data-block="subsection">ON VALUE.</h3>
-<p data-block="subsection">The value of a commodity…</p>
-<h3 data-block="index">INDEX.</h3>
+<h3 data-block="section">ON VALUE.</h3>
+<p data-block="section">The value of a commodity…</p>
+<h3 data-block="drop">INDEX.</h3>
 </html>
 ```
 
-**`back_matter` is deliberately not one of them.** The classification prompt sends
-appendices, conclusions and epilogues there too, and those are the author's own prose —
-excluding it would have deleted Adam Smith's `APPENDIX TO BOOK IV` and the whole
-`Footnotes` section of gutenberg-30107. The apparatus that genuinely is not the book gets
-its own blocks instead: `contents`, `index`, `errata`, `advertisement`. `contents` is
-split off `front_matter` for the same reason — a table of contents is a list of page
-numbers, a preface is the author writing.
+**An author's own back matter is deliberately not one of them.** The classification
+prompt sends appendices, conclusions and epilogues to `section`, and those are the
+author's own prose — dropping them would have deleted Adam Smith's `APPENDIX TO BOOK IV`
+and the whole `Footnotes` section of gutenberg-30107. The paratext that genuinely is not
+the book gets its own block instead: `drop`, covering a table of contents, an index,
+errata and a publisher's catalogue. A listing is split off from a preface for the same
+reason — a table of contents is a list of page numbers, a preface is the author writing.
 
 An index is the case worth naming. It is not merely noise: it is the book's own
 vocabulary in alphabetical order, so a `window=10` skip-gram over it manufactures
 co-occurrences between exactly the terms the corpus is queried on — `banks` beside
 `agriculture` because B follows A.
 
-Because the three new blocks are new prompt vocabulary, a book only gains the exclusion
-once it has been classified against the current `SYSTEM_PROMPT`. Replaying an older batch
-is safe but leaves its index in.
+The title page goes to `drop` with the rest of it — the title, byline, degrees,
+translator, publisher, place, date and printer's line, however many headings they are set
+across. A title page is set one line per element, so it arrives as a run of consecutive
+headings with no prose between them and no structural signal, and deciding where the
+title stops within that run was the most delicate judgement the prompt asked for: stop one
+line late and the byline welds into the book's name.
 
-## A title page is one heading, however it was typeset
+## The library record is the only source of a book's title
 
-A title page sets each line as its own element, so `ON / THE PRINCIPLES / OF / POLITICAL
-ECONOMY, / AND / TAXATION.` reaches the classifier as six headings. It calls each one
-`title` and is right every time — it is asked about headings one at a time and cannot see
-they are one heading. `merge_title_headings` folds consecutive `title` headings back
-together afterwards, which is why the merge does not disturb the positions the reply is
-keyed on.
+`SEND` puts the title and author from `metadata/{index}.json` above the heading list, and
+`render_html` titles the page from the record alone. Nothing is lost by dropping the
+printed title page, because no book can reach this stage without a record:
+`scrape_book_metadata` uploads it before it advances the status
+(`functions/scrape/src/scrape.py:101-110`), and `RETRIEVE` only selects entries at
+`SCRAPED_HTML`, two transitions further on. Classifying a title page duplicated metadata
+already in hand.
 
-## The library record anchors the title
-
-`SEND` puts the title and author from `metadata/{index}.json` above the heading list.
-Without them the classifier has to infer which heading is the book's own, and
-gutenberg-30107 — whose title page is not transcribed as a heading at all — came back
-titled `Contents`. `render_html` prefers the record over any heading for the same reason.
-A book with no record still classifies, just without the anchor.
+The record still goes into the prompt, now only so the model can recognise where the
+title page is in order to drop it.
 
 The prompt's rules are **not independent**, which is worth knowing before editing one.
 Adding the title-page rule on its own scored 22% against the evaluation set: it makes the
 model readier to treat a run of headings as one unit, and without the precedence rule to
 stop it, it swallows `CHAPTER I. / ON VALUE. / CHAPTER II. / …` as a contents listing.
-The four rules together score 100%. See [tests/eval](tests/eval/README.md), and run it at
+The four rules together score 100%. That measurement predates the removal of `title` and
+`imprint`, so re-run it before leaning on the numbers. See [tests/eval](tests/eval/README.md), and run it at
 n≥3 — Sonnet 5 has no `temperature`, and the same prompt has returned both 100% and 21%.
 
 ## One bad reply must not strand the batch
@@ -227,35 +226,34 @@ batch behind it and redrive's 14-day clock running.
 A truncated reply is still never *applied*: it is missing its last lines, and the ones it
 did return would land on the wrong headings.
 
-## Re-rendering a collected batch
+## Re-classifying a book
 
-`rerender.py` re-extracts from `html/`, replays the classification saved under
-`batch-results/`, and rewrites both artifacts — no Anthropic call, because that batch was
-already paid for. It is the repair path for an extractor change: `SEND` cannot be re-run
-over these books (it takes books at `SCRAPED_HTML`, and they are at `STANDARDIZED`), and
-re-submitting would open a second, separately billed batch.
+There is no replay path. A book whose extraction or vocabulary has changed goes back
+through `SEND` for a fresh classification, because one costs $0.006 -- about sixty cents
+for a hundred-book corpus -- and a second rendering path costs more than that to keep
+honest. What stands in the way is the status guard, not the money: `SEND` takes books at
+`SCRAPED_HTML` and a classified book is at `STANDARDIZED`.
 
-The replay is keyed by heading *position*, so it holds only while a change leaves the
-heading sequence intact. Each book's freshly extracted headings are counted against the
-manifest being replaced, and a book whose count moved is refused rather than rendered
-with every classification off by one — that book needs a real batch.
-
-```bash
-python3.13 src/llm_parse_response/rerender.py msgbatch_...
-```
+Replies stay under `batch-results/` all the same. They are the audit trail -- the record
+of what the model actually returned for a book, which is how a bad render is told apart
+from a bad classification -- and nothing reads them back into the pipeline.
 
 ## Layout
 
-This function's `src/` owns both halves of the wire format. `llm_classify_request/`
-builds the prompt and sends the batch; `llm_parse_response/` defines the semantic blocks
-a reply may name, the heading level each one renders as, and reads the lines that come
-back onto a book's headings — `fetch.py` pulls the batch results,
-`standardize.py` is the settle loop, and `save_artifacts.py` writes the two artifacts.
+This function's `src/` owns both halves of the wire format. `llm_request/` builds the
+prompt and sends the batch; `llm_response/` reads the lines that come back onto a book's
+headings — `fetch.py` pulls the batch results, `standardize.py` is the settle loop, and
+`save_artifacts.py` writes the two artifacts. `book_records/` is what both work on:
+`reduce_html.py` turns a scraped page into `(tag, text)` blocks, and `keys.py` names every
+S3 object the stage writes.
 
-Keeping them side by side is the point: a block added to the `SYSTEM_PROMPT` and not to
-`SEMANTIC_BLOCK_TO_LEVEL` is rejected in the same package it was introduced in, rather
-than drifting out of step with a validator somewhere else. The two stages are separate
-invocations because of *when* they run, not because they own different code.
+`constants.py` sits above both, because it is the one thing they have to agree on: the
+semantic blocks a reply may name, the heading level each one renders as, and which tags
+count as headings at all. It belongs to neither stage on purpose. `SYSTEM_PROMPT` prints
+`SEMANTIC_BLOCK_TO_LEVEL`'s keys as the list it offers the model rather than restating
+them, so a block added to the vocabulary reaches the prompt and the renderer in the same
+edit, and one the model invents anyway is rejected against the same map. The two stages
+are separate invocations because of *when* they run, not because they own different code.
 
 ```bash
 aws lambda invoke --function-name $LAMBDA_PREFIX-standardize-headings \

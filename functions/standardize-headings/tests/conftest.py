@@ -3,7 +3,6 @@ import os
 from unittest.mock import MagicMock
 
 import pytest
-from moto import mock_aws
 
 
 # Set, not setdefault: the deploy gate runs this suite inside the image with
@@ -37,6 +36,13 @@ from anthropic.types.messages import (
 from anthropic.types.shared import ErrorResponse, InvalidRequestError
 
 from shared.commons import BookIndex
+from shared.tests_utils import (  # noqa: F401
+    aws,
+    bucket,
+    entries,
+    s3_body,
+    s3_content_type,
+)
 
 
 INDEX = BookIndex(3300)
@@ -71,8 +77,9 @@ BOOK_PAIRS = [
     ("p", "The greatest improvement in the productive powers of labour."),
 ]
 
-# The reply BOOK_PAIRS earns: one line per heading, in order.
-BOOK_REPLY = "0|title\n1|chapter\n2|subsection\n"
+# The reply BOOK_PAIRS earns: one line per heading, in order. The first is a title
+# page heading, which is paratext now that the library record carries the title.
+BOOK_REPLY = "0|drop\n1|chapter\n2|section\n"
 
 # The same page with every heading removed: what a book of pure prose looks like.
 PROSE_ONLY_HTML = """<html><body>
@@ -83,63 +90,6 @@ PROSE_ONLY_HTML = """<html><body>
 
 
 # ── AWS ───────────────────────────────────────────────────────────────
-
-
-def _create_pipeline_table(dynamodb):
-    dynamodb.create_table(
-        TableName=os.environ["PIPELINE_TABLE"],
-        BillingMode="PAY_PER_REQUEST",
-        AttributeDefinitions=[
-            {"AttributeName": "book_id", "AttributeType": "S"},
-            {"AttributeName": "status", "AttributeType": "S"},
-        ],
-        KeySchema=[{"AttributeName": "book_id", "KeyType": "HASH"}],
-        GlobalSecondaryIndexes=[
-            {
-                "IndexName": "status-index",
-                "KeySchema": [
-                    {"AttributeName": "status", "KeyType": "HASH"},
-                    {"AttributeName": "book_id", "KeyType": "RANGE"},
-                ],
-                "Projection": {"ProjectionType": "KEYS_ONLY"},
-            }
-        ],
-    )
-
-
-@pytest.fixture
-def aws():
-    """moto S3 + DynamoDB, with the module-level singletons reset each run."""
-    import boto3
-
-    import shared.s3 as s3_module
-    import shared.session as session_module
-    import shared.tables.pipeline_entries as pipeline_entries_module
-
-    session_module._session = None
-    pipeline_entries_module._pipeline_entries = None
-    s3_module._s3_loader = None
-
-    with mock_aws():
-        session = boto3.Session(region_name=os.environ["AWS_REGION"])
-        _create_pipeline_table(session.resource("dynamodb"))
-        # No CreateBucketConfiguration: us-east-1 is the one region CreateBucket must
-        # not be told about, and the environment above pins the suite there.
-        session.resource("s3").create_bucket(Bucket=os.environ["S3_BUCKET"])
-
-        yield session
-
-
-@pytest.fixture
-def entries(aws):
-    from shared.tables.pipeline_entries import get_pipeline_entries
-
-    return get_pipeline_entries()
-
-
-@pytest.fixture
-def bucket(aws):
-    return aws.resource("s3").Bucket(os.environ["S3_BUCKET"])
 
 
 @pytest.fixture
@@ -167,14 +117,6 @@ def scraped_book(seed, bucket):
         return index
 
     return _scraped_book
-
-
-def s3_body(bucket, key):
-    return bucket.Object(key).get()["Body"].read().decode("utf-8")
-
-
-def s3_content_type(bucket, key):
-    return bucket.Object(key).get()["ContentType"]
 
 
 def status_of(entries, index=INDEX):
@@ -236,7 +178,7 @@ def send_client(monkeypatch):
         id=BATCH_ID, processing_status="in_progress"
     )
     monkeypatch.setattr(
-        "llm_classify_request.send_anthropic_request.get_client", lambda: client
+        "llm_request.send_anthropic_request.get_client", lambda: client
     )
     return client
 
@@ -286,7 +228,7 @@ def collect_client(monkeypatch):
         client.messages.batches.retrieve.return_value = batch
         client.messages.batches.results.return_value = iter(responses)
         monkeypatch.setattr(
-            "llm_parse_response.standardize.get_client", lambda: client
+            "llm_response.standardize.get_client", lambda: client
         )
         return client
 

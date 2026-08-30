@@ -254,7 +254,7 @@ def test_a_manifest_belonging_to_another_batch_raises(bucket):
     from book_records.schemas import BatchDetail
 
     bucket.put_object(
-        Key=f"standardize-headings/batch-details/{BATCH_ID}.json",
+        Key=f"standardize-html/batch-details/{BATCH_ID}.json",
         Body=BatchDetail(
             llm_batch_id="msgbatch_other",
             book_ids=[str(INDEX)],

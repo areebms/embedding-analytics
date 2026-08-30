@@ -43,7 +43,7 @@ def test_send_writes_the_book_manifest_it_submitted(scraped_book, send_client, b
 
     app.handler({"book_ids": [str(index)]}, None)
 
-    manifest = json.loads(s3_body(bucket, f"standardize-headings/books/{index}.json"))
+    manifest = json.loads(s3_body(bucket, f"standardize-html/books/{index}.json"))
     assert manifest["index"] == str(index)
     assert [tuple(pair) for pair in manifest["tag_text_pairs"]] == BOOK_PAIRS
 
@@ -54,7 +54,7 @@ def test_send_writes_one_batch_manifest_per_batch(scraped_book, send_client, buc
 
     app.handler({"book_ids": [str(index)]}, None)
 
-    key = f"standardize-headings/batch-details/{BATCH_ID}.json"
+    key = f"standardize-html/batch-details/{BATCH_ID}.json"
     manifest = json.loads(s3_body(bucket, key))
     assert manifest == {
         "llm_batch_id": BATCH_ID,
@@ -172,7 +172,7 @@ def test_retrieve_saves_the_raw_batch_response(
 
     app.handler({"batch_id": BATCH_ID}, None)
 
-    key = f"standardize-headings/batch-results/{BATCH_ID}/{INDEX}.json"
+    key = f"standardize-html/batch-results/{BATCH_ID}/{INDEX}.json"
     assert json.loads(s3_body(bucket, key))["custom_id"] == str(INDEX)
 
 

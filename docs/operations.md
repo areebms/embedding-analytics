@@ -49,7 +49,7 @@ The two pipelines are separate CDK stacks, and what joins them is a third:
 | Stack | Owns |
 | --- | --- |
 | `${LAMBDA_PREFIX}-scrape` | the `scrape` Lambda and the `-scrape-pipeline` machine |
-| `${LAMBDA_PREFIX}-standardize` | the `standardize-headings` Lambda and the `-standardize` machine |
+| `${LAMBDA_PREFIX}-standardize` | the `standardize-html` Lambda and the `-standardize` machine |
 | `${LAMBDA_PREFIX}-relay` | the `-standardize-trigger` rule, and nothing else |
 
 Both pipeline stacks are the same `PipelineStack`
@@ -162,7 +162,7 @@ and does not exist yet. It matters more than an alarm usually does, because
 redrivable for 14 days after it ends, and nobody is told it failed.
 
 `STEP_FUNCTION_ROLE_ARN` needs `lambda:InvokeFunction` on
-`${LAMBDA_PREFIX}-standardize-headings`, which only the standardize machine calls, and
+`${LAMBDA_PREFIX}-standardize-html`, which only the standardize machine calls, and
 `events:PutEvents` on the default bus, which only the scrape machine uses. It needs no
 `states:` permission at all any more — no machine here starts another. `PUT_EVENT_ROLE_ARN`
 is the new one: trusted by `events.amazonaws.com`, holding `states:StartExecution` on
@@ -351,7 +351,7 @@ convention, not an API-specific mechanism.
 | Function | Memory | Timeout | Rationale |
 |---|---:|---:|---|
 | `scrape` | 256 MB | 120s | I/O-bound HTTP fetch |
-| `standardize-headings` | 1024 MB | 600s | Holds every pending book's flattened text while building one batch |
+| `standardize-html` | 1024 MB | 600s | Holds every pending book's flattened text while building one batch |
 | `tokenize` | 512 MB | 120s | spaCy model needs headroom |
 | `train-kvector` | 1536 MB | 600s | CPU-bound Word2Vec training |
 | `align-kvectors` | 256 MB | 120s | NumPy/SciPy on pre-loaded vectors |
@@ -382,7 +382,7 @@ REDIS_PREFIX=
 PRODUCTION_DOMAIN=      # Frontend URL, for CORS
 OPENAI_API_KEY=         # Required for /parse-describe
 PINECONE_API_KEY=       # Required by publish
-ANTHROPIC_API_KEY=      # Required by standardize-headings
+ANTHROPIC_API_KEY=      # Required by standardize-html
 PINECONE_INDEX_NAME=
 ```
 
@@ -413,7 +413,7 @@ dies on `StrEnum` in `shared/`.
 
 ### Deploying
 
-Two paths, split by service. `scrape` and `standardize-headings` are CDK; the other five
+Two paths, split by service. `scrape` and `standardize-html` are CDK; the other five
 are still `deploy_lambdas.sh`.
 
 ```bash
@@ -432,7 +432,7 @@ pushed. Arguments go to `cdk deploy`; a leading `--` replaces the subcommand, so
 
 **The optional first argument is the point of the split.** With no target both suites run
 and all three stacks deploy; with one, only that pipeline's suite runs and only its stack
-is touched — a `standardize-headings` test that is red cannot hold up a `scrape` release,
+is touched — a `standardize-html` test that is red cannot hold up a `scrape` release,
 and a scrape deploy produces no changeset over the standardize machine. A targeted deploy
 passes `--exclusively`, so `deploy.sh relay` does not follow the stack dependency into
 `-standardize` and publish an image whose suite this invocation never ran.

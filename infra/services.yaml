@@ -9,7 +9,7 @@ services:
   scrape:
     env: [S3_BUCKET, PIPELINE_TABLE]
 
-  standardize-headings:
+  standardize-html:
     memory: 1024
     timeout: 600
     env: [S3_BUCKET, PIPELINE_TABLE, ANTHROPIC_API_KEY]

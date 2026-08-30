@@ -6,7 +6,7 @@ f-string, so the prefix had to be exported to reach them. Naming them together k
 key builders in `shared.tables.pipeline_entries`.
 """
 
-S3_STANDARDIZE_PREFIX = "standardize-headings"
+S3_STANDARDIZE_PREFIX = "standardize-html"
 
 
 def book_pairs_key(index) -> str:

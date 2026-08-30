@@ -13,16 +13,16 @@ services:
     ports:
       - "9010:8080"
     
-  lambda-standardize-headings:
-    image: lambda-standardize-headings:local
+  lambda-standardize-html:
+    image: lambda-standardize-html:local
     env_file:
     - .env
     build:
       context: .
-      dockerfile: functions/standardize-headings/Dockerfile
+      dockerfile: functions/standardize-html/Dockerfile
       target: lambda
     volumes:
-      - ./functions/standardize-headings/src:/var/task
+      - ./functions/standardize-html/src:/var/task
       - ./shared:/var/task/shared
     ports:
       - "9030:8080"

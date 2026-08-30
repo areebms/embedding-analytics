@@ -28,7 +28,7 @@ standardize = PipelineStack(
     app,
     f"{prefix}-standardize",
     prefix=prefix,
-    service="standardize-headings",
+    service="standardize-html",
     machine="standardize",
     env=env,
 )

@@ -9,7 +9,7 @@
       "Comment": "Opens one batch over exactly the books it is handed and returns without waiting. The payload field is the whole dispatch -- app.py runs this stage because book_ids is present, and never reads a stage name, so there is nothing here to label. A book already at STANDARDIZE_SUBMITTED refuses the whole call with BooksInFlightError, so an open batch is never paid for twice. Deliberately without the States.ALL retrier collect carries: submit opens the batch before it writes the manifest and before it moves any status, so a retry inside that window finds the books still at SCRAPED_HTML and opens a second batch that is paid for twice. The Catch to a Fail below is the same argument again, aimed at redrive: a Fail state re-enters and fails again, so this path is deliberately not redrivable and a reflexive redrive-execution cannot rerun the submit.",
       "Resource": "arn:aws:states:::lambda:invoke",
       "Arguments": {
-        "FunctionName": "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${LAMBDA_PREFIX}-standardize-headings:$LATEST",
+        "FunctionName": "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${LAMBDA_PREFIX}-standardize-html:$LATEST",
         "Payload": {
           "book_ids": "{% $states.input.book_ids %}"
         }
@@ -91,7 +91,7 @@
       "Comment": "Returns immediately while the batch is still running, and settles it once it has ended. Selected by the payload carrying batch_id, not by a stage name. The States.ALL retrier is what stops one transient raise -- an Anthropic 5xx, an S3 blip, a DynamoDB throttle -- from ending a poll loop that runs for hours and stranding a batch that is already paid for. Safe because every attempt rebuilds its state from the batch id and re-renders from the manifest, so a retry repeats work rather than corrupting it; the cost is that a permanent error takes all three attempts before the execution fails. It carries no Catch on purpose. A raise that survives the retrier has to fail the execution *at this task*, because that is the only thing redrive can reschedule -- caught to a Fail state instead, the execution would be redrivable in name only, re-entering the Fail and failing again. Failing here means `aws stepfunctions redrive-execution` reschedules this task with the batch_id it recorded and the poll loop picks up where it stopped, so nothing has to carry the id back by hand.",
       "Resource": "arn:aws:states:::lambda:invoke",
       "Arguments": {
-        "FunctionName": "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${LAMBDA_PREFIX}-standardize-headings:$LATEST",
+        "FunctionName": "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${LAMBDA_PREFIX}-standardize-html:$LATEST",
         "Payload": {
           "batch_id": "{% $states.input.batch_id %}"
         }

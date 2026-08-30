@@ -1,4 +1,4 @@
-# standardize-headings
+# standardize-html
 
 *Subject-scoped job, outside the per-book state machine. [Pipeline overview](../../docs/internals.md) · [Project README](../../README.md)*
 **Libraries:** BeautifulSoup, Anthropic (Claude Sonnet 5)
@@ -97,8 +97,8 @@ from the manifest `SEND` already wrote.
 
 | S3 artifact | Written by | Contents |
 |---|---|---|
-| `standardize-headings/batch-details/{batch_id}.json` | `SEND` | The book ids one batch was opened over, plus the `llm_batch_id` it belongs to |
-| `standardize-headings/books/{index}.json` | `SEND` | One book's `(tag, text)` blocks |
+| `standardize-html/batch-details/{batch_id}.json` | `SEND` | The book ids one batch was opened over, plus the `llm_batch_id` it belongs to |
+| `standardize-html/books/{index}.json` | `SEND` | One book's `(tag, text)` blocks |
 | `html-standardized/{index}.html` | `RETRIEVE` | `h2`/`h3`/`p` only, no attributes and no styling |
 | `text/{index}.txt` | `RETRIEVE` | Body text, one block per paragraph/heading, blocks separated by a blank line |
 
@@ -256,11 +256,11 @@ edit, and one the model invents anyway is rejected against the same map. The two
 are separate invocations because of *when* they run, not because they own different code.
 
 ```bash
-aws lambda invoke --function-name $LAMBDA_PREFIX-standardize-headings \
+aws lambda invoke --function-name $LAMBDA_PREFIX-standardize-html \
     --payload '{"book_ids":["gutenberg-3300"]}' out.json
 # {"batch_id": "msgbatch_...", "book_count": 42, "batch_status": "in_progress"}
 
-aws lambda invoke --function-name $LAMBDA_PREFIX-standardize-headings \
+aws lambda invoke --function-name $LAMBDA_PREFIX-standardize-html \
     --payload '{"batch_id":"msgbatch_..."}' out.json
 # {"batch_id": "...", "batch_status": "ended", "standardized": 41}
 ```

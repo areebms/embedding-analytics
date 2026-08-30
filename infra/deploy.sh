@@ -5,10 +5,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 case "${1:-}" in
-    scrape)      SERVICES=(scrape);               SELECT=(--exclusively "*-scrape");      shift ;;
-    standardize) SERVICES=(standardize-headings); SELECT=(--exclusively "*-standardize"); shift ;;
-    relay)       SERVICES=();                     SELECT=(--exclusively "*-relay");       shift ;;
-    *)           SERVICES=(scrape standardize-headings); SELECT=(--all) ;;
+    scrape)      SERVICES=(scrape);           SELECT=(--exclusively "*-scrape");      shift ;;
+    standardize) SERVICES=(standardize-html); SELECT=(--exclusively "*-standardize"); shift ;;
+    relay)       SERVICES=();                 SELECT=(--exclusively "*-relay");       shift ;;
+    *)           SERVICES=(scrape standardize-html); SELECT=(--all) ;;
 esac
 
 export BUILDX_NO_DEFAULT_ATTESTATIONS=1

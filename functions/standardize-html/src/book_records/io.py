@@ -3,8 +3,8 @@ import logging
 from botocore.exceptions import ClientError
 
 from shared.s3 import load_json, load_text, upload_json
+from shared.tables.pipeline_entries import PipelineEntry
 
-from book_records.keys import batch_index_key, book_pairs_key
 from book_records.schemas import BatchDetail, BookTagTextPairs
 
 logger = logging.getLogger(__name__)
@@ -18,12 +18,12 @@ def save_batch_index(
         llm_batch_id=batch_id,
         book_ids=[pair.index for pair in book_tag_text_pairs],
     )
-    upload_json(batch_index_key(batch_id), batch_index.model_dump_json())
+    upload_json(BatchDetail.s3_key(batch_id), batch_index.model_dump_json())
 
 
 def load_batch_index(batch_id: str) -> BatchDetail:
     batch_index = BatchDetail.model_validate_json(
-        load_text(batch_index_key(batch_id))
+        load_text(BatchDetail.s3_key(batch_id))
     )
 
     if batch_index.llm_batch_id != batch_id:
@@ -50,9 +50,12 @@ def load_metadata(entry) -> tuple[str | None, str | None]:
     return joined("title"), joined("author")
 
 
-def save_book_tag_text_pairs(books_tag_text_pairs: list[BookTagTextPairs]) -> None:
+def save_book_tag_text_pairs(
+    entries: list[PipelineEntry], books_tag_text_pairs: list[BookTagTextPairs]
+) -> None:
+    entries_by_book_id = {entry.book_id: entry for entry in entries}
     for book_tag_text_pairs in books_tag_text_pairs:
         upload_json(
-            book_pairs_key(book_tag_text_pairs.index),
+            entries_by_book_id[book_tag_text_pairs.index].s3_book_pairs_key,
             book_tag_text_pairs.model_dump_json(),
         )

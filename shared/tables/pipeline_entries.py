@@ -40,22 +40,6 @@ BookIndexField = Annotated[
 ]
 
 
-def metadata_key(index: BookIndex) -> str:
-    return f"metadata/{index}.json"
-
-
-def html_key(index: BookIndex) -> str:
-    return f"html/{index}.html"
-
-
-def standardized_html_key(index: BookIndex) -> str:
-    return f"html-standardized/{index}.html"
-
-
-def text_key(index: BookIndex) -> str:
-    return f"text/{index}.txt"
-
-
 class PipelineEntry(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
@@ -66,19 +50,35 @@ class PipelineEntry(BaseModel):
 
     @property
     def s3_metadata_key(self) -> str:
-        return metadata_key(self.book_id)
+        return f"metadata/{self.book_id}.json"
 
     @property
     def s3_html_key(self) -> str:
-        return html_key(self.book_id)
+        return f"html/{self.book_id}.html"
+
+    @property
+    def s3_book_pairs_key(self) -> str:
+        return f"standardize-html/books/{self.book_id}.json"
 
     @property
     def s3_standardized_html_key(self) -> str:
-        return standardized_html_key(self.book_id)
+        return f"html-standardized/{self.book_id}.html"
 
     @property
     def s3_text_key(self) -> str:
-        return text_key(self.book_id)
+        return f"text/{self.book_id}.txt"
+
+    @property
+    def s3_token_texts_key(self) -> str:
+        return f"token_texts/{self.book_id}.csv"
+
+    @property
+    def s3_token_lemmas_key(self) -> str:
+        return f"token_lemmas/{self.book_id}.csv"
+
+    @property
+    def s3_token_tags_key(self) -> str:
+        return f"token_tags/{self.book_id}.csv"
 
 
 _pipeline_entries = None

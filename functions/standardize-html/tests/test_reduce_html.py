@@ -402,14 +402,14 @@ def test_an_unrecognised_container_holding_no_structure_is_one_block():
 
 def test_the_library_record_supplies_title_and_author(bucket):
     import json
-    from shared.tables.pipeline_entries import EntryStatus, PipelineEntry, metadata_key
+    from shared.tables.pipeline_entries import EntryStatus, PipelineEntry
     from book_records.io import load_metadata
 
     entry = PipelineEntry(
         book_id=INDEX, subject_ids={SUBJECT}, status=EntryStatus.SCRAPED_HTML
     )
     bucket.put_object(
-        Key=metadata_key(INDEX),
+        Key=f"metadata/{INDEX}.json",
         Body=json.dumps(
             {"title": ["The Wealth of Nations"], "author": ["Smith, Adam"]}
         ).encode("utf-8"),
@@ -434,12 +434,12 @@ def test_a_book_with_no_record_classifies_without_one(bucket, caplog):
 
 
 def test_load_reads_the_html_the_entry_points_at(bucket, entries):
-    from shared.tables.pipeline_entries import EntryStatus, PipelineEntry, html_key
+    from shared.tables.pipeline_entries import EntryStatus, PipelineEntry
     from book_records.io import load_html
 
     entry = PipelineEntry(
         book_id=INDEX, subject_ids={SUBJECT}, status=EntryStatus.SCRAPED_HTML
     )
-    bucket.put_object(Key=html_key(INDEX), Body=BOOK_HTML.encode("utf-8"))
+    bucket.put_object(Key=f"html/{INDEX}.html", Body=BOOK_HTML.encode("utf-8"))
 
     assert reduce_to_text_tag_pairs(load_html(entry)) == BOOK_PAIRS

@@ -109,11 +109,11 @@ def seed(entries):
 @pytest.fixture
 def scraped_book(seed, bucket):
     """A book at SCRAPED_HTML with its raw html in the bucket: what SEND is handed."""
-    from shared.tables.pipeline_entries import EntryStatus, html_key
+    from shared.tables.pipeline_entries import EntryStatus
 
     def _scraped_book(index=INDEX, html=BOOK_HTML):
         seed(EntryStatus.SCRAPED_HTML, index)
-        bucket.put_object(Key=html_key(index), Body=html.encode("utf-8"))
+        bucket.put_object(Key=f"html/{index}.html", Body=html.encode("utf-8"))
         return index
 
     return _scraped_book

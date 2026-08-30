@@ -78,11 +78,11 @@ Settles the batch that `SEND` created, if it has finished. Given a `batch_id`:
    headings, and renders both artifacts
 4. Uploads both, then advances the book to `STANDARDIZED` in a single atomic update
 
-Step 4 writes the status and nothing else. The artifact keys are derived from the index
-by `standardized_html_key` and `text_key` in
+Step 4 writes the status and nothing else. The artifact keys are derived from the book id
+by `PipelineEntry.s3_standardized_html_key` and `.s3_text_key` in
 [`shared/tables/pipeline_entries.py`](../../shared/tables/pipeline_entries.py), the same
-way `metadata_key` and `html_key` serve scrape and publish, so the row records that the
-artifacts exist rather than where they are.
+way `.s3_metadata_key` and `.s3_html_key` serve scrape and publish, so the row records
+that the artifacts exist rather than where they are.
 
 Safe to call repeatedly — a batch still running costs nothing but the call, and a re-run
 over a settled batch renders the same artifacts from the same manifest rather than

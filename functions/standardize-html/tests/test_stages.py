@@ -5,7 +5,7 @@ import json
 import pytest
 
 import app
-from shared.tables.pipeline_entries import EntryStatus, standardized_html_key, text_key
+from shared.tables.pipeline_entries import EntryStatus
 
 from conftest import (
     BATCH_ID,
@@ -94,7 +94,7 @@ def test_retrieve_renders_the_artifacts_and_advances_the_status(
         "failed": [],
     }
     assert status_of(entries, INDEX) == EntryStatus.STANDARDIZED
-    assert s3_content_type(bucket, standardized_html_key(INDEX)) == "text/html; charset=utf-8"
+    assert s3_content_type(bucket, f"html-standardized/{INDEX}.html") == "text/html; charset=utf-8"
 
 
 def test_retrieve_rewrites_headings_to_the_levels_the_llm_assigned(
@@ -105,7 +105,7 @@ def test_retrieve_rewrites_headings_to_the_levels_the_llm_assigned(
 
     app.handler({"batch_id": BATCH_ID}, None)
 
-    html = s3_body(bucket, standardized_html_key(INDEX))
+    html = s3_body(bucket, f"html-standardized/{INDEX}.html")
     assert '<h3 data-block="drop">The Wealth of Nations</h3>' in html
     assert '<h2 data-block="chapter">BOOK I.</h2>' in html
     assert '<h3 data-block="section">OF THE CAUSES OF IMPROVEMENT.</h3>' in html
@@ -120,7 +120,7 @@ def test_retrieve_keeps_blocks_blank_line_separated_in_the_text_artifact(
 
     app.handler({"batch_id": BATCH_ID}, None)
 
-    text = s3_body(bucket, text_key(INDEX))
+    text = s3_body(bucket, f"text/{INDEX}.txt")
     assert text == "\n\n".join(text for _, text in BOOK_PAIRS[2:]) + "\n"
 
 
@@ -139,7 +139,7 @@ def test_paratext_is_left_out_of_the_text_artifact(
 
     app.handler({"batch_id": BATCH_ID}, None)
 
-    text = s3_body(bucket, text_key(INDEX))
+    text = s3_body(bucket, f"text/{INDEX}.txt")
     assert "OF THE CAUSES OF IMPROVEMENT." not in text
     assert "The greatest improvement" not in text, "prose under it goes too"
     assert "An inquiry into the nature and causes." in text, "the body stays"
@@ -159,7 +159,7 @@ def test_paratext_is_still_in_the_html_artifact(
     app.handler({"batch_id": BATCH_ID}, None)
 
     assert "OF THE CAUSES OF IMPROVEMENT." in s3_body(
-        bucket, standardized_html_key(INDEX)
+        bucket, f"html-standardized/{INDEX}.html"
     )
 
 
@@ -184,13 +184,13 @@ def test_retrieve_is_safe_to_re_run_over_a_settled_batch(
     submitted_batch()
     collect_client(responses=[succeeded_response(str(INDEX))])
     app.handler({"batch_id": BATCH_ID}, None)
-    first = s3_body(bucket, text_key(INDEX))
+    first = s3_body(bucket, f"text/{INDEX}.txt")
 
     collect_client(responses=[succeeded_response(str(INDEX))])
     status = app.handler({"batch_id": BATCH_ID}, None)
 
     assert status["standardized"] == 1
-    assert s3_body(bucket, text_key(INDEX)) == first
+    assert s3_body(bucket, f"text/{INDEX}.txt") == first
     assert status_of(entries, INDEX) == EntryStatus.STANDARDIZED
 
 

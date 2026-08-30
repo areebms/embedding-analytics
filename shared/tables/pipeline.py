@@ -48,9 +48,7 @@ class PipelineTable(BaseTable):
                 return False
             raise
 
-    def get_all_entries(self, fields=None, **scan_kwargs):
-        """Every row, optionally projected and optionally filtered.
-        """
+    def get_all_entries(self, fields=None, limit=None, **scan_kwargs):
         scan_kwargs = dict(scan_kwargs)
         if fields:
             scan_kwargs["ProjectionExpression"] = ", ".join(
@@ -61,13 +59,13 @@ class PipelineTable(BaseTable):
                 **{f"#{field}": field for field in fields},
             }
         items = []
-        response = self.table.scan(**scan_kwargs)
         while True:
+            if limit is not None:
+                scan_kwargs["Limit"] = limit - len(items)
+            response = self.table.scan(**scan_kwargs)
             items.extend(response.get("Items", []))
+            if limit is not None and len(items) >= limit:
+                return items[:limit]
             if "LastEvaluatedKey" not in response:
-                break
-            response = self.table.scan(
-                ExclusiveStartKey=response["LastEvaluatedKey"],
-                **scan_kwargs,
-            )
-        return items
+                return items
+            scan_kwargs["ExclusiveStartKey"] = response["LastEvaluatedKey"]

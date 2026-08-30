@@ -146,32 +146,33 @@ def standardize_from_batch(batch_id):
             "failed": [],
         }
 
-    pending = {str(index): index for index in load_batch_index(batch_id).book_ids}
+    entries = get_pipeline_entries().get_entries(load_batch_index(batch_id).book_ids)
+    pending = {str(entry.book_id): entry for entry in entries}
 
     standardized = 0
     failed = []
 
     for custom_id, content in yield_anthropic_content(client, batch_id):
-        index = pending.pop(custom_id, None)
-        if index is None:
+        entry = pending.pop(custom_id, None)
+        if entry is None:
             logger.warning("batch %s: unknown custom_id %s", batch_id, custom_id)
             continue
 
         try:
-            book_tag_text_pairs = load_book_tag_text_pairs(index)
+            book_tag_text_pairs = load_book_tag_text_pairs(entry)
             standardized_tag_text_pairs = standardize_tag_text_pairs(
                 get_llm_content_text(content), book_tag_text_pairs.tag_text_pairs
             )
 
-            save_html(index, standardized_tag_text_pairs, book_tag_text_pairs.title)
-            save_text(index, standardized_tag_text_pairs)
+            save_html(entry, standardized_tag_text_pairs, book_tag_text_pairs.title)
+            save_text(entry, standardized_tag_text_pairs)
         except Exception:
             logger.exception("batch %s: %s could not be rendered; left at %s",
-                             batch_id, index, EntryStatus.STANDARDIZE_SUBMITTED)
-            failed.append(str(index))
+                             batch_id, entry.book_id, EntryStatus.STANDARDIZE_SUBMITTED)
+            failed.append(str(entry.book_id))
             continue
 
-        get_pipeline_entries().set_status(index, EntryStatus.STANDARDIZED)
+        get_pipeline_entries().set_status(entry.book_id, EntryStatus.STANDARDIZED)
         standardized += 1
 
     if pending:

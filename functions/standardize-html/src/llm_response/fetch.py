@@ -12,11 +12,10 @@ from anthropic.types import (
 )
 from anthropic.types.messages import MessageBatchIndividualResponse
 
-from shared.commons import BookIndex
 from shared.s3 import load_text, upload_json
+from shared.tables.pipeline_entries import PipelineEntry
 
-from book_records.keys import batch_result_key, book_pairs_key
-from book_records.schemas import BookTagTextPairs
+from book_records.schemas import BatchDetail, BookTagTextPairs
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -36,25 +35,21 @@ def get_batch_status(client: Anthropic, batch_id: str) -> str:
     return batch.processing_status
 
 
-def load_book_tag_text_pairs(index: BookIndex) -> BookTagTextPairs:
-    return BookTagTextPairs.model_validate_json(load_text(book_pairs_key(index)))
+def load_book_tag_text_pairs(entry: PipelineEntry) -> BookTagTextPairs:
+    return BookTagTextPairs.model_validate_json(load_text(entry.s3_book_pairs_key))
 
 
 def save_batch_response(
     batch_id: str, response: MessageBatchIndividualResponse
 ) -> None:
     upload_json(
-        batch_result_key(batch_id, response.custom_id),
+        BatchDetail.s3_result_key(batch_id, response.custom_id),
         response.to_json(indent=None),
     )
 
 
 def serialize_content_block(block: ContentBlock) -> dict[str, Any]:
-    """One JSON-ready dict per content block, branched by named type.
 
-    Probing with hasattr would let a block type added in a future SDK release
-    serialize to a near-empty dict in silence; an unhandled type belongs in the log.
-    """
     if isinstance(block, TextBlock):
         return {"type": block.type, "text": block.text}
     if isinstance(block, ThinkingBlock):

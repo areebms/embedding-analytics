@@ -5,14 +5,7 @@ from decimal import Decimal
 import pytest
 
 from shared.commons import BookIndex
-from shared.tables.pipeline_entries import (
-    EntryStatus,
-    PipelineEntry,
-    html_key,
-    metadata_key,
-    standardized_html_key,
-    text_key,
-)
+from shared.tables.pipeline_entries import EntryStatus, PipelineEntry
 
 INDEX = BookIndex(3300)
 SUBJECT = BookIndex(42)
@@ -82,16 +75,15 @@ def test_get_entry_raises_for_missing_row(pipeline_entries):
 
 def test_s3_keys_are_derived_from_the_index():
     """The documented layout (docs/pipeline.md) -- pinned against literals."""
-    assert metadata_key(INDEX) == "metadata/gutenberg-3300.json"
-    assert html_key(INDEX) == "html/gutenberg-3300.html"
-    assert standardized_html_key(INDEX) == "html-standardized/gutenberg-3300.html"
-    assert text_key(INDEX) == "text/gutenberg-3300.txt"
-
     entry = PipelineEntry(book_id=INDEX, subject_ids={SUBJECT})
     assert entry.s3_metadata_key == "metadata/gutenberg-3300.json"
     assert entry.s3_html_key == "html/gutenberg-3300.html"
+    assert entry.s3_book_pairs_key == "standardize-html/books/gutenberg-3300.json"
     assert entry.s3_standardized_html_key == "html-standardized/gutenberg-3300.html"
     assert entry.s3_text_key == "text/gutenberg-3300.txt"
+    assert entry.s3_token_texts_key == "token_texts/gutenberg-3300.csv"
+    assert entry.s3_token_lemmas_key == "token_lemmas/gutenberg-3300.csv"
+    assert entry.s3_token_tags_key == "token_tags/gutenberg-3300.csv"
 
 
 def test_s3_keys_are_never_written_to_the_table(pipeline_entries):

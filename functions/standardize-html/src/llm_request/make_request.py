@@ -41,7 +41,7 @@ def submit(pending_entries):
     if not book_tag_text_pairs:
         return {"batch_id": None, "book_count": 0, "batch_status": BATCH_ENDED}
 
-    save_book_tag_text_pairs(book_tag_text_pairs)
+    save_book_tag_text_pairs(pending_entries, book_tag_text_pairs)
 
     batch_id, batch_status = send_message_batch(book_tag_text_pairs)
 

@@ -1,7 +1,6 @@
 import html
 
 from shared.s3 import upload_html, upload_txt
-from shared.tables.pipeline_entries import standardized_html_key, text_key
 
 from constants import UNTRAINABLE_BLOCKS
 
@@ -30,9 +29,12 @@ def render_text(blocks):
     )
 
 
-def save_html(index, blocks, record_title=None):
-    upload_html(standardized_html_key(index), render_html(blocks, index, record_title))
+def save_html(entry, blocks, record_title=None):
+    upload_html(
+        entry.s3_standardized_html_key,
+        render_html(blocks, entry.book_id, record_title),
+    )
 
 
-def save_text(index, blocks):
-    upload_txt(text_key(index), render_text(blocks))
+def save_text(entry, blocks):
+    upload_txt(entry.s3_text_key, render_text(blocks))

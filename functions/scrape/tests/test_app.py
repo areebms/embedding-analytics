@@ -13,7 +13,7 @@ import json
 import pytest
 
 from conftest import INDEX, s3_body
-from shared.tables.pipeline_entries import EntryStatus, html_key, metadata_key
+from shared.tables.pipeline_entries import EntryStatus
 
 
 def test_metadata_stage_runs_and_returns_its_status(seed, bucket, mocker):
@@ -30,7 +30,7 @@ def test_metadata_stage_runs_and_returns_its_status(seed, bucket, mocker):
         "book_id": INDEX,
         "status": EntryStatus.SCRAPED_METADATA,
     }
-    assert json.loads(s3_body(bucket, metadata_key(INDEX)))
+    assert json.loads(s3_body(bucket, f"metadata/{INDEX}.json"))
 
 
 def test_content_stage_runs_the_other_half(seed, bucket, mocker):
@@ -47,7 +47,7 @@ def test_content_stage_runs_the_other_half(seed, bucket, mocker):
         "book_id": INDEX,
         "status": EntryStatus.SCRAPED_HTML,
     }
-    assert s3_body(bucket, html_key(INDEX)) == "<html>raw</html>"
+    assert s3_body(bucket, f"html/{INDEX}.html") == "<html>raw</html>"
 
 
 def test_the_returned_status_is_json_serialisable(seed, mocker):

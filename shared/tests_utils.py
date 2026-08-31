@@ -2,7 +2,7 @@
 
 Importing a fixture here into a conftest makes it available to that suite:
 
-    from shared.testing import aws, bucket, entries  # noqa: F401
+    from shared.tests_utils import aws, bucket, entries  # noqa: F401
 """
 
 import os

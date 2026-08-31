@@ -1,165 +1,134 @@
-import csv
-import io
 import logging
-from pathlib import Path
 
-import spacy
-from nltk.corpus import wordnet
-from nltk.tokenize import sent_tokenize
-from nltk.stem import WordNetLemmatizer
-
-from shared.session import get_session
-from shared.s3 import upload_object, load_text_from_s3
-from shared.tables.pipeline import get_pipeline_table
-from shared.commons import get_index
+from shared.commons import BookIndex, get_index
+from shared.s3 import load_text, upload_csv
+from shared.tables.pipeline_entries import (
+    EntryStatus,
+    PipelineEntry,
+    get_pipeline_entries
+)
+from tokenize_text import Token, tokenize_passage
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-
-SENTENCE_ENDINGS = {".", "!", "?"}
-SPACY_TO_WORDNET = {
-    "NOUN": wordnet.NOUN,
-    "VERB": wordnet.VERB,
-    "ADJ": wordnet.ADJ,
-    "ADV": wordnet.ADV,
-}
-
-lemmatizer = WordNetLemmatizer()
-
-with Path(__file__).with_name("ignored_nouns.txt").open(encoding="utf-8") as file:
-    ignored_nouns = set(file.read().splitlines())
+PENDING = (EntryStatus.STANDARDIZED,)
+MAX_BOOKS_PER_SUBJECT = 50
 
 
-def chunk_text(nlp, text):
-    all_sentences = sent_tokenize(text)
-    num_chunks = len(all_sentences) % nlp.max_length
-    if num_chunks <= 1:
-        return [text]
-
-    sentences_per_chunk = int(len(all_sentences) / num_chunks)
-    sentence_chunks = []
-    current_chunk = []
-
-    for sentence in all_sentences:
-        current_chunk.append(sentence)
-        if sentence[-1] not in SENTENCE_ENDINGS:
-            continue
-
-        if len(current_chunk) >= sentences_per_chunk:
-            sentence_chunks.append(current_chunk)
-            current_chunk = []
-
-    if current_chunk:
-        sentence_chunks.append(current_chunk)
-
-    return [" ".join(chunk) for chunk in sentence_chunks]
-
-
-def csv_bytes(rows):
-    buffer = io.StringIO()
-    csv.writer(buffer).writerows(rows)
-    return buffer.getvalue()
-
-
-def get_related_verbs(lemma):
-    if lemma in ignored_nouns:
-        return
-
-    derivations = set()
-    for synset in wordnet.synsets(lemma):
-        for synset_lemma in synset.lemmas():
-            if synset_lemma.name().lower() != lemma:
-                continue
-
-            for related_form in synset_lemma.derivationally_related_forms():
-                if related_form.synset().pos() != wordnet.VERB:
-                    continue
-
-                related_lemma = related_form.name().lower()
-                if len(related_lemma) < len(lemma) and lemma[0] == related_lemma[0]:
-                    derivations.add(related_lemma)
-    return min(derivations, key=len) if derivations else None
-
-
-def aggressively_lemmatize(token, pos):
-    if pos is None:
-        return token
-
-    lemma = lemmatizer.lemmatize(token, pos=pos)
-    if pos == wordnet.NOUN:
-        related_verb = get_related_verbs(lemma)
-        if related_verb:
-            return related_verb
-
-    return lemma
-
-
-def tokenize(index):
-    session = get_session()
-
-    table = get_pipeline_table()
-
-    item = table.get_entry(
-        index,
-        ["s3_text_key", "s3_token_texts_key", "s3_token_lemmas_key", "s3_token_tags_key"],
+def resolve_subject(subject_id: str) -> list[BookIndex]:
+    book_ids = get_pipeline_entries().get_indexes(
+        status=EntryStatus.STANDARDIZED, subject_id=subject_id
     )
 
-    s3_text_key = item.get("s3_text_key")
-    if not s3_text_key:
-        logger.info("Index has not been scraped", extra={"index": index})
-        return
-    
-    if (
-        item.get("s3_token_texts_key")
-        and item.get("s3_token_lemmas_key")
-        and item.get("s3_token_tags_key")
-    ):
-        logger.info("Index has already been tokenized", extra={"index": index})
-        return
-
-    text = load_text_from_s3(session, s3_text_key)
-    nlp = spacy.load("en_core_web_sm", disable=["ner"])
-    doc_texts = chunk_text(nlp, text)
-
-    token_texts = []
-    token_lemmas = []
-    token_tags = []
-    for doc in nlp.pipe(doc_texts, batch_size=32, n_process=4):
-        for sentence in doc.sents:
-            token_lemmas.append([])
-            token_texts.append([])
-            token_tags.append([])
-            for token in sentence:
-                cleaned_token = "".join(
-                    char for char in token.text if char.isalpha()
-                ).lower()
-
-                if len(cleaned_token) == 0:
-                    token_lemmas[-1].append("")
-                else:
-                    cleaned_token = cleaned_token.replace("labor", "labour")
-                    token_pos = SPACY_TO_WORDNET.get(token.pos_)
-                    token_lemmas[-1].append(
-                        aggressively_lemmatize(cleaned_token, token_pos)
-                    )
-
-                token_texts[-1].append(token.text)
-                token_tags[-1].append(token.tag_)
-    s3_writes = [
-        ("s3_token_texts_key", f"token_texts/{index}.csv", token_texts),
-        ("s3_token_lemmas_key", f"token_lemmas/{index}.csv", token_lemmas),
-        ("s3_token_tags_key", f"token_tags/{index}.csv", token_tags),
-    ]
-    for field, s3_key, rows in s3_writes:
-        upload_object(
-            session,
-            s3_key,
-            csv_bytes(rows),
-            "text/csv; charset=utf-8",
+    if len(book_ids) > MAX_BOOKS_PER_SUBJECT:
+        logger.info(
+            "%s resolved %d books; taking the first %d, the rest keep STANDARDIZED "
+            "for the next run.",
+            subject_id,
+            len(book_ids),
+            MAX_BOOKS_PER_SUBJECT,
         )
-        table.update_entry(index, field, s3_key)
+        book_ids = book_ids[:MAX_BOOKS_PER_SUBJECT]
+
+    return book_ids
 
 
-if __name__ == "__main__":
-    tokenize(get_index())
+def get_entries(book_ids: list[str]) -> list[PipelineEntry]:
+
+    book_ids = list(book_ids)
+    entries = get_pipeline_entries().get_entries(book_ids)
+
+    if len(entries) != len(book_ids):
+        logger.warning(
+            "%d of %d book(s) have no pipeline entry.",
+            len(book_ids) - len(entries),
+            len(book_ids),
+        )
+
+    pending = []
+    for entry in entries:
+        if entry.status in PENDING:
+            pending.append(entry)
+        else:
+            logger.info(
+                "%s is at %s, not %s; skipping tokenize.",
+                entry.book_id,
+                entry.status,
+                ", ".join(PENDING),
+            )
+
+    return pending
+
+
+def set_status(book_id, status):
+    if not get_pipeline_entries().set_status(book_id, status):
+        logger.warning("%s: the status guard refused the write to %s.", book_id, status)
+
+
+def yield_passages(entry: PipelineEntry):
+    """Each non-empty passage of the entry's text, in document order."""
+    for passage in load_text(entry.s3_text_key).split("\n\n"):
+        passage = passage.strip()
+        if passage:
+            yield passage
+
+
+def upload_passage_data(
+    entry: PipelineEntry, tokenized_passages: list[list[Token]]
+) -> None:
+    """The three artifacts' rows: one row per passage, one row set per Token field."""
+    texts, lemmas, tags = [], [], []
+    for passage in tokenized_passages:
+        texts.append([token.text for token in passage])
+        lemmas.append([token.lemma for token in passage])
+        tags.append([token.tag for token in passage])
+
+    upload_csv(entry.s3_token_texts_key, texts)
+    upload_csv(entry.s3_token_lemmas_key, lemmas)
+    upload_csv(entry.s3_token_tags_key, tags)
+
+
+def tokenize_entry(entry: PipelineEntry) -> None:
+    """One book: spaCy over each passage, the three artifacts, then the status."""
+    tokenized_passages: list[list[Token]] = []
+    for passage in yield_passages(entry):
+        tokenized_passages.append(tokenize_passage(passage))
+
+    if not tokenized_passages:
+        raise ValueError(f"{entry.s3_text_key} holds no passages")
+
+    upload_passage_data(entry, tokenized_passages)
+    set_status(entry.book_id, EntryStatus.TOKENIZED)
+
+
+def tokenize_entries(entries: list[PipelineEntry]) -> dict:
+    """Every book handed in, one process. A book that raises is left at STANDARDIZED
+    and named in `failed` rather than ending the run."""
+    tokenized = 0
+    failed = []
+    for entry in entries:
+        try:
+            tokenize_entry(entry)
+        except Exception:
+            logger.exception(
+                "%s failed to tokenize; left at %s.",
+                entry.book_id,
+                EntryStatus.STANDARDIZED,
+            )
+            failed.append(str(entry.book_id))
+            continue
+
+        tokenized += 1
+
+    logger.info(
+        "%d of %d book(s) tokenized, %d failed.", tokenized, len(entries), len(failed)
+    )
+    return {"found": len(entries), "tokenized": tokenized, "failed": failed}
+
+
+if __name__ == "__main__":  # pragma: no cover
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+    )
+    tokenize_entries(get_entries([get_index()]))

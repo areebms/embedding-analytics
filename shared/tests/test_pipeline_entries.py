@@ -210,6 +210,88 @@ def test_get_indexes_sorts_keys_lexicographically(pipeline_entries):
     ]
 
 
+def test_get_indexes_by_subject_narrows_to_one_subject_and_status(pipeline_entries):
+    """The Scan filters on both, so a book of the right status in another subject and a
+    book of the wrong status in this one are equally out."""
+    other_subject = BookIndex(99)
+    pipeline_entries.put_entry(
+        PipelineEntry(
+            book_id=BookIndex(1),
+            subject_ids={SUBJECT},
+            status=EntryStatus.SCRAPED_HTML,
+        )
+    )
+    pipeline_entries.put_entry(
+        PipelineEntry(
+            book_id=BookIndex(2),
+            subject_ids={other_subject},
+            status=EntryStatus.SCRAPED_HTML,
+        )
+    )
+    pipeline_entries.put_entry(
+        PipelineEntry(
+            book_id=BookIndex(3),
+            subject_ids={SUBJECT},
+            status=EntryStatus.STANDARDIZE_SUBMITTED,
+        )
+    )
+
+    assert pipeline_entries.get_indexes(
+        status=EntryStatus.SCRAPED_HTML, subject_id=SUBJECT
+    ) == [BookIndex(1)]
+
+
+def test_get_indexes_by_subject_finds_a_book_under_every_subject_listing_it(
+    pipeline_entries,
+):
+    """`contains` over the set, which is the whole reason subject_ids is a set and no
+    index can key on it."""
+    other_subject = BookIndex(99)
+    pipeline_entries.put_entry(
+        PipelineEntry(
+            book_id=INDEX,
+            subject_ids={SUBJECT, other_subject},
+            status=EntryStatus.SCRAPED_HTML,
+        )
+    )
+
+    for subject in (SUBJECT, other_subject):
+        assert pipeline_entries.get_indexes(
+            status=EntryStatus.SCRAPED_HTML, subject_id=subject
+        ) == [INDEX]
+
+
+def test_get_indexes_by_subject_returns_sorted_ids(pipeline_entries):
+    """Ids, not rows: the Scan projects book_id alone. Sorted so a caller capping the
+    list takes the same slice twice."""
+    for source_id in (9, 10):
+        pipeline_entries.put_entry(
+            PipelineEntry(
+                book_id=BookIndex(source_id),
+                subject_ids={SUBJECT},
+                status=EntryStatus.SCRAPED_HTML,
+            )
+        )
+
+    assert pipeline_entries.get_indexes(
+        status=EntryStatus.SCRAPED_HTML, subject_id=SUBJECT
+    ) == [BookIndex(10), BookIndex(9)]
+
+
+def test_get_indexes_by_subject_is_empty_when_the_subject_has_nothing_pending(
+    pipeline_entries,
+):
+    pipeline_entries.put_entry(
+        PipelineEntry(
+            book_id=INDEX, subject_ids={SUBJECT}, status=EntryStatus.STANDARDIZED
+        )
+    )
+
+    assert pipeline_entries.get_indexes(
+        status=EntryStatus.SCRAPED_HTML, subject_id=SUBJECT
+    ) == []
+
+
 def test_row_carrying_later_stage_fields_still_parses(pipeline_entries):
     """extra="ignore": publish and align write columns scrape's model never names."""
     pipeline_entries.put_entry(

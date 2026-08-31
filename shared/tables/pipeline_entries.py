@@ -1,14 +1,12 @@
+from enum import StrEnum
+from typing import Annotated
+
 from pydantic import BaseModel, ConfigDict, PlainSerializer, PlainValidator
-
 from boto3.dynamodb.conditions import Key
-
 
 from shared.commons import BookIndex
 from shared.session import get_session
 from shared.tables.pipeline import PipelineTable
-
-from enum import StrEnum
-from typing import Annotated
 
 
 class EntryStatus(StrEnum):
@@ -23,6 +21,7 @@ class EntryStatus(StrEnum):
     STANDARDIZE_SUBMITTED = "0200_STANDARDIZE_SUBMITTED"
     STANDARDIZE_UNRESOLVED = "0201_STANDARDIZE_UNRESOLVED"
     STANDARDIZED = "0250_STANDARDIZED"
+    TOKENIZED = "0300_TOKENIZED"
 
     @property
     def is_terminal(self) -> bool:
@@ -97,8 +96,6 @@ class PipelineEntries(PipelineTable):
 
     STATUS_INDEX = "status-index"
 
-    # PipelineEntry's own columns. A row may carry later-stage ones; `extra="ignore"`
-    # would drop them anyway, so there is no point fetching them.
     FIELDS = ["book_id", "subject_ids", "status"]
 
     def get_entry(self, book_id, fields=None):
@@ -109,13 +106,6 @@ class PipelineEntries(PipelineTable):
         return PipelineEntry.model_validate({**item, "book_id": book_id})
 
     def get_indexes(self, status=None, subject_id=None) -> list[BookIndex]:
-        """Books at `status`, in `subject_id`, or both -- keys only, sorted.
-
-        A subject filter forces a Scan. `subject_ids` is a set, and DynamoDB index keys
-        must be scalar, so there is no index to query -- and going through
-        `status-index` first would not help either, since it is KEYS_ONLY and carries
-        no `subject_ids` to filter on.
-        """
         if subject_id is not None:
             items = self.get_all_entries(
                 ["book_id"], **self.build_subject_filter(subject_id, status)
@@ -141,12 +131,13 @@ class PipelineEntries(PipelineTable):
 
     @staticmethod
     def build_subject_filter(subject_id, status=None):
-        """Scan kwargs matching one subject, optionally narrowed to one status.
-        """
+        """Scan kwargs matching one subject, optionally narrowed to one status."""
         params = {
             "FilterExpression": "contains(#subject_ids, :subject_id)",
             "ExpressionAttributeNames": {"#subject_ids": "subject_ids"},
-            "ExpressionAttributeValues": {":subject_id": str(BookIndex.parse(subject_id))},
+            "ExpressionAttributeValues": {
+                ":subject_id": str(BookIndex.parse(subject_id))
+            },
         }
         if status is not None:
             params["FilterExpression"] += " AND #status = :status"
@@ -169,8 +160,7 @@ class PipelineEntries(PipelineTable):
 
     @staticmethod
     def build_status_guard():
-        """Only let a status write move a book forward, and never off a terminal state.
-        """
+        """Only let a status write move a book forward, and never off a terminal state."""
         terminals = {
             f":terminal{n}": status.value for n, status in enumerate(TERMINAL_STATUSES)
         }

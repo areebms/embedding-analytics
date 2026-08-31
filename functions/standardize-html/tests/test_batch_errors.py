@@ -53,6 +53,17 @@ def test_a_book_already_in_flight_refuses_the_whole_call(scraped_book, seed):
         get_entries([INDEX, INDEX_2])
 
 
+def test_a_book_left_unresolved_by_a_batch_is_submittable_again(scraped_book, seed):
+    """The batch it was in came back with nothing to apply, so it still has no
+    classification and only a fresh request can give it one. It is not in flight, so
+    naming it costs the caller nothing -- unlike STANDARDIZE_SUBMITTED, which refuses
+    the whole call."""
+    scraped_book()
+    seed(EntryStatus.STANDARDIZE_UNRESOLVED, INDEX_2)
+
+    assert {entry.book_id for entry in get_entries([INDEX, INDEX_2])} == {INDEX, INDEX_2}
+
+
 def test_a_book_with_no_headings_is_skipped_rather_than_submitted(
     scraped_book, send_client, entries
 ):

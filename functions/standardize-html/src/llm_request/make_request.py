@@ -2,12 +2,14 @@ import logging
 
 from book_records.io import save_batch_index, save_book_tag_text_pairs
 from book_records.utils import get_book_tag_text_pairs
-from constants import BATCH_ENDED
+from constants import BATCH_ENDED, MAX_BOOKS_PER_SUBJECT
 from llm_request.send_anthropic_request import send_message_batch
 from shared.tables.pipeline_entries import EntryStatus, get_pipeline_entries
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+PENDING = (EntryStatus.SCRAPED_HTML, EntryStatus.STANDARDIZE_UNRESOLVED)
 
 
 class BooksInFlightError(Exception):
@@ -31,7 +33,25 @@ def get_entries(book_ids):
             f"{[str(entry.book_id) for entry in submitted_entries]}"
         )
 
-    return [entry for entry in entries if entry.status == EntryStatus.SCRAPED_HTML]
+    return [entry for entry in entries if entry.status in PENDING]
+
+
+def resolve_subject(subject_id):
+    book_ids = get_pipeline_entries().get_indexes(
+        status=EntryStatus.SCRAPED_HTML, subject_id=subject_id
+    )
+
+    if len(book_ids) > MAX_BOOKS_PER_SUBJECT:
+        logger.info(
+            "%s resolved %d books; taking the first %d, the rest keep SCRAPED_HTML "
+            "for the next run.",
+            subject_id,
+            len(book_ids),
+            MAX_BOOKS_PER_SUBJECT,
+        )
+        book_ids = book_ids[:MAX_BOOKS_PER_SUBJECT]
+
+    return book_ids
 
 
 def submit(pending_entries):

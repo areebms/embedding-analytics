@@ -7,13 +7,14 @@ Classifies every heading in a subject's books into a semantic block and rewrites
 book as `h2`/`h3` prose. The work runs in two stages, selected by the field the
 payload carries, because the Anthropic Batch API is asynchronous: `book_ids` runs `SEND`,
 which opens a batch and returns without waiting, and `batch_id` runs `RETRIEVE`, which
-settles it once it has ended.
+settles it once it has ended. `SEND` also answers to `subject_id`, which names the same
+work a different way.
 
-## `SEND` (`book_ids`)
+## `SEND` (`book_ids` or `subject_id`)
 
-Submits the headings of the books it is handed as one batch. The stage takes a
-`book_ids` work list and nothing else; it does not go looking for work of its own. Of
-those books, the ones at `SCRAPED_HTML` are submitted and the rest are passed over.
+Submits the headings of the books it is handed as one batch. Of those books, the ones at
+`SCRAPED_HTML` — and the ones a previous batch left at `STANDARDIZE_UNRESOLVED`, which
+still have no classification — are submitted, and the rest are passed over.
 
 The list is the caller's, because the caller already knows it: the scrape machine's
 `Map` puts the books it just took to `SCRAPED_HTML` into an EventBridge event, and the
@@ -33,8 +34,9 @@ keeps it. Re-running the subject is the recovery; re-scraping the book is not ne
 
 What does drop a book out of reach is narrower. A caught error puts it on the
 `book-failed` branch, whose output has no `status` for the filter to match, so it waits
-for the next run even if the table says `SCRAPED_HTML`. And a book that falls below
-`MAX_BOOKS_PER_SUBJECT` in the listing stops being handed over at all.
+for the next run even if the table says `SCRAPED_HTML`. The `subject_id` cap is not one
+of these: a book past `MAX_BOOKS_PER_SUBJECT` keeps `SCRAPED_HTML` and comes back on the
+next run ([below](#naming-the-work-by-subject-instead)).
 
 1. Loads each book's raw `html/{index}.html` and reduces it to `(tag, text)` prose
    blocks, dropping the Project Gutenberg license wrapper and the printed page numbers
@@ -60,6 +62,35 @@ for later — and a subject that is already mid-batch stops there instead of fai
 
 Two subjects can still be in flight at once — each batch settles on its own `batch_id`
 and its own manifest, and a subject only blocks a run whose `book_ids` overlap it.
+
+### Naming the work by subject instead
+
+`subject_id` is the same stage reached a different way: the books under that subject
+still at `SCRAPED_HTML` become the list, capped at `MAX_BOOKS_PER_SUBJECT`, and the
+submit proceeds from there. It is for the case the `book_ids` handover is awkward for —
+re-running a subject by hand, where assembling up to `MAX_BOOKS_PER_SUBJECT` ids is the
+whole difficulty. An empty result is not refused the way an empty `book_ids` is: nothing was
+handed over to be wrong about, so it reports `batch_id: null` with `batch_status: ended`
+and opens nothing.
+
+**Where it differs from naming the same books outright.** A `book_ids` list containing a
+book already at `STANDARDIZE_SUBMITTED` refuses the whole call with
+`BooksInFlightError` — the caller named a book it should not have, and is told. A
+subject containing one never reaches that check: the `SCRAPED_HTML` filter drops the
+in-flight book while assembling the list, and the rest of the subject submits. Neither
+opens a second batch over a book in flight, which is the property that matters; they
+differ in whether the caller hears about it. For a re-run-a-subject command that is the
+behaviour you want — the books still in flight are precisely the ones the previous run
+is already handling.
+
+The cap is there because this is the one path whose size the caller does not set. A
+subject accumulates books at `SCRAPED_HTML` across runs, so an uncapped expansion opens
+a batch whose cost is only known once it is open. Books over the limit keep
+`SCRAPED_HTML` and come back on the next run, which makes re-invoking the drain. The
+list is id-sorted, so the same subject resolves to the same slice twice. Note what the
+cap does not bound: the Scan itself still costs table size rather than result size,
+because `subject_ids` is a set and no index can key on it
+(`shared/tables/pipeline_entries.py`).
 
 The return carries `batch_id`, `book_count`, and `batch_status` — the same
 `batch_status` field `RETRIEVE` reports, so one caller-side branch reads both stages.
@@ -99,7 +130,7 @@ from the manifest `SEND` already wrote.
 |---|---|---|
 | `standardize-html/batch-details/{batch_id}.json` | `SEND` | The book ids one batch was opened over, plus the `llm_batch_id` it belongs to |
 | `standardize-html/books/{index}.json` | `SEND` | One book's `(tag, text)` blocks |
-| `html-standardized/{index}.html` | `RETRIEVE` | `h2`/`h3`/`p` only, no attributes and no styling |
+| `html-standardized/{index}.html` | `RETRIEVE` | `h2`/`h3`/`p` only, each carrying its `data-block` classification, and no styling |
 | `text/{index}.txt` | `RETRIEVE` | Body text, one block per paragraph/heading, blocks separated by a blank line |
 
 The book manifests are one object per book rather than one per batch: the extracted text
@@ -111,8 +142,8 @@ first batch still needs in order to be collected. The batch is also named inside
 `RETRIEVE` checks against the id it was invoked with.
 
 Nothing else records the batch id: it reaches `RETRIEVE` through `SEND`'s return value,
-carried between the two by the standardize machine, which has one entry point and takes
-`book_ids` only. A collect that failed is resumed with `aws stepfunctions
+carried between the two by the standardize machine, which has one entry point, reached by
+`book_ids` and `subject_id` alike. A collect that failed is resumed with `aws stepfunctions
 redrive-execution` on that execution — Step Functions reschedules the failed poll with the
 `batch_id` it had recorded, so the id never has to be carried back by hand
 ([Recovering a batch](../../docs/operations.md#recovering-a-batch)). Past redrive's 14-day
@@ -196,7 +227,7 @@ line late and the byline welds into the book's name.
 `render_html` titles the page from the record alone. Nothing is lost by dropping the
 printed title page, because no book can reach this stage without a record:
 `scrape_book_metadata` uploads it before it advances the status
-(`functions/scrape/src/scrape.py:101-110`), and `RETRIEVE` only selects entries at
+(`functions/scrape/src/scrape.py:101-110`), and `SEND` only selects entries at
 `SCRAPED_HTML`, two transitions further on. Classifying a title page duplicated metadata
 already in hand.
 
@@ -215,16 +246,43 @@ n≥3 — Sonnet 5 has no `temperature`, and the same prompt has returned both 1
 
 Both halves of `RETRIEVE` isolate per book. `yield_anthropic_content` logs and skips an
 errored, cancelled or truncated result instead of raising, and `standardize_from_batch`
-catches anything the render throws. A skipped book is never yielded, so it keeps
-`STANDARDIZE_SUBMITTED` and is named in the returned `failed` list for a later collect.
+catches anything the render throws. What happens next is not the same for the two. A
+render that threw puts the book in the returned `failed` list, and a later collect renders
+it again from the same manifest. A skipped book is never yielded at all, so it reaches
+neither that list nor the render: it appears only in the log line naming the books the
+batch returned no usable result for.
+
+That book moves to `STANDARDIZE_UNRESOLVED` rather than keeping
+`STANDARDIZE_SUBMITTED`, and the status guard is the whole reason for the extra status.
+Left in flight the book was unreachable: a later collect streams the same stored result
+and skips it identically, `SEND` refuses a `book_ids` list naming a book in flight, and
+the guard will not take a status backwards to `SCRAPED_HTML`. `STANDARDIZE_UNRESOLVED`
+ranks *after* `STANDARDIZE_SUBMITTED`, so moving to it is a forward step the guard
+already allows, and it takes the book out of flight.
+
+Nothing resubmits it on its own. The scrape machine hands over the books it just moved to
+`SCRAPED_HTML`, and `resolve_subject` asks the status index for that one status, so
+neither automated path picks this one up — which is deliberate: a book that fails the same
+way every time would otherwise be paid for on every run. What the status buys is that an
+operator naming it in `book_ids` now opens a batch over it instead of being refused.
 
 The alternative is worse than it looks. Raising ends the results iteration, so every book
 after it in the stream goes uncollected — and permanently, because a re-run streams the
 same results and stops at the same item. The batch could never settle, with a paid-for
 batch behind it and redrive's 14-day clock running.
 
-A truncated reply is still never *applied*: it is missing its last lines, and the ones it
-did return would land on the wrong headings.
+A truncated reply is still never *applied*, and salvaging one is a worse trade than it
+looks. Every line carries its own `<position>`, so the lines that did arrive would land on
+the right headings and the missing tail would take `DEFAULT_BLOCK` — the path an
+unclassified heading already takes. What stops it is where a truncation falls. The tail of
+a book is where the index lives, and an index defaulting to `section` is an index that
+stays in `text/`, which is the one outcome the block vocabulary exists to prevent. A
+resubmit gets a whole reply; half of one quietly does not.
+
+`max_output_tokens` is what makes the case reachable at all: it budgets
+`heading_count * 12 + 100` but caps that at `MAX_OUTPUT_TOKENS`, so past about 1,300
+headings the budget stops scaling with the book and its margin over the reply's real
+length shrinks until it runs out.
 
 ## Re-classifying a book
 
@@ -244,8 +302,10 @@ This function's `src/` owns both halves of the wire format. `llm_request/` build
 prompt and sends the batch; `llm_response/` reads the lines that come back onto a book's
 headings — `fetch.py` pulls the batch results, `standardize.py` is the settle loop, and
 `save_artifacts.py` writes the two artifacts. `book_records/` is what both work on:
-`reduce_html.py` turns a scraped page into `(tag, text)` blocks, and `keys.py` names every
-S3 object the stage writes.
+`reduce_html.py` turns a scraped page into `(tag, text)` blocks, and `schemas.py` holds the
+models, `BatchDetail` among them — which also names the two S3 keys scoped to a batch
+rather than a book. Every per-book key is a `PipelineEntry` property in
+`shared.tables.pipeline_entries`, reached off the entry rather than rebuilt here.
 
 `constants.py` sits above both, because it is the one thing they have to agree on: the
 semantic blocks a reply may name, the heading level each one renders as, and which tags
@@ -262,5 +322,15 @@ aws lambda invoke --function-name $LAMBDA_PREFIX-standardize-html \
 
 aws lambda invoke --function-name $LAMBDA_PREFIX-standardize-html \
     --payload '{"batch_id":"msgbatch_..."}' out.json
-# {"batch_id": "...", "batch_status": "ended", "standardized": 41}
+# {"batch_id": "...", "batch_status": "ended", "standardized": 41, "failed": []}
+
+# The same SEND, over the subject's pending books rather than a named list. It opens a
+# batch -- there is no dry run.
+aws lambda invoke --function-name $LAMBDA_PREFIX-standardize-html \
+    --payload '{"subject_id":"12345"}' out.json
+# {"batch_id": "msgbatch_...", "book_count": 42, "batch_status": "in_progress"}
 ```
+
+Prefer starting the machine over invoking the Lambda for that last one: the poll loop is
+what collects the batch, and `standardize.asl.json` takes `{ "subject_id": ... }` as an
+input directly ([Re-running a subject](../../docs/operations.md#re-running-a-subject)).

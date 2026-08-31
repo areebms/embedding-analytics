@@ -12,6 +12,8 @@ MAX_OUTPUT_TOKENS = 16000
 
 BATCH_ENDED = "ended"
 
+MAX_BOOKS_PER_SUBJECT = 50
+
 VALID_BLOCKS = ", ".join(SEMANTIC_BLOCK_TO_LEVEL)
 
 SYSTEM_PROMPT = f"""Classify headings extracted from OCR'd book HTML into structural semantic blocks. Heading tag levels come from the printed font size. They are reliable within a single book because the printer set higher levels in larger type: headings sharing a tag almost always share a semantic block, and a smaller tag appearing under a larger one is subordinate to it. However, their absolute value means nothing across books. A chapter heading is h4 in one book and h2 in another. 

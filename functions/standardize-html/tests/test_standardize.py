@@ -264,6 +264,7 @@ def test_a_batch_still_running_is_left_alone(submitted_batch, collect_client, en
         "batch_id": BATCH_ID,
         "batch_status": "in_progress",
         "standardized": 0,
+        "book_ids": [],
         "failed": [],
     }
     assert status_of(entries, INDEX) == EntryStatus.STANDARDIZE_SUBMITTED
@@ -297,7 +298,7 @@ def test_a_result_for_a_book_this_batch_never_carried_is_passed_over(
 
     assert status["standardized"] == 0
     assert "unknown custom_id gutenberg-9999" in caplog.text
-    assert status_of(entries, INDEX) == EntryStatus.STANDARDIZE_SUBMITTED
+    assert status_of(entries, INDEX) == EntryStatus.STANDARDIZE_UNRESOLVED
 
 
 def test_one_unreadable_reply_does_not_strand_the_rest_of_the_batch(
@@ -322,11 +323,36 @@ def test_one_unreadable_reply_does_not_strand_the_rest_of_the_batch(
     assert status_of(entries, INDEX_2) == EntryStatus.STANDARDIZED
 
 
-def test_a_book_the_batch_answered_for_nobody_stays_in_flight(
+def test_book_ids_carries_only_the_books_that_reached_standardized(
+    submitted_batch, collect_client, entries
+):
+    """`book_ids` is the handover to tokenize, and it is not the batch's book list.
+
+    A book that could not be rendered stays at STANDARDIZE_SUBMITTED, and naming it here
+    would hand tokenize a book with no `text/` object to read. The event carries what
+    actually moved."""
+    submitted_batch(indexes=(INDEX, INDEX_2))
+    collect_client(
+        responses=[
+            succeeded_response(str(INDEX), text="I could not do that."),
+            succeeded_response(str(INDEX_2)),
+        ]
+    )
+
+    status = standardize_from_batch(BATCH_ID)
+
+    assert status["book_ids"] == [str(INDEX_2)]
+    assert status["standardized"] == len(status["book_ids"])
+
+
+def test_a_book_the_batch_answered_for_nobody_is_taken_out_of_flight(
     submitted_batch, collect_client, entries, caplog
 ):
-    """It keeps STANDARDIZE_SUBMITTED, so re-running the subject will not resubmit it
-    behind the operator's back -- the batch is settled by hand from the log line."""
+    """Leaving it at STANDARDIZE_SUBMITTED stranded it: a later collect streams the same
+    stored result and skips it again, SEND refuses a call naming a book in flight, and
+    the status guard will not take it back to SCRAPED_HTML. STANDARDIZE_UNRESOLVED is a
+    forward move, so the guard allows it, and it is what makes the book reachable again.
+    Still nothing resubmits it on its own -- that is the operator's `book_ids` call."""
     submitted_batch(indexes=(INDEX, INDEX_2))
 
     collect_client(responses=[succeeded_response(str(INDEX))])
@@ -334,6 +360,6 @@ def test_a_book_the_batch_answered_for_nobody_stays_in_flight(
         status = standardize_from_batch(BATCH_ID)
 
     assert status["standardized"] == 1
-    assert status_of(entries, INDEX_2) == EntryStatus.STANDARDIZE_SUBMITTED
+    assert status_of(entries, INDEX_2) == EntryStatus.STANDARDIZE_UNRESOLVED
     assert "1 book(s) had no result" in caplog.text
     assert str(INDEX_2) in caplog.text

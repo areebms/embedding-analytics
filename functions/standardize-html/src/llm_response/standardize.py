@@ -1,15 +1,9 @@
 import logging
 
-from shared.tables.pipeline_entries import (
-    EntryStatus,
-    get_pipeline_entries,
-)
+from shared.tables.pipeline_entries import EntryStatus, get_pipeline_entries
 
 from book_records.io import load_batch_index
-from book_records.schemas import (
-    StandardizedBlock,
-    TagTextPair,
-)
+from book_records.schemas import StandardizedBlock, TagTextPair
 from constants import (
     BATCH_ENDED,
     DEFAULT_BLOCK,
@@ -101,13 +95,6 @@ def standardize_tag_text_pairs(
 
         semantic_block = semantic_blocks.pop(position, None)
         if semantic_block is None:
-            # A heading with no classification takes the default rather than the block
-            # around it. Inheriting is right for a paragraph, which belongs to the
-            # chapter it sits in, and wrong for a heading, which sits *under* what
-            # precedes it: a subsection beneath a chapter would be promoted into a
-            # chapter of its own. Replaying the two collected batches with a label
-            # removed, inheritance invented 474 chapters the books do not have and
-            # changed 7,609 blocks; defaulting changed 296 and invented none.
             semantic_block = DEFAULT_BLOCK
             defaulted.append(position)
 
@@ -133,8 +120,7 @@ def standardize_tag_text_pairs(
 
 
 def standardize_from_batch(batch_id):
-    """Settle one submitted batch, if it has finished.
-    """
+    """Settle one submitted batch, if it has finished."""
     client = get_client()
 
     batch_status = get_batch_status(client, batch_id)
@@ -143,13 +129,14 @@ def standardize_from_batch(batch_id):
             "batch_id": batch_id,
             "batch_status": batch_status,
             "standardized": 0,
+            "book_ids": [],
             "failed": [],
         }
 
     entries = get_pipeline_entries().get_entries(load_batch_index(batch_id).book_ids)
     pending = {str(entry.book_id): entry for entry in entries}
 
-    standardized = 0
+    standardized = []
     failed = []
 
     for custom_id, content in yield_anthropic_content(client, batch_id):
@@ -167,29 +154,38 @@ def standardize_from_batch(batch_id):
             save_html(entry, standardized_tag_text_pairs, book_tag_text_pairs.title)
             save_text(entry, standardized_tag_text_pairs)
         except Exception:
-            logger.exception("batch %s: %s could not be rendered; left at %s",
-                             batch_id, entry.book_id, EntryStatus.STANDARDIZE_SUBMITTED)
+            logger.exception(
+                "batch %s: %s could not be rendered; left at %s",
+                batch_id,
+                entry.book_id,
+                EntryStatus.STANDARDIZE_SUBMITTED,
+            )
             failed.append(str(entry.book_id))
             continue
 
         get_pipeline_entries().set_status(entry.book_id, EntryStatus.STANDARDIZED)
-        standardized += 1
+        standardized.append(str(entry.book_id))
 
     if pending:
+        for entry in pending.values():
+            get_pipeline_entries().set_status(
+                entry.book_id, EntryStatus.STANDARDIZE_UNRESOLVED
+            )
         logger.warning(
-            "batch %s: %d book(s) had no result and remain at %s: %s",
+            "batch %s: %d book(s) had no result and move to %s: %s",
             batch_id,
             len(pending),
-            EntryStatus.STANDARDIZE_SUBMITTED,
+            EntryStatus.STANDARDIZE_UNRESOLVED,
             sorted(pending),
         )
 
     logger.info(
-        "batch %s: %d standardized, %d failed", batch_id, standardized, len(failed)
+        "batch %s: %d standardized, %d failed", batch_id, len(standardized), len(failed)
     )
     return {
         "batch_id": batch_id,
         "batch_status": batch_status,
-        "standardized": standardized,
+        "standardized": len(standardized),
+        "book_ids": standardized,
         "failed": failed,
     }

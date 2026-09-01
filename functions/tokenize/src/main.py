@@ -7,7 +7,7 @@ from shared.tables.pipeline_entries import (
     PipelineEntry,
     get_pipeline_entries
 )
-from tokenize_text import Token, tokenize_passage
+from tokenize_text import Token, tokenize_passages
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -90,10 +90,10 @@ def upload_passage_data(
 
 
 def tokenize_entry(entry: PipelineEntry) -> None:
-    """One book: spaCy over each passage, the three artifacts, then the status."""
+
     tokenized_passages: list[list[Token]] = []
-    for passage in yield_passages(entry):
-        tokenized_passages.append(tokenize_passage(passage))
+    for tokens in tokenize_passages(yield_passages(entry)):
+        tokenized_passages.append(tokens)
 
     if not tokenized_passages:
         raise ValueError(f"{entry.s3_text_key} holds no passages")

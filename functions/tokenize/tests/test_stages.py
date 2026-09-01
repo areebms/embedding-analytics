@@ -160,14 +160,17 @@ def test_one_failing_book_does_not_end_the_run(
     standardized_book(INDEX)
     standardized_book(INDEX_2, text="This passage explodes.")
 
-    real_tokenize_passage = main.tokenize_passage
+    real_tokenize_passages = main.tokenize_passages
 
-    def exploding_tokenize_passage(passage):
-        if "explodes" in passage:
-            raise RuntimeError("spaCy fell over")
-        return real_tokenize_passage(passage)
+    def exploding_tokenize_passages(passages):
+        """Raises mid-stream, the way spaCy would: the books are batched now, so the
+        seam is the generator over a book's passages rather than a single passage."""
+        for passage in passages:
+            if "explodes" in passage:
+                raise RuntimeError("spaCy fell over")
+            yield from real_tokenize_passages([passage])
 
-    monkeypatch.setattr(main, "tokenize_passage", exploding_tokenize_passage)
+    monkeypatch.setattr(main, "tokenize_passages", exploding_tokenize_passages)
 
     status = app.handler({"book_ids": [str(INDEX), str(INDEX_2)]}, None)
 

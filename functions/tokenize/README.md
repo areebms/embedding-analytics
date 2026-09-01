@@ -79,9 +79,43 @@ book tokenized after it gives those two nothing to read — `train-kvector` repo
 untokenized and exits, `publish` raises a `KeyError`. They need to derive the keys from
 the book id before either runs on a newly tokenized book.
 
-The 2048 MB / 900s sizing in `infra/services.yaml` has never been profiled in Lambda:
-those are the numbers that make the stage runnable, not measured ones. 900s is the Lambda
-ceiling and a full backlog can reach it — measure before trusting either.
+## Sizing, measured
+
+Profiled on the Gutenberg corpus (`nltk.corpus.gutenberg`, 1.1M characters across eight
+books), pinned to one core so the numbers mean what Lambda would give:
+
+| | throughput | a 50-book backlog |
+|---|---|---|
+| a `Doc` at a time (before) | 71 Kchar/s | ~420s |
+| `nlp.pipe(batch_size=32)` | 128 Kchar/s | ~235s |
+
+**1.8× on the same output** — the three artifacts are byte-identical across 244k token
+tuples, because nothing about the model or the pipeline changed, only how many passages
+it is handed per call. 32 is the knee: 48 and 64 measure the same and only hold more
+`Doc`s live, and spaCy's own default of 1000 is worse than 32 on a book of paragraphs.
+
+Sizing is now 1769 MB, down from 2048. Lambda scales CPU with memory and hands out a
+full vCPU at 1769 MB, and this stage cannot use more than one: it runs in a single OS
+thread, on thinc's `NumpyOps`, against a blis built without threading. The extra 279 MB
+was buying CPU no part of the process could reach. Capacity is not the constraint either
+— peak RSS is ~520 MB on the longest book in the corpus.
+
+Going *higher* only pays with `nlp.pipe(n_process=)`, and that measured badly: the child
+processes pickle their `Doc`s back and the parent deserializes them one at a time, so two
+vCPUs bought 1.12× the speed for 2× the memory — 1.8× the bill. Three bought 1.33× for
+3×. The stage stays single-process.
+
+900s is the Lambda ceiling. A full `MAX_BOOKS_PER_SUBJECT` backlog now fits with room
+(~440s even if every book were the length of *Moby-Dick*); a timeout still leaves the
+finished books at `TOKENIZED` and the rest at `STANDARDIZED`, so recovery is to re-run.
+
+One thing the profile did *not* buy: disabling the parser. Nothing here reads a
+dependency, so it looks free to drop — but `attribute_ruler` refines `pos_` from the
+parse, and without it auxiliaries move from `VERB` to `AUX`, fall out of
+`SPACY_TO_WORDNET`, and stop lemmatizing: "had" stays "had" instead of collapsing to
+"have". That is 0.32% of tokens for another 1.8×, and it is a change to what the corpus
+trains on rather than a speedup, so the parser stays. `ner` remains the only component
+disabled.
 
 
 ## Spelling normalization

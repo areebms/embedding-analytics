@@ -4,21 +4,25 @@ Against the real model and the real WordNet, not mocks: what is asserted here is
 lemma a term ends up trained under, and a mocked pipeline would prove nothing about it.
 """
 
+from nltk.corpus import wordnet
+
 from tokenize_text import (
     AMERICAN_TO_BRITISH,
+    aggressively_lemmatize,
     get_nlp,
     get_related_verbs,
     ignored_nouns,
-    tokenize_passage,
+    tokenize_passages,
 )
 
 
 def lemmas(passage):
-    return {token.text: token.lemma for token in tokenize_passage(passage)}
+    [tokens] = tokenize_passages([passage])
+    return {token.text: token.lemma for token in tokens}
 
 
 def test_a_token_keeps_its_text_and_tag_beside_the_lemma():
-    tokens = tokenize_passage("The greatest improvement in the productive powers.")
+    [tokens] = tokenize_passages(["The greatest improvement in the productive powers."])
 
     assert [token.text for token in tokens][:3] == ["The", "greatest", "improvement"]
     assert [token.tag for token in tokens][:3] == ["DT", "JJS", "NN"]
@@ -26,7 +30,7 @@ def test_a_token_keeps_its_text_and_tag_beside_the_lemma():
 
 def test_a_token_with_no_letters_gets_an_empty_lemma():
     """The row still carries it, so the three artifacts stay token-aligned."""
-    tokens = tokenize_passage("Wealth, indeed!")
+    [tokens] = tokenize_passages(["Wealth, indeed!"])
 
     assert [token.text for token in tokens] == ["Wealth", ",", "indeed", "!"]
     assert [token.lemma for token in tokens] == ["wealth", "", "indeed", ""]
@@ -66,14 +70,16 @@ def test_a_noun_collapses_to_its_derivationally_related_verb():
 
 
 def test_a_noun_on_the_override_list_keeps_its_own_lemma():
-    """`building` has `build` in WordNet; `ignored_nouns.txt` is what stops the
-    collapse, so the same lemma is asserted both with and without the entry."""
+    """`building` has `build` in WordNet -- `get_related_verbs` finds it either way.
+    `ignored_nouns.txt` is what stops the collapse, so the lemma is asserted both with
+    and without the entry."""
     assert "building" in ignored_nouns
-    assert get_related_verbs("building") is None
+    assert get_related_verbs("building") == "build"
+    assert aggressively_lemmatize("building", wordnet.NOUN) == "building"
 
     ignored_nouns.discard("building")
     try:
-        assert get_related_verbs("building") == "build"
+        assert aggressively_lemmatize("building", wordnet.NOUN) == "build"
     finally:
         ignored_nouns.add("building")
 

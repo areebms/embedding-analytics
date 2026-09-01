@@ -1,3 +1,0 @@
--r requirements.txt
--r requirements-test.txt
-python-dotenv==1.2.2

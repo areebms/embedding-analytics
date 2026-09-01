@@ -40,30 +40,6 @@ services:
       - ./functions/tokenize/src/main.py:/var/task/main.py
       - ./functions/tokenize/src/ignored_nouns.txt:/var/task/ignored_nouns.txt
 
-  lambda-train-kvector:
-    image: lambda-train-kvector:local
-    env_file:
-    - .env
-    build:
-      context: .
-      target: local
-      dockerfile: functions/train-kvector/Dockerfile
-    volumes:
-      - ./functions/train-kvector/src/app.py:/var/task/app.py
-      - ./functions/train-kvector/src/main.py:/var/task/main.py
-
-  lambda-align-kvectors:
-    image: lambda-align-kvectors:local
-    env_file:
-    - .env
-    build:
-      context: .
-      dockerfile: functions/align-kvectors/Dockerfile
-    volumes:
-      - ./functions/align-kvectors/src/app.py:/var/task/app.py
-      - ./functions/align-kvectors/src/create_book_centroid.py:/var/task/create_book_centroid.py
-      - ./functions/align-kvectors/src/procrustes_utils.py:/var/task/procrustes_utils.py
-
   lambda-publish:
     image: lambda-publish:local
     env_file:

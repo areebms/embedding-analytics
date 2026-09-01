@@ -1,10 +1,4 @@
-"""Round-trip coverage for the S3 helpers.
-
-The three stages that still read and write through this module -- publish,
-train-kvector, align-kvectors -- verify none of it: publish's suite errors in setup,
-train-kvector has no tests, and align-kvectors' suite runs against real S3 and only
-exercises the alignment math. These are what actually run the module.
-"""
+"""Round-trip coverage for the S3 helpers."""
 
 import json
 

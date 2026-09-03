@@ -18,6 +18,11 @@ services:
     timeout: 900
     env: [S3_BUCKET, PIPELINE_TABLE]
 
+  create-embeddings:
+    memory: 1536
+    timeout: 600
+    env: [S3_BUCKET, PIPELINE_TABLE]
+
   publish:
     memory: 512
     timeout: 300

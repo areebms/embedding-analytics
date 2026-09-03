@@ -84,6 +84,7 @@ def test_s3_keys_are_derived_from_the_index():
     assert entry.s3_token_texts_key == "token_texts/gutenberg-3300.csv"
     assert entry.s3_token_lemmas_key == "token_lemmas/gutenberg-3300.csv"
     assert entry.s3_token_tags_key == "token_tags/gutenberg-3300.csv"
+    assert entry.s3_prefix_models == "embeddings/gutenberg-3300/"
 
 
 def test_s3_keys_are_never_written_to_the_table(pipeline_entries):

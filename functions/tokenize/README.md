@@ -1,9 +1,9 @@
 # tokenize
 
-*Stage 3 of 6. [Pipeline overview](../../docs/internals.md) · [Project README](../../README.md)*
+*Stage 2 of 5. [Pipeline overview](../../docs/internals.md) · [Project README](../../README.md)*
 **Libraries:** spaCy (`en_core_web_sm`), NLTK, WordNet
 
-Turns a standardized book's text into the passage rows `train-kvector` trains on. Takes
+Turns a standardized book's text into the passage rows `create-embeddings` trains on. Takes
 books at `STANDARDIZED` and leaves them at `TOKENIZED`.
 
 The payload names the work, as in `standardize-html`: `book_ids` is the standardize
@@ -13,7 +13,7 @@ naming no books is refused rather than read as "everything at `STANDARDIZED`". O
 invocation takes the whole list, so the model is loaded once and a book that raises is
 counted in `failed` and left at `STANDARDIZED` rather than ending the run. A book whose
 text holds no passages raises for that same reason: three 0-row CSVs at `TOKENIZED`
-would hand `train-kvector` a book of nothing, so it is counted in `failed` and the
+would hand `create-embeddings` a book of nothing, so it is counted in `failed` and the
 standardize output gets looked at. Out: `{ found, tokenized, failed }`, where `found`
 is how many of the named books were at `STANDARDIZED`, not how many were named.
 

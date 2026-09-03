@@ -40,6 +40,20 @@ services:
       - ./functions/tokenize/src/main.py:/var/task/main.py
       - ./functions/tokenize/src/ignored_nouns.txt:/var/task/ignored_nouns.txt
 
+  lambda-create-embeddings:
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${AWS_ECR_REPO}/lambda-create-embeddings:0.1
+    env_file:
+    - .env
+    build:
+      context: .
+      target: local
+      dockerfile: functions/create-embeddings/Dockerfile
+    volumes:
+      - ./functions/create-embeddings/src/app.py:/var/task/app.py
+      - ./functions/create-embeddings/src/create_embeddings.py:/var/task/create_embeddings.py
+      - ./functions/create-embeddings/src/constants.py:/var/task/constants.py
+      - ./functions/create-embeddings/src/ppmi_svd.py:/var/task/ppmi_svd.py
+
   lambda-publish:
     image: lambda-publish:local
     env_file:

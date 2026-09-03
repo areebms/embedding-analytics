@@ -141,7 +141,7 @@ def test_a_book_with_no_pipeline_entry_is_reported_and_skipped(aws, caplog):
 def test_a_book_whose_text_has_no_passages_fails_instead_of_advancing(
     standardized_book, bucket, entries
 ):
-    """Three 0-row CSVs at TOKENIZED would hand train-kvector a book of no passages;
+    """Three 0-row CSVs at TOKENIZED would hand create-embeddings a book of no passages;
     the standardize output is what needs looking at."""
     index = standardized_book(text="\n\n   \n\n")
 

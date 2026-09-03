@@ -168,7 +168,7 @@ off `Inner`.
 Page numbers have to go in the same change, not after it. They sit *between* two words of
 a sentence, so once inline elements stop implying a space the number fuses onto the next
 word — `regulate this iv distribution` becomes `regulate this ivdistribution`, long
-enough to survive [train-kvector](../train-kvector/)'s `len(word) > 3` filter where the
+enough to survive [create-embeddings](../create-embeddings/)'s `len(word) > 3` filter where the
 separated form was harmlessly discarded. Stripping them alone, or closing the spaces
 alone, each leaves the text worse than doing both.
 

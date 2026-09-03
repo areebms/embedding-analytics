@@ -1,7 +1,7 @@
 from enum import StrEnum
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, PlainSerializer, PlainValidator
+from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, PlainValidator
 from boto3.dynamodb.conditions import Key
 
 from shared.commons import BookIndex
@@ -22,6 +22,7 @@ class EntryStatus(StrEnum):
     STANDARDIZE_UNRESOLVED = "0201_STANDARDIZE_UNRESOLVED"
     STANDARDIZED = "0250_STANDARDIZED"
     TOKENIZED = "0300_TOKENIZED"
+    EMBEDDED = "0400_EMBEDDED"
 
     @property
     def is_terminal(self) -> bool:
@@ -45,7 +46,7 @@ class PipelineEntry(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     book_id: BookIndexField
-    subject_ids: set[BookIndexField]
+    subject_ids: set[BookIndexField] = Field(default_factory=set)
     status: EntryStatus | None = None
 
     @property
@@ -79,6 +80,10 @@ class PipelineEntry(BaseModel):
     @property
     def s3_token_tags_key(self) -> str:
         return f"token_tags/{self.book_id}.csv"
+
+    @property
+    def s3_prefix_models(self) -> str:
+        return f"embeddings/{self.book_id}/"
 
 
 _pipeline_entries = None

@@ -1,6 +1,6 @@
 # scrape
 
-*Stage 1 of 6. [Pipeline overview](../../docs/internals.md) · [Project README](../../README.md)*
+*Stage 1 of 5. [Pipeline overview](../../docs/internals.md) · [Project README](../../README.md)*
 **Libraries:** BeautifulSoup, Requests
 
 Fetches a Project Gutenberg book by ID and writes it to S3 exactly as fetched, in two

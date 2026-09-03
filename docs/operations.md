@@ -9,15 +9,7 @@ system rather than to a single one. Stage-specific mechanics live in
 ## Orchestration
 
 ```text
-scrape → tokenize → train-kvector Map(N seeds) → align-kvectors → publish
-```
-
-`train-kvector` runs as a Step Functions Map state, so each seed is an
-independent Lambda invocation. Earlier steps carry the `seeds` array through
-output transforms, keeping orchestration logic out of the handlers.
-
-```json
-{ "index": "gutenberg-3300", "seeds": [1, 2, 3, 4, 5] }
+scrape → tokenize → create-embeddings → publish
 ```
 
 The state machine definition lives at `infra/step-functions/pipeline.asl.json`, rendered
@@ -353,12 +345,15 @@ convention, not an API-specific mechanism.
 | `scrape` | 256 MB | 120s | I/O-bound HTTP fetch |
 | `standardize-html` | 1024 MB | 600s | Holds every pending book's flattened text while building one batch |
 | `tokenize` | 512 MB | 120s | spaCy model needs headroom |
-| `train-kvector` | 1536 MB | 600s | CPU-bound Word2Vec training |
-| `align-kvectors` | 256 MB | 120s | NumPy/SciPy on pre-loaded vectors |
+| `create-embeddings` | 1536 MB | 600s | PPMI/SVD over sentence-bootstrap replicates |
 | `publish` | 512 MB | 300s | Loads all models + batch writes |
 | `api` | 1024 MB | 120s | Holds every requested book's term matrices in memory |
 
 Edit `infra/services.yaml` to change these.
+
+`create-embeddings`'s 1536 MB comes from measurement: one book takes 21.7s and roughly
+490 MB peak RSS locally on a 10,000-sentence, 190,000-token synthetic book at V=3,206,
+and a 256 MB Lambda gets a fraction of a vCPU.
 
 ### Environment
 
@@ -421,7 +416,7 @@ are still `deploy_lambdas.sh`.
 ./infra/deploy.sh scrape                 # the scrape pipeline, alone
 ./infra/deploy.sh standardize            # the standardize pipeline, alone
 ./infra/deploy.sh relay                  # just the rule
-./infra/deploy_lambdas.sh tokenize train-kvector align-kvectors publish api
+./infra/deploy_lambdas.sh tokenize create-embeddings publish api
 ```
 
 `infra/deploy.sh` runs each service's suite inside the `test` stage of its Dockerfile,

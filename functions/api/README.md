@@ -1,6 +1,6 @@
 # api
 
-*Stage 6 of 6. [Pipeline overview](../../docs/internals.md) · [Project README](../../README.md)*
+*Stage 5 of 5. [Pipeline overview](../../docs/internals.md) · [Project README](../../README.md)*
 **Libraries:** FastAPI, Mangum, Pydantic, fastapi-cache, Redis, OpenAI
 
 Mangum runs FastAPI inside a Lambda Function URL. Redis caching is optional — the

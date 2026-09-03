@@ -6,7 +6,7 @@ directory; this page is the map.
 Content spanning more than one stage — orchestration, observability,
 configuration, deployment — lives in [Operations](./operations.md).
 
-Six containerized Lambda functions, each a single stage with its own resource
+Five containerized Lambda functions, each a single stage with its own resource
 profile. Artifacts flow through S3 during training; `publish` flattens everything
 into DynamoDB for sub-second API reads.
 
@@ -17,18 +17,16 @@ and resume safely.
 |---|---|---|
 | `scrape` | Gutenberg subject, then book ID | Pipeline rows, then HTML, text, and metadata in S3 |
 | `tokenize` | Raw text | Token, lemma, and POS-tag CSVs in S3 |
-| `train-kvector` | Token lemmas + seed | One trained Word2Vec model in S3 |
-| `align-kvectors` | N raw models | Procrustes-aligned models and centroid in S3 |
+| `create-embeddings` | Token lemmas | Centroid and replicate models in S3 |
 | `publish` | Aligned models + token metadata | Term vectors, counts, POS tags, stability metrics in DynamoDB and Pinecone |
 | `api` | HTTP request | Books, terms, semantic-drift, and parse responses as JSON |
 
 ```text
-scrape → tokenize → train-kvector Map(N seeds) → align-kvectors → publish
+scrape → tokenize → create-embeddings → publish
 ```
 
-`train-kvector` runs as a Step Functions Map state, so each seed is an
-independent Lambda invocation. The state machine templates, seed fan-out, and
-retry policy are cross-cutting orchestration concerns — see
+The state machine templates and retry policy are cross-cutting orchestration
+concerns — see
 [Operations § Orchestration](./operations.md#orchestration), which also covers the
 separate scrape machine that seeds a subject and scrapes every book in it.
 
@@ -36,8 +34,7 @@ separate scrape machine that seeds a subject and scrapes every book in it.
 |---|---|
 | `scrape` | [functions/scrape](../functions/scrape/README.md) |
 | `tokenize` | [functions/tokenize](../functions/tokenize/README.md) |
-| `train-kvector` | [functions/train-kvector](../functions/train-kvector/README.md) |
-| `align-kvectors` | [functions/align-kvectors](../functions/align-kvectors/README.md) |
+| `create-embeddings` | [functions/create-embeddings](../functions/create-embeddings/) |
 | `publish` | [functions/publish](../functions/publish/README.md) |
 | `api` | [functions/api](../functions/api/README.md) |
 

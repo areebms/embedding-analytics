@@ -63,7 +63,7 @@ graph TD
 
     subgraph Pipeline [Per-Book Pipeline]
         direction LR
-        SCR[Scrape] --> TOK[Tokenize] --> TRN["Train Word2Vec x N seeds"] --> ALN[Align Models] --> PUB[Publish Vectors]
+        SCR[Scrape] --> TOK[Tokenize] --> EMB[Create Embeddings] --> PUB[Publish Vectors]
     end
 
     SF --> Pipeline

@@ -1,6 +1,6 @@
 # publish
 
-*Stage 5 of 6. [Pipeline overview](../../docs/internals.md) · [Project README](../../README.md)*
+*Stage 4 of 5. [Pipeline overview](../../docs/internals.md) · [Project README](../../README.md)*
 **Libraries:** Gensim, NumPy
 
 Flattens S3 artifacts into DynamoDB rows. For each term present in the centroid,

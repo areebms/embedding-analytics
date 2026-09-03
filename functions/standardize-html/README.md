@@ -316,21 +316,21 @@ edit, and one the model invents anyway is rejected against the same map. The two
 are separate invocations because of *when* they run, not because they own different code.
 
 ```bash
-aws lambda invoke --function-name $LAMBDA_PREFIX-standardize-html \
+aws lambda invoke --function-name $ENV_PREFIX-standardize-html \
     --payload '{"book_ids":["gutenberg-3300"]}' out.json
 # {"batch_id": "msgbatch_...", "book_count": 42, "batch_status": "in_progress"}
 
-aws lambda invoke --function-name $LAMBDA_PREFIX-standardize-html \
+aws lambda invoke --function-name $ENV_PREFIX-standardize-html \
     --payload '{"batch_id":"msgbatch_..."}' out.json
 # {"batch_id": "...", "batch_status": "ended", "standardized": 41, "failed": []}
 
 # The same SEND, over the subject's pending books rather than a named list. It opens a
 # batch -- there is no dry run.
-aws lambda invoke --function-name $LAMBDA_PREFIX-standardize-html \
+aws lambda invoke --function-name $ENV_PREFIX-standardize-html \
     --payload '{"subject_id":"12345"}' out.json
 # {"batch_id": "msgbatch_...", "book_count": 42, "batch_status": "in_progress"}
 ```
 
 Prefer starting the machine over invoking the Lambda for that last one: the poll loop is
-what collects the batch, and `standardize.asl.json` takes `{ "subject_id": ... }` as an
+what collects the batch, and `standardize-html.asl.json` takes `{ "subject_id": ... }` as an
 input directly ([Re-running a subject](../../docs/operations.md#re-running-a-subject)).

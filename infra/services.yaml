@@ -1,6 +1,5 @@
 # infra/services.yaml
-# The service key is the Lambda function name (prefixed with LAMBDA_PREFIX at deploy
-# time) and the functions/<key>/ directory; its ECR image is lambda-<key>.
+
 default:
   memory: 256
   timeout: 120
@@ -15,7 +14,9 @@ services:
     env: [S3_BUCKET, PIPELINE_TABLE, ANTHROPIC_API_KEY]
 
   tokenize:
-    memory: 512
+    memory: 1769
+    timeout: 900
+    env: [S3_BUCKET, PIPELINE_TABLE]
 
   train-kvector:
     memory: 1536

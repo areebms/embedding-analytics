@@ -1,43 +1,46 @@
 #!/usr/bin/env python3.13
-import os
-
 import aws_cdk as cdk
 
-from stacks.pipeline_stack import PipelineStack
-from stacks.relay_stack import RelayStack
-
-app = cdk.App()
-
-# -c prefix=<name> to allow parallel deployment.
-prefix = app.node.try_get_context("prefix") or os.environ["LAMBDA_PREFIX"]
-
-env = cdk.Environment(
-    account=os.environ["AWS_ACCOUNT_ID"], region=os.environ["AWS_REGION"]
+import config
+from resources import (
+    build_function_from_container,
+    get_role,
+    build_standardize_trigger,
+    build_state_machine,
+    build_tokenize_trigger,
 )
 
-PipelineStack(
-    app,
-    f"{prefix}-scrape",
-    prefix=prefix,
-    service="scrape",
-    machine="scrape-pipeline",
-    env=env,
-)
+# The services CloudFormation owns. Adding one here is what deploys it; deploy.py then
+# picks it up off the synthesized assembly and gates its suite.
+DEPLOYED = ["scrape", "standardize-html", "tokenize"]
 
-standardize = PipelineStack(
-    app,
-    f"{prefix}-standardize",
-    prefix=prefix,
-    service="standardize-html",
-    machine="standardize",
-    env=env,
-)
 
-relay = RelayStack(app, f"{prefix}-relay", prefix=prefix, env=env)
+def build(outdir: str | None = None) -> cdk.App:
 
-# For deploy ordering.
-relay.add_stack_dependency(
-    standardize, "the rule targets the standardize machine by ARN"
-)
+    app = cdk.App(outdir=outdir)
+    stack = cdk.Stack(app, config.PREFIX)
 
-app.synth()
+    lambda_role = get_role(stack, "LambdaRole", "LAMBDA_ROLE_ARN")
+    sfn_role = get_role(stack, "SfnRole", "STEP_FUNCTION_ROLE_ARN")
+    rule_role = get_role(stack, "RuleRole", "PUT_EVENT_ROLE_ARN")
+
+    functions = {}
+    for name in DEPLOYED:
+        functions[name] = build_function_from_container(stack, service=name, role=lambda_role)
+
+    build_state_machine(stack, machine="scrape", role=sfn_role, calls=functions["scrape"])
+    standardize_machine = build_state_machine(
+        stack,
+        machine="standardize-html",
+        role=sfn_role,
+        calls=functions["standardize-html"],
+    )
+
+    build_standardize_trigger(stack, role=rule_role, standardize=standardize_machine)
+    build_tokenize_trigger(stack, tokenize=functions["tokenize"])
+
+    return app
+
+
+if __name__ == "__main__":
+    build().synth()

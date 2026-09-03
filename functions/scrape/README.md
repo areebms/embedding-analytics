@@ -51,7 +51,8 @@ The per-book state machine therefore invokes this function twice, with a `Choice
 between the two calls that ends the execution for a book marked
 `SCRAPED_SKIPPED_*` instead of sending it on to `tokenize`.
 
-The subject machine (`${LAMBDA_PREFIX}-scrape-pipeline`) invokes it once for the subject,
+The subject machine (`${ENV_PREFIX}-scrape`, deployed by the
+`${ENV_PREFIX}-scrape-pipeline` stack) invokes it once for the subject,
 then twice per book inside a `Map` running at `MaxConcurrency: 1`. The `SUBJECT` stage can
 also be driven on its own by the `aws lambda invoke` below, or by the CLI. See
 [Operations § Orchestration](../../docs/operations.md#orchestration).
@@ -64,7 +65,7 @@ stage's job — and the first thing the subject machine
 (`infra/scrape-pipeline.step-function.template.json`) runs:
 
 ```bash
-aws lambda invoke --function-name $LAMBDA_PREFIX-scrape \
+aws lambda invoke --function-name $ENV_PREFIX-scrape \
     --payload '{"stage":"SUBJECT","subject":"12345"}' out.json
 ```
 

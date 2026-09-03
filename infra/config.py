@@ -1,19 +1,20 @@
-"""resolves services.yaml + .env, and imports the IAM roles named there"""
+"""resolves services.yaml + .env"""
 
 import os
 from pathlib import Path
 
 import yaml
-from aws_cdk import aws_iam
-from constructs import Construct
 from dotenv import load_dotenv
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-INFRA_DIR = REPO_ROOT / "infra"
+INFRA_DIR = Path(__file__).resolve().parent
+REPO_ROOT = INFRA_DIR.parent
 SERVICES_FILE = INFRA_DIR / "services.yaml"
 ASL_DIR = INFRA_DIR / "step-functions"
 
 load_dotenv(REPO_ROOT / ".env", override=False)
+
+# Every physical name in the stack starts with this, and so does the stack itself.
+PREFIX = os.environ["ENV_PREFIX"]
 
 _services_doc = yaml.safe_load(SERVICES_FILE.read_text())
 _defaults = _services_doc.get("default", {})
@@ -50,11 +51,3 @@ def env_for(name: str) -> dict[str, str]:
     if missing:
         raise SystemExit(f"missing in .env: {', '.join(missing)}")
     return {n: os.environ[n] for n in names}
-
-
-def get_role(scope: Construct, construct_id: str, env_var: str) -> aws_iam.IRole:
-    """An existing role, named by ARN in .env and imported read-only.
-
-    Lives next to the load_dotenv above, which is what puts the ARN in the environment.
-    """
-    return aws_iam.Role.from_role_arn(scope, construct_id, os.environ[env_var], mutable=False)

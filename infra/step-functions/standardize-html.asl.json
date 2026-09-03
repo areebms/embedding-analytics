@@ -1,0 +1,192 @@
+{
+  "Comment": "Open one Anthropic batch over a list of books and poll it until it settles. Deployed as ${ENV_PREFIX}-standardize-html by the one ${ENV_PREFIX} stack -- the same name as the Lambda it calls, in a different ARN namespace -- and started by the ${ENV_PREFIX}-standardize-trigger rule off the scrape machine's 'Subject Books Scraped' event. Two ways in, and only the first is automated: { book_ids }, the scrape machine's handover, and { subject_id }, for re-running a subject by hand without assembling its ids. Both enter the same state, so there is no second path to keep in step. A poll that dies is resumed with `aws stepfunctions redrive-execution` rather than a second start; the 36h TimeoutSeconds resets to 0 on redrive, so a resumed loop gets the whole budget again. See docs/operations.md -- Orchestration, Recovering a batch, and Re-running a subject.",
+  "StartAt": "standardize-submit",
+  "QueryLanguage": "JSONata",
+  "TimeoutSeconds": 129600,
+  "States": {
+    "standardize-submit": {
+      "Type": "Task",
+      "Comment": "Opens one batch and returns without waiting. app.py dispatches on the payload field and never reads a stage name, so there is nothing here to label. The ternary forwards whichever field arrived: book_ids names the books outright, subject_id has the Lambda expand the subject to the books at SCRAPED_HTML first, capped at MAX_BOOKS_PER_SUBJECT. An input carrying neither yields an empty payload on purpose -- the handler's 'Exactly one of' guard refuses it, in the one place that rule lives. The absent States.ALL retrier and the Catch to a Fail are the same argument: submit opens the batch before it writes the manifest and before it moves any status, so anything that reruns it inside that window opens a second batch that is paid for twice.",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "${FUNCTION_ARN}:$LATEST",
+        "Payload": "{% $exists($states.input.subject_id) ? {'subject_id': $states.input.subject_id} : {'book_ids': $states.input.book_ids} %}"
+      },
+      "Output": {
+        "batch_id": "{% $states.result.Payload.batch_id %}",
+        "book_count": "{% $states.result.Payload.book_count %}",
+        "batch_status": "{% $states.result.Payload.batch_status %}",
+        "standardized": 0
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "BooksInFlightError"
+          ],
+          "Next": "standardize-blocked",
+          "Output": {
+            "error": "{% $states.errorOutput.Error %}",
+            "cause": "{% $states.errorOutput.Cause %}"
+          }
+        },
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "standardize-submit-failed",
+          "Output": {
+            "error": "{% $states.errorOutput.Error %}",
+            "cause": "{% $states.errorOutput.Cause %}"
+          }
+        }
+      ],
+      "Next": "batch-settled?"
+    },
+    "standardize-blocked": {
+      "Type": "Succeed",
+      "Comment": "A book on this subject already belongs to an open batch. Nothing was opened and no status moved, so re-running the subject once that batch collects picks up where this left off. Scoped to that one error on purpose -- States.ALL here reported a half-finished submit as a Succeed.",
+      "Output": {
+        "blocked": true,
+        "error": "{% $states.input.error %}",
+        "cause": "{% $states.input.cause %}"
+      }
+    },
+    "standardize-submit-failed": {
+      "Type": "Fail",
+      "Comment": "Anything else submit raises, which may have left a paid-for batch with nothing to settle it against. Settle it by invoking the Lambda directly with its batch_id, never by rerunning the submit -- redriving an execution that ended here re-enters this state and fails again, which is the intended answer. The Error is a fixed name for the reason announce-failed's is.",
+      "Error": "StandardizeSubmitFailed",
+      "Cause": "{% $states.input.error & ': ' & $states.input.cause %}"
+    },
+    "batch-settled?": {
+      "Type": "Choice",
+      "Comment": "The loop head and the gate on the announcement, in one state because both calls report both fields: submit reports batch_status 'ended' with standardized 0 when it opened no batch, and the loop is never entered. Rules are evaluated in order. The first is written as the negative so an unfamiliar processing_status keeps polling rather than reporting the batch done. The second keeps the announcement off the empty path -- a batch that settled nothing is an ordinary outcome, not a refusal -- and that is what lets the rule downstream match on detail-type alone.",
+      "Choices": [
+        {
+          "Condition": "{% $states.input.batch_status != 'ended' %}",
+          "Next": "wait-for-batch"
+        },
+        {
+          "Condition": "{% $states.input.standardized = 0 %}",
+          "Next": "standardize-done"
+        }
+      ],
+      "Default": "announce-books-standardized"
+    },
+    "announce-books-standardized": {
+      "Type": "Task",
+      "Comment": "Says which books reached STANDARDIZED, and ends. It does not say who should care: this machine names no ${ENV_PREFIX}-tokenize anywhere, and a rule on the default bus turns this event into an invocation of that Lambda. book_ids is the handover: tokenize no longer lists the status index for itself, so a book reaches it only by being named here. A duplicate delivery names books the first execution already took to TOKENIZED, which tokenize drops before it loads spaCy. Only the collect path reaches this state, which is why book_ids need not exist on the submit path's Output. batch_id and standardize_execution are context for an operator, not part of the handover.",
+      "Resource": "arn:aws:states:::events:putEvents",
+      "Arguments": {
+        "Entries": [
+          {
+            "Source": "embedding-analytics.standardize",
+            "DetailType": "Books Standardized",
+            "Detail": {
+              "batch_id": "{% $states.input.batch_id %}",
+              "book_ids": "{% $states.input.book_ids %}",
+              "standardized": "{% $states.input.standardized %}",
+              "standardize_execution": "{% $states.context.Execution.Id %}"
+            }
+          }
+        ]
+      },
+      "Output": {
+        "batch_id": "{% $states.input.batch_id %}",
+        "book_count": "{% $states.input.book_count %}",
+        "batch_status": "{% $states.input.batch_status %}",
+        "standardized": "{% $states.input.standardized %}",
+        "failed_entries": "{% $states.result.FailedEntryCount %}"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "announce-failed",
+          "Output": {
+            "error": "{% $states.errorOutput.Error %}",
+            "cause": "{% $states.errorOutput.Cause %}"
+          }
+        }
+      ],
+      "Next": "announce-delivered?"
+    },
+    "announce-delivered?": {
+      "Type": "Choice",
+      "Comment": "PutEvents reports a rejected entry in FailedEntryCount and succeeds the task anyway, so without this the one failure that matters -- the event never reaching the bus -- reads as a settled batch that then silently never tokenizes. Greater than zero rather than equal to one because Entries is a list.",
+      "Choices": [
+        {
+          "Condition": "{% $states.input.failed_entries > 0 %}",
+          "Next": "announce-failed"
+        }
+      ],
+      "Default": "standardize-done"
+    },
+    "announce-failed": {
+      "Type": "Fail",
+      "Comment": "The event did not reach the bus -- PutEvents raised, or accepted the call and rejected the entry. The batch itself is settled and every book is at STANDARDIZED, so what is lost is the trigger and nothing else: invoke ${ENV_PREFIX}-tokenize by hand with those book_ids, or wait for the next subject to announce, since it lists the whole backlog either way. Failing rather than succeeding quietly is what makes that visible. The no-Retry and fixed-Error arguments are the ones scrape.asl.json's announce-failed spells out.",
+      "Error": "AnnounceFailed",
+      "Cause": "{% $exists($states.input.error) ? $states.input.error & ': ' & $states.input.cause : 'PutEvents accepted the call and rejected the entry; FailedEntryCount ' & $string($states.input.failed_entries) %}"
+    },
+    "wait-for-batch": {
+      "Type": "Wait",
+      "Comment": "The batch may run for hours, so the waiting belongs here rather than in a Lambda holding an open invocation. Each collect rebuilds its state from the batch id, so a poll landing on a cold container is correct.",
+      "Seconds": 300,
+      "Next": "standardize-collect"
+    },
+    "standardize-collect": {
+      "Type": "Task",
+      "Comment": "Returns immediately while the batch is still running, and settles it once it has ended. Selected by the payload carrying batch_id, not by a stage name. The one States.ALL retrier -- deliberately broader than the Lambda-service-only policy every other task here carries -- is what stops a transient raise such as an Anthropic 5xx, an S3 blip or a DynamoDB throttle from ending a poll loop that runs for hours and stranding a batch that is already paid for. Safe because every attempt rebuilds its state from the batch id and re-renders from the manifest, so a retry repeats work rather than corrupting it. It carries no Catch on purpose: a raise that survives the retrier has to fail the execution at this task, because that is the only thing redrive can reschedule.",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "${FUNCTION_ARN}:$LATEST",
+        "Payload": {
+          "batch_id": "{% $states.input.batch_id %}"
+        }
+      },
+      "Output": {
+        "batch_id": "{% $states.input.batch_id %}",
+        "book_count": "{% $states.input.book_count %}",
+        "batch_status": "{% $states.result.Payload.batch_status %}",
+        "standardized": "{% $states.result.Payload.standardized %}",
+        "book_ids": "{% $states.result.Payload.book_ids %}"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Next": "batch-settled?"
+    },
+    "standardize-done": {
+      "Type": "Succeed",
+      "Comment": "Out: { batch_id, book_count, batch_status, standardized }, whether or not a batch was opened and whether or not the announcement was made. The Output is explicit because the announce path adds failed_entries on its way here and the batch-settled? path does not, so passing the input through would emit two different shapes.",
+      "Output": {
+        "batch_id": "{% $states.input.batch_id %}",
+        "book_count": "{% $states.input.book_count %}",
+        "batch_status": "{% $states.input.batch_status %}",
+        "standardized": "{% $states.input.standardized %}"
+      }
+    }
+  }
+}

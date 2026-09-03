@@ -9,16 +9,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.stdout.reconfigure(line_buffering=True)
 
-# Snapshotted before `import config`, which calls load_dotenv: .env holds a restricted
-# deploy principal that cannot call DescribeStacks, and cdk makes its CloudFormation
-# calls as whoever invoked this script. The app subprocess cdk spawns loads .env for
-# itself. Moving this line below the imports breaks every deploy -- see
-# docs/operations.md, "Configuration and deployment".
 SHELL_ENV = os.environ.copy()
 
-# buildx otherwise attaches provenance/SBOM attestations, which turn `--load` into a
-# manifest list rather than the single image `docker run` expects. Carried over from the
-# deploy.sh this replaces.
+# single, flat image from buildx instead of manifest list.
 SHELL_ENV["BUILDX_NO_DEFAULT_ATTESTATIONS"] = "1"
 
 import app  # noqa: E402
@@ -30,11 +23,7 @@ TEST_STAGE = re.compile(r"^\s*FROM\s.*\sAS\s+test\s*$", re.IGNORECASE | re.MULTI
 
 
 class GateError(Exception):
-    """A service the gate cannot run, so the deploy must not proceed.
-
-    Its own type so the caller catches a verdict and nothing else: an OSError reading the
-    Dockerfile is a fault, not a misconfigured service, and should not be reported as one.
-    """
+    """A service the gate cannot run, so the deploy must not proceed. """
 
 
 def run_cmd(cmd: list[str], *, cwd: Path) -> int:
@@ -43,11 +32,7 @@ def run_cmd(cmd: list[str], *, cwd: Path) -> int:
 
 
 def validate_dockerfile(service: str) -> None:
-    """Both halves of one service's test gate: the suite, and the stage that runs it.
 
-    They live in different files and can be added or removed independently, and one of
-    those directions never fails -- it just deploys having run nothing.
-    """
     service_dir = config.REPO_ROOT / "functions" / service
     dockerfile = service_dir / "Dockerfile"
 
@@ -66,16 +51,6 @@ def validate_dockerfile(service: str) -> None:
 
 
 def run_test_container(service: str) -> int:
-    """One service's suite, inside the `test` stage of its own Dockerfile.
-
-    Built from the repo root, not from the staged asset/ directory cdk.out holds: that
-    context has tests/ excluded (see get_test_files in resources.py) so a test-only edit
-    does not republish an identical image. The gate has to read the real tree.
-
-    No --env-file .env, deliberately. The suites pin their own AWS region, credentials,
-    bucket and table in conftest; handing them the deploy environment instead points them
-    at production names.
-    """
     tag = f"{service}:test"
     build = run_cmd(
         [
@@ -101,13 +76,6 @@ def run_test_container(service: str) -> int:
 
 
 def run_test_gate(services: list[str]) -> int:
-    """The CDK suite, then every suite the stack ships. 0 means the deploy may go ahead.
-
-    Stops at the first failure: the point is to not build anything, so there is nothing
-    to gain from running the rest. Every service is validated before the first container
-    is built, so a service that cannot be gated is reported in seconds rather than after
-    the ones ahead of it in the list have each built and run.
-    """
     code = run_cmd([sys.executable, "-m", "pytest", "-q"], cwd=config.INFRA_DIR)
     if code != 0:
         print(

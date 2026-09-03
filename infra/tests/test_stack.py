@@ -11,29 +11,7 @@ import pytest
 
 import app
 import config
-
-FUNCTION = "AWS::Lambda::Function"
-MACHINE = "AWS::StepFunctions::StateMachine"
-RULE = "AWS::Events::Rule"
-PERMISSION = "AWS::Lambda::Permission"
-
-
-def of_type(resources: dict, type_name: str) -> dict:
-    """{logical id: resource} for one CloudFormation type."""
-    return {lid: r for lid, r in resources.items() if r["Type"] == type_name}
-
-
-def by_name(resources: dict, type_name: str, key: str) -> dict:
-    """One type indexed by the physical name it carries in `key`."""
-    return {r["Properties"][key]: r for r in of_type(resources, type_name).values()}
-
-
-def get_att(value: dict) -> str:
-    """The logical id an `Fn::GetAtt` points at, or fail saying what it was instead."""
-    assert isinstance(value, dict) and "Fn::GetAtt" in value, (
-        f"expected a reference to a construct in this stack, got {value!r}"
-    )
-    return value["Fn::GetAtt"][0]
+from conftest import FUNCTION, MACHINE, PERMISSION, RULE, by_name, get_att, of_type
 
 
 def announced_events(stage: str) -> set[tuple[str, str]]:

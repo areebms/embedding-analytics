@@ -12,6 +12,7 @@ from aws_cdk import (
 from constructs import Construct
 
 import config
+from pipeline_events import BOOKS_STANDARDIZED, SUBJECT_BOOKS_SCRAPED, PipelineEvent
 
 
 def get_test_files(name: str) -> list[str]:
@@ -90,21 +91,20 @@ def build_state_machine(
 
 def build_event_rule(
     scope: Construct,
-    construct_id: str,
     *,
-    rule_name: str,
+    event: PipelineEvent,
+    consumer: str,
     description: str,
-    source: str,
-    detail_type: str,
     target: events.IRuleTarget,
 ) -> events.Rule:
-    """One event, one target. `$.detail` is the payload in both directions."""
     return events.Rule(
         scope,
-        construct_id,
-        rule_name=rule_name,
+        f"{consumer.title()}Trigger",
+        rule_name=f"{config.PREFIX}-{consumer}-trigger",
         description=description,
-        event_pattern=events.EventPattern(source=[source], detail_type=[detail_type]),
+        event_pattern=events.EventPattern(
+            source=[event.source], detail_type=[event.detail_type]
+        ),
         targets=[target],
     )
 
@@ -114,11 +114,9 @@ def build_standardize_trigger(
 ) -> events.Rule:
     return build_event_rule(
         scope,
-        "StandardizeTrigger",
-        rule_name=f"{config.PREFIX}-standardize-trigger",
+        event=SUBJECT_BOOKS_SCRAPED,
+        consumer="standardize",
         description="Turns a 'Subject Books Scraped' event into a standardize execution.",
-        source="embedding-analytics.scrape",
-        detail_type="Subject Books Scraped",
         target=targets.SfnStateMachine(
             standardize,
             role=role,
@@ -132,11 +130,9 @@ def build_tokenize_trigger(
 ) -> events.Rule:
     return build_event_rule(
         scope,
-        "TokenizeTrigger",
-        rule_name=f"{config.PREFIX}-tokenize-trigger",
+        event=BOOKS_STANDARDIZED,
+        consumer="tokenize",
         description="Turns a 'Books Standardized' event into a tokenize invocation.",
-        source="embedding-analytics.standardize",
-        detail_type="Books Standardized",
         target=targets.LambdaFunction(
             tokenize,
             event=events.RuleTargetInput.from_event_path("$.detail"),

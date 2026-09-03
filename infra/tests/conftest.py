@@ -1,12 +1,3 @@
-"""The synthesized stack, built once, against a pinned environment.
-
-The environment is set before `import config`, and with `update` rather than
-`setdefault`, because config reads ENV_PREFIX at import time and its
-`load_dotenv(override=False)` lets anything already set win. That is the point: the
-deploy gate runs this suite in a shell where the real .env is present, and a setdefault
-would hand these tests the production bucket and table names.
-"""
-
 import os
 
 import pytest
@@ -26,6 +17,29 @@ os.environ.update(
 import app  # noqa: E402
 import config  # noqa: E402
 from aws_cdk import assertions  # noqa: E402
+
+FUNCTION = "AWS::Lambda::Function"
+MACHINE = "AWS::StepFunctions::StateMachine"
+RULE = "AWS::Events::Rule"
+PERMISSION = "AWS::Lambda::Permission"
+
+
+def of_type(resources: dict, type_name: str) -> dict:
+    """{logical id: resource} for one CloudFormation type."""
+    return {lid: r for lid, r in resources.items() if r["Type"] == type_name}
+
+
+def by_name(resources: dict, type_name: str, key: str) -> dict:
+    """One type indexed by the physical name it carries in `key`."""
+    return {r["Properties"][key]: r for r in of_type(resources, type_name).values()}
+
+
+def get_att(value: dict) -> str:
+    """The logical id an `Fn::GetAtt` points at, or fail saying what it was instead."""
+    assert isinstance(value, dict) and "Fn::GetAtt" in value, (
+        f"expected a reference to a construct in this stack, got {value!r}"
+    )
+    return value["Fn::GetAtt"][0]
 
 
 @pytest.fixture(scope="session")

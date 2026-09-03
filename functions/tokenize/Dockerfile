@@ -4,7 +4,9 @@ COPY functions/tokenize/requirements.txt /requirements.txt
 WORKDIR ${LAMBDA_TASK_ROOT}
 RUN pip install --no-cache-dir -r /requirements.txt -t ${LAMBDA_TASK_ROOT}
 RUN python -m spacy download en_core_web_sm
-RUN python -m nltk.downloader wordnet omw-1.4
+ENV NLTK_DATA=/usr/local/share/nltk_data
+RUN python -m nltk.downloader -d ${NLTK_DATA} wordnet omw-1.4 \
+ && python -c "from nltk.corpus import wordnet; wordnet.ensure_loaded()"
 
 FROM base AS lambda
 COPY shared/*.py shared/

@@ -78,6 +78,16 @@ def standardized_book(seed, bucket):
     return _standardized_book
 
 
+@pytest.fixture
+def events_client(mocker):
+    import main
+
+    client = mocker.Mock()
+    client.put_events.return_value = {"FailedEntryCount": 0, "Entries": [{}]}
+    mocker.patch.object(main, "get_session").return_value.client.return_value = client
+    return client
+
+
 def status_of(entries, index=INDEX):
     return entries.get_entry(index).status
 

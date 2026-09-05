@@ -1,215 +1,251 @@
+import json
+import logging
+
 import numpy as np
 import pytest
 from botocore.exceptions import ClientError
 
+import app
+from create_embeddings import (
+    EmbeddingData,
+    create_embeddings,
+    get_embedding_data,
+    get_entries,
+    load_passages,
+    resolve_subject,
+    set_status,
+    upload_embedding_data,
+)
 from shared.commons import BookIndex
 from shared.tables.pipeline_entries import EntryStatus, PipelineEntry
 
 from constants import VECTOR_SIZE
 from conftest import (
     INDEX,
+    INDEX_2,
     KEPT_LEMMAS,
     SOLITARY_PASSAGES,
     SOLITARY_TERM,
     SUBJECT,
     SYNTHETIC_PASSAGES,
     TOKEN_LEMMAS,
+    status_of,
 )
 
 
-@pytest.fixture
-def seed_entry(pipeline_entries):
-    def seed(status=EntryStatus.TOKENIZED):
-        pipeline_entries.put_entry(
-            PipelineEntry(book_id=INDEX, subject_ids={SUBJECT}, status=status)
-        )
-        return pipeline_entries
+def test_a_named_book_is_embedded_and_advanced(tokenized_book, entries):
+    index = tokenized_book(passages=SYNTHETIC_PASSAGES)
 
-    return seed
+    status = app.handler({"book_ids": [str(index)]}, None)
+
+    assert status == {"found": 1, "embedded": 1}
+    assert status_of(entries, index) == EntryStatus.EMBEDDINGS_CREATED
 
 
-@pytest.fixture
-def seeded_entry(seed_entry):
-    return seed_entry()
-
-
-@pytest.fixture
-def stub_upload(mocker):
-    mocker.patch(
-        "create_embeddings.get_embedding_data",
-        return_value="embedding_data",
-    )
-    return mocker.patch("create_embeddings.upload_embedding_data")
-
-
-def test_create_embeddings_skips_a_book_with_no_pipeline_entry(
-    pipeline_entries, token_lemmas, stub_upload
+def test_the_uploaded_file_is_row_aligned_across_terms_vectors_and_counts(
+    tokenized_book, uploaded_embeddings
 ):
-    from create_embeddings import create_embeddings
+    index = tokenized_book(passages=SYNTHETIC_PASSAGES)
 
+    app.handler({"book_ids": [str(index)]}, None)
+    uploaded = uploaded_embeddings(index)
+
+    assert len(uploaded["terms"]) > VECTOR_SIZE
+    assert uploaded["vectors"].shape == (len(uploaded["terms"]), VECTOR_SIZE)
+    assert uploaded["attr_count"].shape == (len(uploaded["terms"]),)
+
+
+def test_advancing_the_status_leaves_the_other_columns_intact(
+    tokenized_book, entries
+):
+    index = tokenized_book(passages=SYNTHETIC_PASSAGES)
+
+    app.handler({"book_ids": [str(index)]}, None)
+
+    assert entries.get_entry(index).subject_ids == {SUBJECT}
+
+
+def test_a_book_is_read_out_of_a_json_body(tokenized_book, entries):
+    index = tokenized_book(passages=SYNTHETIC_PASSAGES)
+
+    status = app.handler({"body": json.dumps({"book_ids": [str(index)]})}, None)
+
+    assert status == {"found": 1, "embedded": 1}
+    assert status_of(entries, index) == EntryStatus.EMBEDDINGS_CREATED
+
+
+def test_a_subject_is_resolved_to_the_books_standing_at_tokenized(
+    tokenized_book, seed, entries
+):
+    tokenized_book(INDEX, SYNTHETIC_PASSAGES)
+    tokenized_book(INDEX_2, SYNTHETIC_PASSAGES)
+    seed(EntryStatus.STANDARDIZED, BookIndex(999))
+
+    status = app.handler({"subject_id": str(SUBJECT)}, None)
+
+    assert status == {"found": 2, "embedded": 2}
+    assert status_of(entries, INDEX) == EntryStatus.EMBEDDINGS_CREATED
+    assert status_of(entries, INDEX_2) == EntryStatus.EMBEDDINGS_CREATED
+
+
+def test_a_subject_is_capped_and_the_overflow_is_left_for_the_next_run(
+    seed, monkeypatch
+):
+    monkeypatch.setattr("create_embeddings.MAX_BOOKS_PER_SUBJECT", 2)
+    indexes = [BookIndex(source_id) for source_id in range(1, 6)]
+    for index in indexes:
+        seed(EntryStatus.TOKENIZED, index)
+
+    assert resolve_subject(str(SUBJECT)) == sorted(indexes)[:2]
+
+
+def test_running_the_same_book_twice_does_not_redo_the_work(
+    tokenized_book, entries
+):
+    index = tokenized_book(passages=SYNTHETIC_PASSAGES)
+
+    app.handler({"book_ids": [str(index)]}, None)
+    status = app.handler({"book_ids": [str(index)]}, None)
+
+    assert status == {"found": 0, "embedded": 0}
+    assert status_of(entries, index) == EntryStatus.EMBEDDINGS_CREATED
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        {},
+        {"book_ids": [], "subject_id": ""},
+        {"book_ids": ["gutenberg-3300"], "subject_id": "gutenberg-42"},
+    ],
+    ids=["neither", "empty", "both"],
+)
+def test_naming_no_books_or_two_ways_at_once_is_refused(event, mocker):
+    embed = mocker.patch("app.create_embeddings")
+
+    with pytest.raises(ValueError, match="Exactly one"):
+        app.handler(event, None)
+
+    embed.assert_not_called()
+
+
+def test_a_book_past_tokenized_is_dropped_before_the_decomposition(
+    seed, token_lemmas, bucket, entries
+):
+    seed(EntryStatus.EMBEDDINGS_CREATED)
+    token_lemmas(passages=SYNTHETIC_PASSAGES)
+
+    status = app.handler({"book_ids": [str(INDEX)]}, None)
+
+    assert status == {"found": 0, "embedded": 0}
+    assert list(bucket.objects.filter(Prefix="embeddings/")) == []
+    assert status_of(entries, INDEX) == EntryStatus.EMBEDDINGS_CREATED
+
+
+def test_a_book_with_no_pipeline_entry_is_reported_and_skipped(aws, caplog):
+    with caplog.at_level(logging.WARNING, logger="create_embeddings"):
+        status = app.handler({"book_ids": ["gutenberg-404"]}, None)
+
+    assert status == {"found": 0, "embedded": 0}
+    assert "1 of 1 book(s) have no pipeline entry." in caplog.text
+
+
+def test_a_book_whose_lemmas_are_missing_is_skipped_rather_than_failed(
+    seed, entries, caplog
+):
+    seed(EntryStatus.TOKENIZED)
+
+    with caplog.at_level(logging.WARNING, logger="create_embeddings"):
+        status = app.handler({"book_ids": [str(INDEX)]}, None)
+
+    assert status == {"found": 1, "embedded": 0}
+    assert status_of(entries, INDEX) == EntryStatus.TOKENIZED
+    assert "has not been tokenized" in caplog.text
+
+
+def test_a_book_with_too_few_terms_is_parked_at_the_terminal_status(
+    tokenized_book, bucket, entries, caplog
+):
+    index = tokenized_book()
+
+    with caplog.at_level(logging.WARNING, logger="create_embeddings"):
+        status = app.handler({"book_ids": [str(index)]}, None)
+
+    assert status == {"found": 1, "embedded": 0}
+    assert list(bucket.objects.filter(Prefix="embeddings/")) == []
+    assert status_of(entries, index) == EntryStatus.EMBEDDINGS_CREATION_FAILED
+    assert "too few terms" in caplog.text
+
+
+def test_a_programming_error_ends_the_run(tokenized_book, entries, monkeypatch):
+    tokenized_book(INDEX, SYNTHETIC_PASSAGES)
+    tokenized_book(INDEX_2, SYNTHETIC_PASSAGES)
+    real_upload = upload_embedding_data
+
+    def mistyped_upload(entry, embedding_data):
+        if entry.book_id == INDEX:
+            raise TypeError("upload_embedding_data() takes an entry")
+        real_upload(entry, embedding_data)
+
+    monkeypatch.setattr("create_embeddings.upload_embedding_data", mistyped_upload)
+
+    with pytest.raises(TypeError):
+        app.handler({"book_ids": [str(INDEX), str(INDEX_2)]}, None)
+
+    assert status_of(entries, INDEX_2) == EntryStatus.EMBEDDINGS_CREATED
+    assert status_of(entries, INDEX) == EntryStatus.TOKENIZED
+
+
+def test_an_empty_run_is_reported_without_touching_the_bucket(aws, bucket):
+    assert create_embeddings([]) == {"found": 0, "embedded": 0}
+    assert list(bucket.objects.filter(Prefix="embeddings/")) == []
+
+
+def test_get_entries_keeps_only_the_books_standing_at_tokenized(seed):
+    seed(EntryStatus.TOKENIZED, INDEX)
+    seed(EntryStatus.STANDARDIZED, INDEX_2)
+
+    assert [entry.book_id for entry in get_entries([INDEX, INDEX_2])] == [INDEX]
+
+
+def test_a_status_write_the_guard_turns_down_is_reported(seed, caplog):
+    seed(EntryStatus.EMBEDDINGS_CREATED)
+
+    with caplog.at_level(logging.WARNING, logger="create_embeddings"):
+        set_status(INDEX, EntryStatus.TOKENIZED)
+
+    assert "the status guard refused the write" in caplog.text
+
+
+def test_load_passages_drops_short_and_non_alphabetic_tokens(seed, token_lemmas):
+    seed(EntryStatus.TOKENIZED)
     token_lemmas()
 
-    assert create_embeddings(INDEX) is None
-    stub_upload.assert_not_called()
+    assert load_passages(get_entries([INDEX])[0]) == KEPT_LEMMAS
 
 
-def test_create_embeddings_skips_a_book_that_has_not_been_tokenized(
-    seeded_entry, stub_upload
-):
-    from create_embeddings import create_embeddings
+def test_load_passages_returns_none_when_the_lemmas_are_missing(seed):
+    seed(EntryStatus.TOKENIZED)
 
-    assert create_embeddings(INDEX) is None
-    stub_upload.assert_not_called()
+    assert load_passages(get_entries([INDEX])[0]) is None
 
 
-def test_create_embeddings_skips_a_book_that_has_not_reached_tokenized(
-    seed_entry, token_lemmas, stub_upload
-):
-    from create_embeddings import create_embeddings
-
-    seed_entry(EntryStatus.STANDARDIZED)
-    token_lemmas()
-
-    assert create_embeddings(INDEX) is None
-    stub_upload.assert_not_called()
-
-
-def test_create_embeddings_skips_a_book_that_is_already_embedded(
-    seed_entry, token_lemmas, stub_upload
-):
-    from create_embeddings import create_embeddings
-
-    seed_entry(EntryStatus.EMBEDDED)
-    token_lemmas()
-
-    assert create_embeddings(INDEX) is None
-    stub_upload.assert_not_called()
-
-
-def test_create_embeddings_does_not_redo_the_work_of_a_finished_book(
-    seeded_entry, token_lemmas, stub_upload
-):
-    from create_embeddings import create_embeddings
-
-    token_lemmas()
-    create_embeddings(INDEX)
-    create_embeddings(INDEX)
-
-    stub_upload.assert_called_once()
-
-
-def test_create_embeddings_skips_a_book_with_too_few_terms(
-    seeded_entry, token_lemmas, mocker
-):
-    from create_embeddings import create_embeddings
-
-    upload = mocker.patch("create_embeddings.upload_embedding_data")
-    token_lemmas()
-
-    assert create_embeddings(INDEX) is None
-    upload.assert_not_called()
-
-
-def test_create_embeddings_reads_the_key_tokenize_writes(
-    seeded_entry, token_lemmas, mocker, stub_upload
-):
-    from create_embeddings import create_embeddings
-
-    build = mocker.patch(
-        "create_embeddings.get_embedding_data",
-        return_value="embedding_data",
-    )
-    token_lemmas()
-
-    assert create_embeddings(INDEX) == {"book_id": INDEX}
-    build.assert_called_once_with(KEPT_LEMMAS)
-
-
-def test_create_embeddings_sets_the_status_the_api_reads(
-    seeded_entry, token_lemmas, stub_upload, pipeline_item
-):
-    from create_embeddings import create_embeddings
-
-    token_lemmas()
-    create_embeddings(INDEX)
-
-    assert pipeline_item()["status"] == EntryStatus.EMBEDDED
-
-
-def test_advancing_the_status_leaves_other_columns_intact(
-    seeded_entry, token_lemmas, stub_upload, pipeline_item
-):
-    from create_embeddings import create_embeddings
-
-    token_lemmas()
-    create_embeddings(INDEX)
-
-    assert pipeline_item()["subject_ids"] == {str(SUBJECT)}
-
-
-def test_create_embeddings_reports_a_status_write_the_guard_turned_down(
-    seeded_entry, token_lemmas, stub_upload, mocker, caplog
-):
-    from create_embeddings import create_embeddings
-
-    mocker.patch.object(seeded_entry, "set_status", return_value=False)
-    token_lemmas()
-
-    assert create_embeddings(INDEX) == {"book_id": INDEX}
-    assert "was not advanced" in caplog.text
-
-
-def test_a_skipped_book_stays_invisible_to_the_api(
-    seeded_entry, stub_upload, pipeline_item
-):
-    from create_embeddings import create_embeddings
-
-    create_embeddings(INDEX)
-
-    assert pipeline_item()["status"] == EntryStatus.TOKENIZED
-
-
-def test_load_passages_drops_short_and_non_alphabetic_tokens(
-    seeded_entry, token_lemmas
-):
-    from create_embeddings import load_passages
-
-    token_lemmas()
-
-    assert load_passages(seeded_entry.get_entry(INDEX)) == KEPT_LEMMAS
-
-
-def test_load_passages_returns_none_when_the_lemmas_are_missing(seeded_entry):
-    from create_embeddings import load_passages
-
-    assert load_passages(seeded_entry.get_entry(INDEX)) is None
-
-
-def test_load_passages_reraises_an_error_that_is_not_a_missing_key(
-    seeded_entry, mocker
-):
-    from create_embeddings import load_passages
-
+def test_load_passages_reraises_an_error_that_is_not_a_missing_key(seed, mocker):
+    seed(EntryStatus.TOKENIZED)
     mocker.patch(
         "create_embeddings.load_csv",
-        side_effect=ClientError(
-            {"Error": {"Code": "AccessDenied"}}, "GetObject"
-        ),
+        side_effect=ClientError({"Error": {"Code": "AccessDenied"}}, "GetObject"),
     )
 
     with pytest.raises(ClientError):
-        load_passages(seeded_entry.get_entry(INDEX))
+        load_passages(get_entries([INDEX])[0])
 
 
 def test_get_embedding_data_returns_none_below_vector_size():
-    from create_embeddings import get_embedding_data
-
     assert get_embedding_data(TOKEN_LEMMAS) is None
 
 
 def test_get_embedding_data_returns_one_row_per_term():
-    from create_embeddings import get_embedding_data
-
     data = get_embedding_data(SYNTHETIC_PASSAGES)
 
     assert data.vectors.shape == (len(data.terms), VECTOR_SIZE)
@@ -217,8 +253,6 @@ def test_get_embedding_data_returns_one_row_per_term():
 
 
 def test_get_embedding_data_ships_float32_vectors_and_integer_counts():
-    from create_embeddings import get_embedding_data
-
     data = get_embedding_data(SYNTHETIC_PASSAGES)
 
     assert data.vectors.dtype == np.float32
@@ -226,92 +260,38 @@ def test_get_embedding_data_ships_float32_vectors_and_integer_counts():
 
 
 def test_get_embedding_data_counts_every_occurrence_in_the_book():
-    from create_embeddings import get_embedding_data
-
     data = get_embedding_data(SYNTHETIC_PASSAGES)
     occurrences = sum(passage.count(data.terms[0]) for passage in SYNTHETIC_PASSAGES)
 
     assert data.term_counts[0] == occurrences
 
 
-def test_get_embedding_data_drops_a_term_that_co_occurs_with_nothing():
-    from create_embeddings import get_embedding_data
-
-    data = get_embedding_data(SOLITARY_PASSAGES)
+def test_get_embedding_data_drops_a_term_that_co_occurs_with_nothing(caplog):
+    with caplog.at_level(logging.INFO, logger="create_embeddings"):
+        data = get_embedding_data(SOLITARY_PASSAGES)
 
     assert SOLITARY_TERM not in data.terms
+    assert "co-occur with nothing" in caplog.text
 
 
 def test_get_embedding_data_leaves_no_zero_length_vector():
-    from create_embeddings import get_embedding_data
-
     data = get_embedding_data(SOLITARY_PASSAGES)
 
     assert np.linalg.norm(data.vectors, axis=1).min() > 0
 
 
-def test_upload_embedding_data_writes_what_publish_reads(
-    moto_dynamo, uploaded_embeddings
+def test_upload_embedding_data_writes_the_terms_vectors_and_counts(
+    aws, uploaded_embeddings
 ):
-    from create_embeddings import EmbeddingData, upload_embedding_data
-
     data = EmbeddingData(
         ["labour", "value"],
         np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32),
         np.array([11, 22], dtype=np.int64),
     )
 
-    upload_embedding_data(INDEX, data)
+    upload_embedding_data(PipelineEntry(book_id=INDEX), data)
     uploaded = uploaded_embeddings()
 
     assert uploaded["terms"].tolist() == data.terms
     assert np.array_equal(uploaded["vectors"], data.vectors)
     assert np.array_equal(uploaded["attr_count"], data.term_counts)
-
-
-def test_create_embeddings_uploads_a_readable_book(
-    seeded_entry, token_lemmas, uploaded_embeddings
-):
-    from create_embeddings import create_embeddings
-
-    token_lemmas(passages=SYNTHETIC_PASSAGES)
-
-    assert create_embeddings(INDEX) == {"book_id": INDEX}
-    assert len(uploaded_embeddings()["terms"]) > VECTOR_SIZE
-
-
-def test_handler_parses_the_index_before_calling_through(mocker):
-    import app
-
-    create = mocker.patch("app.create_embeddings", return_value={"book_id": INDEX})
-
-    app.handler({"index": "gutenberg-3300"}, None)
-
-    called_with = create.call_args.args[0]
-    assert isinstance(called_with, BookIndex)
-    assert called_with.source_id == 3300
-
-
-def test_handler_returns_what_create_embeddings_returned(mocker):
-    import app
-
-    mocker.patch("app.create_embeddings", return_value={"book_id": INDEX})
-
-    assert app.handler({"index": "gutenberg-3300"}, None) == {"book_id": INDEX}
-
-
-def test_handler_reports_a_skip(mocker):
-    import app
-
-    mocker.patch("app.create_embeddings", return_value=None)
-
-    response = app.handler({"index": "gutenberg-3300"}, None)
-
-    assert response == {"book_id": INDEX, "skipped": True}
-
-
-def test_handler_rejects_a_request_with_no_index():
-    import app
-
-    with pytest.raises(ValueError, match="index is required"):
-        app.handler({}, None)

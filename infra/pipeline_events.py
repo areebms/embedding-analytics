@@ -22,3 +22,9 @@ BOOKS_STANDARDIZED = PipelineEvent(
         {"batch_id", "book_ids", "standardized", "standardize_execution"}
     ),
 )
+
+BOOKS_TOKENIZED = PipelineEvent(
+    source="embedding-analytics.tokenize",
+    detail_type="Books Tokenized",
+    detail_keys=frozenset({"book_ids", "tokenized"}),
+)

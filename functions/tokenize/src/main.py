@@ -1,7 +1,9 @@
+import json
 import logging
 
 from shared.commons import BookIndex, get_index
 from shared.s3 import load_text, upload_csv
+from shared.session import get_session
 from shared.tables.pipeline_entries import (
     EntryStatus,
     PipelineEntry,
@@ -14,6 +16,8 @@ logger.setLevel(logging.INFO)
 
 PENDING = (EntryStatus.STANDARDIZED,)
 MAX_BOOKS_PER_SUBJECT = 50
+ANNOUNCE_SOURCE = "embedding-analytics.tokenize"
+ANNOUNCE_DETAIL_TYPE = "Books Tokenized"
 
 
 def resolve_subject(subject_id: str) -> list[BookIndex]:
@@ -102,10 +106,34 @@ def tokenize_entry(entry: PipelineEntry) -> None:
     set_status(entry.book_id, EntryStatus.TOKENIZED)
 
 
+def announce_tokenized(book_ids: list[str]) -> None:
+    response = (
+        get_session()
+        .client("events")
+        .put_events(
+            Entries=[
+                {
+                    "Source": ANNOUNCE_SOURCE,
+                    "DetailType": ANNOUNCE_DETAIL_TYPE,
+                    "Detail": json.dumps(
+                        {"book_ids": book_ids, "tokenized": len(book_ids)}
+                    ),
+                }
+            ]
+        )
+    )
+
+    if response["FailedEntryCount"]:
+        raise RuntimeError(
+            f"the bus rejected '{ANNOUNCE_DETAIL_TYPE}' for {book_ids}: "
+            f"{response['Entries']}"
+        )
+
+
 def tokenize_entries(entries: list[PipelineEntry]) -> dict:
     """Every book handed in, one process. A book that raises is left at STANDARDIZED
     and named in `failed` rather than ending the run."""
-    tokenized = 0
+    tokenized = []
     failed = []
     for entry in entries:
         try:
@@ -119,12 +147,18 @@ def tokenize_entries(entries: list[PipelineEntry]) -> dict:
             failed.append(str(entry.book_id))
             continue
 
-        tokenized += 1
+        tokenized.append(str(entry.book_id))
+
+    if tokenized:
+        announce_tokenized(tokenized)
 
     logger.info(
-        "%d of %d book(s) tokenized, %d failed.", tokenized, len(entries), len(failed)
+        "%d of %d book(s) tokenized, %d failed.",
+        len(tokenized),
+        len(entries),
+        len(failed),
     )
-    return {"found": len(entries), "tokenized": tokenized, "failed": failed}
+    return {"found": len(entries), "tokenized": len(tokenized), "failed": failed}
 
 
 if __name__ == "__main__":  # pragma: no cover

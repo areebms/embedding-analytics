@@ -4,25 +4,34 @@ import os
 import random
 import tempfile
 
-import boto3
 import numpy as np
 import pytest
-from moto import mock_aws
 
 
-os.environ.setdefault("AWS_REGION", "us-east-1")
-os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
-os.environ.setdefault("AWS_ACCESS_KEY_ID", "testing")
-os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "testing")
-os.environ.setdefault("S3_BUCKET", "test-bucket")
-os.environ.setdefault("PIPELINE_TABLE", "pipeline-test")
+os.environ.update(
+    AWS_REGION="us-east-1",
+    AWS_DEFAULT_REGION="us-east-1",
+    AWS_ACCESS_KEY_ID="testing",
+    AWS_SECRET_ACCESS_KEY="testing",
+    AWS_SESSION_TOKEN="testing",
+    S3_BUCKET="test-bucket",
+    PIPELINE_TABLE="pipeline-test",
+)
+os.environ.pop("AWS_PROFILE", None)
 
 from shared.commons import BookIndex
+from shared.tables.pipeline_entries import EntryStatus, PipelineEntry
+from shared.tests_utils import (  # noqa: F401
+    aws,
+    bucket,
+    entries,
+)
 
 from constants import MIN_COUNT, VECTOR_SIZE
 
 
 INDEX = BookIndex(3300)
+INDEX_2 = BookIndex(11)
 SUBJECT = BookIndex(42)
 
 TOKEN_LEMMAS = [
@@ -48,97 +57,50 @@ SYNTHETIC_PASSAGES = [
 SOLITARY_PASSAGES = SYNTHETIC_PASSAGES + [[SOLITARY_TERM]] * MIN_COUNT
 
 
-def _create_pipeline_table(dynamodb):
-    dynamodb.create_table(
-        TableName=os.environ["PIPELINE_TABLE"],
-        BillingMode="PAY_PER_REQUEST",
-        AttributeDefinitions=[
-            {"AttributeName": "book_id", "AttributeType": "S"},
-            {"AttributeName": "status", "AttributeType": "S"},
-        ],
-        KeySchema=[
-            {"AttributeName": "book_id", "KeyType": "HASH"},
-        ],
-        GlobalSecondaryIndexes=[
-            {
-                "IndexName": "status-index",
-                "KeySchema": [
-                    {"AttributeName": "status", "KeyType": "HASH"},
-                    {"AttributeName": "book_id", "KeyType": "RANGE"},
-                ],
-                "Projection": {"ProjectionType": "KEYS_ONLY"},
-            }
-        ],
-    )
+@pytest.fixture
+def seed(entries):
+    def _seed(status=EntryStatus.TOKENIZED, index=INDEX, subject_ids={SUBJECT}):
+        entries.put_entry(
+            PipelineEntry(book_id=index, subject_ids=subject_ids, status=status)
+        )
+        return index
 
-
-def _create_bucket(session):
-    region = os.environ["AWS_REGION"]
-    constraint = (
-        {}
-        if region == "us-east-1"
-        else {"CreateBucketConfiguration": {"LocationConstraint": region}}
-    )
-    session.resource("s3").create_bucket(
-        Bucket=os.environ["S3_BUCKET"], **constraint
-    )
+    return _seed
 
 
 @pytest.fixture
-def moto_dynamo():
-    import shared.s3 as s3_module
-    import shared.session as session_module
-    import shared.tables.pipeline_entries as pipeline_entries_module
-
-    session_module._session = None
-    pipeline_entries_module._pipeline_entries = None
-    s3_module._s3_resource = None
-
-    with mock_aws():
-        session = boto3.Session(region_name=os.environ["AWS_REGION"])
-        _create_pipeline_table(session.resource("dynamodb"))
-        _create_bucket(session)
-
-        yield session
-
-
-@pytest.fixture
-def pipeline_entries(moto_dynamo):
-    from shared.tables.pipeline_entries import get_pipeline_entries
-
-    return get_pipeline_entries()
-
-
-@pytest.fixture
-def pipeline_item(moto_dynamo):
-    def read(index=INDEX):
-        return moto_dynamo.resource("dynamodb").Table(
-            os.environ["PIPELINE_TABLE"]
-        ).get_item(Key={"book_id": str(index)})["Item"]
-
-    return read
-
-
-@pytest.fixture
-def token_lemmas(moto_dynamo):
-    def write(index=INDEX, passages=TOKEN_LEMMAS):
+def token_lemmas(bucket):
+    def _token_lemmas(index=INDEX, passages=TOKEN_LEMMAS):
         buffer = io.StringIO()
         csv.writer(buffer).writerows(passages)
-        moto_dynamo.resource("s3").Object(
-            os.environ["S3_BUCKET"], f"token_lemmas/{index}.csv"
-        ).put(Body=buffer.getvalue().encode("utf-8"))
+        bucket.put_object(
+            Key=f"token_lemmas/{index}.csv", Body=buffer.getvalue().encode("utf-8")
+        )
+        return index
 
-    return write
+    return _token_lemmas
 
 
 @pytest.fixture
-def uploaded_embeddings(moto_dynamo):
+def tokenized_book(seed, token_lemmas):
+    def _tokenized_book(index=INDEX, passages=TOKEN_LEMMAS):
+        seed(EntryStatus.TOKENIZED, index)
+        token_lemmas(index, passages)
+        return index
+
+    return _tokenized_book
+
+
+@pytest.fixture
+def uploaded_embeddings(bucket):
     def read(index=INDEX):
         with tempfile.NamedTemporaryFile(suffix=".npz") as file:
-            moto_dynamo.resource("s3").Object(
-                os.environ["S3_BUCKET"], f"embeddings/{index}.npz"
-            ).download_file(file.name)
+            bucket.Object(f"embeddings/{index}.npz").download_file(file.name)
             with np.load(file.name, allow_pickle=False) as data:
                 return {key: data[key] for key in data.files}
 
     return read
+
+
+def status_of(entries, index=INDEX):
+    return entries.get_entry(index).status

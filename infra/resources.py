@@ -12,7 +12,12 @@ from aws_cdk import (
 from constructs import Construct
 
 import config
-from pipeline_events import BOOKS_STANDARDIZED, SUBJECT_BOOKS_SCRAPED, PipelineEvent
+from pipeline_events import (
+    BOOKS_STANDARDIZED,
+    BOOKS_TOKENIZED,
+    SUBJECT_BOOKS_SCRAPED,
+    PipelineEvent,
+)
 
 
 def get_test_files(name: str) -> list[str]:
@@ -135,6 +140,21 @@ def build_tokenize_trigger(
         description="Turns a 'Books Standardized' event into a tokenize invocation.",
         target=targets.LambdaFunction(
             tokenize,
+            event=events.RuleTargetInput.from_event_path("$.detail"),
+        ),
+    )
+
+
+def build_create_embeddings_trigger(
+    scope: Construct, *, create_embeddings: aws_lambda.IFunction
+) -> events.Rule:
+    return build_event_rule(
+        scope,
+        event=BOOKS_TOKENIZED,
+        consumer="create-embeddings",
+        description="Turns a 'Books Tokenized' event into a create-embeddings invocation.",
+        target=targets.LambdaFunction(
+            create_embeddings,
             event=events.RuleTargetInput.from_event_path("$.detail"),
         ),
     )

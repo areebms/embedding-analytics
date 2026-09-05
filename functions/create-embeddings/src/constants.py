@@ -1,5 +1,5 @@
 """Hyperparameters for the PPMI/SVD book embedding."""
-
+MAX_BOOKS_PER_SUBJECT = 50
 WINDOW = 10             # context words on each side
 MIN_COUNT = 10          # vocabulary threshold, whole book
 MIN_TOKEN_SIZE = 4      # shorter tokens are dropped

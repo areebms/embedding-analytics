@@ -3,6 +3,7 @@
 Each of these is an invariant docs/operations.md states in prose and nothing checked.
 """
 
+import ast
 import json
 import os
 from collections import Counter
@@ -37,10 +38,10 @@ def test_stack_holds_exactly_these_resources(resources):
     """The eight of docs/operations.md: three Lambdas, two machines, two rules and one
     permission -- and nothing else. A stray construct shows up here."""
     assert Counter(r["Type"] for r in resources.values()) == {
-        FUNCTION: 3,
+        FUNCTION: 4,
         MACHINE: 2,
-        RULE: 2,
-        PERMISSION: 1,
+        RULE: 3,
+        PERMISSION: 2,
     }
 
 
@@ -100,11 +101,34 @@ def test_machines_resolve_their_function_by_reference(resources):
         assert target["Properties"]["FunctionName"] == f"{config.PREFIX}-{stage}"
 
 
+def module_constants(path) -> dict:
+    return {
+        target.id: node.value.value
+        for node in ast.parse(path.read_text()).body
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+
+
+def announced_by_functions() -> set[tuple[str, str]]:
+    found = set()
+    for service in app.DEPLOYED:
+        src = config.REPO_ROOT / "functions" / service / "src"
+        for path in sorted(src.glob("*.py")):
+            constants = module_constants(path)
+            if "ANNOUNCE_SOURCE" in constants:
+                found.add(
+                    (constants["ANNOUNCE_SOURCE"], constants["ANNOUNCE_DETAIL_TYPE"])
+                )
+    return found
+
+
 def test_triggers_match_the_events_the_stages_announce(resources):
     """Every event a machine puts on the bus has a rule listening for it, and no rule
     listens for an event nothing sends. The ASL and the rule are edited separately, and
     a mismatch is delivered to nothing."""
-    announced = set()
+    announced = announced_by_functions()
     for name in by_name(resources, MACHINE, "StateMachineName"):
         announced |= announced_events(name.removeprefix(f"{config.PREFIX}-"))
 
@@ -135,12 +159,24 @@ def test_the_lambda_target_carries_its_invoke_permission(resources):
     """The permission CDK emits only because the rule targets a construct in this stack.
     Under the six-stack layout the function was imported by ARN, CDK skipped the
     permission with a warning rather than an error, and every delivery was refused."""
-    (permission,) = of_type(resources, PERMISSION).values()
-    properties = permission["Properties"]
-    tokenize = of_type(resources, FUNCTION)[get_att(properties["FunctionName"])]
-    rule = of_type(resources, RULE)[get_att(properties["SourceArn"])]
+    functions = of_type(resources, FUNCTION)
+    rules = of_type(resources, RULE)
+    permitted = set()
 
-    assert properties["Action"] == "lambda:InvokeFunction"
-    assert properties["Principal"] == "events.amazonaws.com"
-    assert tokenize["Properties"]["FunctionName"] == f"{config.PREFIX}-tokenize"
-    assert rule["Properties"]["Name"] == f"{config.PREFIX}-tokenize-trigger"
+    for permission in of_type(resources, PERMISSION).values():
+        properties = permission["Properties"]
+        assert properties["Action"] == "lambda:InvokeFunction"
+        assert properties["Principal"] == "events.amazonaws.com"
+        target = functions[get_att(properties["FunctionName"])]
+        rule = rules[get_att(properties["SourceArn"])]
+        permitted.add(
+            (target["Properties"]["FunctionName"], rule["Properties"]["Name"])
+        )
+
+    assert permitted == {
+        (f"{config.PREFIX}-tokenize", f"{config.PREFIX}-tokenize-trigger"),
+        (
+            f"{config.PREFIX}-create-embeddings",
+            f"{config.PREFIX}-create-embeddings-trigger",
+        ),
+    }

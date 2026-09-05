@@ -22,7 +22,8 @@ class EntryStatus(StrEnum):
     STANDARDIZE_UNRESOLVED = "0201_STANDARDIZE_UNRESOLVED"
     STANDARDIZED = "0250_STANDARDIZED"
     TOKENIZED = "0300_TOKENIZED"
-    EMBEDDED = "0400_EMBEDDED"
+    EMBEDDINGS_CREATED = "0350_EMBEDDINGS_CREATED"
+    EMBEDDINGS_CREATION_FAILED = "0351T_EMBEDDINGS_CREATION_FAILED"
 
     @property
     def is_terminal(self) -> bool:
@@ -82,8 +83,8 @@ class PipelineEntry(BaseModel):
         return f"token_tags/{self.book_id}.csv"
 
     @property
-    def s3_prefix_models(self) -> str:
-        return f"embeddings/{self.book_id}/"
+    def s3_embeddings_key(self) -> str:
+        return f"embeddings/{self.book_id}.npz"
 
 
 _pipeline_entries = None

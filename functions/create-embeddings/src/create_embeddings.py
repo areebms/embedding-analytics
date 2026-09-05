@@ -12,7 +12,7 @@ from shared.tables.pipeline_entries import (
     PipelineEntry,
     get_pipeline_entries,
 )
-from constants import MIN_TOKEN_SIZE, VECTOR_SIZE
+from constants import MIN_TOKEN_SIZE, VECTOR_SIZE, MAX_BOOKS_PER_SUBJECT
 from ppmi_svd import (
     Passages,
     build_vocab,
@@ -23,6 +23,8 @@ from ppmi_svd import (
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+PENDING = (EntryStatus.TOKENIZED,)
 
 
 class EmbeddingData(NamedTuple):
@@ -74,7 +76,7 @@ def get_embedding_data(passages: Passages) -> EmbeddingData | None:
     )
 
 
-def upload_embedding_data(book_id: BookIndex, embedding_data: EmbeddingData) -> None:
+def upload_embedding_data(entry: PipelineEntry, embedding_data: EmbeddingData) -> None:
     with tempfile.NamedTemporaryFile(suffix=".npz") as file:
         np.savez(
             file,
@@ -83,40 +85,82 @@ def upload_embedding_data(book_id: BookIndex, embedding_data: EmbeddingData) -> 
             attr_count=embedding_data.term_counts,
         )
         file.flush()
-        upload_file(f"embeddings/{book_id}.npz", file.name)
+        upload_file(entry.s3_embeddings_key, file.name)
 
 
-def create_embeddings(book_id: BookIndex) -> dict[str, BookIndex] | None:
-    pipeline_entries = get_pipeline_entries()
+def set_status(book_id, status):
+    if not get_pipeline_entries().set_status(book_id, status):
+        logger.warning("%s: the status guard refused the write to %s.", book_id, status)
 
-    try:
-        entry = pipeline_entries.get_entry(book_id, ["book_id", "status"])
-    except LookupError:
-        logger.warning("%s has no pipeline entry.", book_id)
-        return None
 
-    if entry.status != EntryStatus.TOKENIZED:
-        logger.warning(
-            "%s is %s, not %s.", book_id, entry.status, EntryStatus.TOKENIZED
+def resolve_subject(subject_id: str) -> list[BookIndex]:
+    book_ids = get_pipeline_entries().get_indexes(
+        status=EntryStatus.TOKENIZED, subject_id=subject_id
+    )
+
+    if len(book_ids) > MAX_BOOKS_PER_SUBJECT:
+        logger.info(
+            "%s resolved %d books; taking the first %d, the rest keep %s "
+            "for the next run.",
+            subject_id,
+            len(book_ids),
+            MAX_BOOKS_PER_SUBJECT,
+            EntryStatus.TOKENIZED,
         )
-        return None
+        book_ids = book_ids[:MAX_BOOKS_PER_SUBJECT]
 
-    passages = load_passages(entry)
-    if passages is None:
-        logger.warning("%s has not been tokenized.", book_id)
-        return None
+    return book_ids
 
-    embedding_data = get_embedding_data(passages)
-    if embedding_data is None:
-        logger.warning("%s has too few terms for %d dimensions.", book_id, VECTOR_SIZE)
-        return None
 
-    upload_embedding_data(book_id, embedding_data)
+def get_entries(book_ids: list[str]) -> list[PipelineEntry]:
+    entries = get_pipeline_entries().get_entries(list(book_ids))
 
-    if not pipeline_entries.set_status(book_id, EntryStatus.EMBEDDED):
-        logger.warning("%s was not advanced to %s.", book_id, EntryStatus.EMBEDDED)
+    if len(entries) != len(book_ids):
+        logger.warning(
+            "%d of %d book(s) have no pipeline entry.",
+            len(book_ids) - len(entries),
+            len(book_ids),
+        )
 
-    return {"book_id": book_id}
+    pending = []
+    for entry in entries:
+        if entry.status in PENDING:
+            pending.append(entry)
+        else:
+            logger.info(
+                "%s is at %s, not %s; skipping embedding creation.",
+                entry.book_id,
+                entry.status,
+                ", ".join(PENDING),
+            )
+
+    return pending
+
+
+def create_embeddings(entries: list[PipelineEntry]) -> dict:
+    embedded = 0
+
+    for entry in entries:
+        passages = load_passages(entry)
+        if passages is None:
+            logger.warning("%s has not been tokenized.", entry.book_id)
+            continue
+
+        embedding_data = get_embedding_data(passages)
+        if embedding_data is None:
+            logger.warning(
+                "%s has too few terms for %d dimensions.", entry.book_id, VECTOR_SIZE
+            )
+            set_status(entry.book_id, EntryStatus.EMBEDDINGS_CREATION_FAILED)
+            continue
+
+        upload_embedding_data(entry, embedding_data)
+        set_status(entry.book_id, EntryStatus.EMBEDDINGS_CREATED)
+
+        embedded += 1
+
+    logger.info("%d of %d book(s) embedded.", embedded, len(entries))
+    return {"found": len(entries), "embedded": embedded}
 
 
 if __name__ == "__main__":  # pragma: no cover
@@ -127,5 +171,4 @@ if __name__ == "__main__":  # pragma: no cover
     book_ids = get_pipeline_entries().get_indexes(EntryStatus.TOKENIZED)
     logger.info("Embedding %d books: %s", len(book_ids), book_ids)
 
-    for book_id in book_ids:
-        create_embeddings(book_id)
+    create_embeddings(get_entries(book_ids))

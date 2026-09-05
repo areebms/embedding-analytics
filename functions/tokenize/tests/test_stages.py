@@ -1,5 +1,6 @@
 """The stage end to end, through the handler the step function invokes."""
 
+import json
 import logging
 
 import pytest
@@ -177,6 +178,48 @@ def test_one_failing_book_does_not_end_the_run(
     assert status == {"found": 2, "tokenized": 1, "failed": [str(INDEX_2)]}
     assert status_of(entries, INDEX) == EntryStatus.TOKENIZED
     assert status_of(entries, INDEX_2) == EntryStatus.STANDARDIZED
+
+
+def test_the_books_that_reached_tokenized_are_announced(
+    standardized_book, events_client
+):
+    standardized_book(INDEX)
+    standardized_book(INDEX_2)
+
+    app.handler({"book_ids": [str(INDEX), str(INDEX_2)]}, None)
+
+    (entry,) = events_client.put_events.call_args.kwargs["Entries"]
+
+    assert entry["Source"] == main.ANNOUNCE_SOURCE
+    assert entry["DetailType"] == main.ANNOUNCE_DETAIL_TYPE
+    assert json.loads(entry["Detail"]) == {
+        "book_ids": [str(INDEX_2), str(INDEX)],
+        "tokenized": 2,
+    }
+
+
+def test_a_run_that_tokenized_nothing_announces_nothing(seed, events_client):
+    seed(EntryStatus.TOKENIZED)
+
+    status = app.handler({"book_ids": [str(INDEX)]}, None)
+
+    assert status == {"found": 0, "tokenized": 0, "failed": []}
+    events_client.put_events.assert_not_called()
+
+
+def test_an_announcement_the_bus_rejects_ends_the_run(
+    standardized_book, events_client, entries
+):
+    index = standardized_book()
+    events_client.put_events.return_value = {
+        "FailedEntryCount": 1,
+        "Entries": [{"ErrorCode": "ThrottlingException"}],
+    }
+
+    with pytest.raises(RuntimeError, match="rejected"):
+        app.handler({"book_ids": [str(index)]}, None)
+
+    assert status_of(entries, index) == EntryStatus.TOKENIZED
 
 
 def test_a_status_write_the_guard_turns_down_is_reported(seed, caplog):

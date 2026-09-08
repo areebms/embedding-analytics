@@ -91,11 +91,7 @@ class BookSummary(BaseModel):
 
 
 class DefinitionalAgreement(BaseModel):
-    """One book read against the nominated source book.
-
-    `mean_local_similarity` is the mean across seeds of a single pairwise local
-    similarity, over the 75 terms nearest the query in the measuring book.
-    """
+    """One book read against the nominated source book."""
 
     model_config = ConfigDict(extra="forbid")
 

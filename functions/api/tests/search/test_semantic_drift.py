@@ -35,13 +35,13 @@ def default_books(book_ids=None, **kwargs):
     return {book_id: book_rows(book_id, **kwargs) for book_id in book_ids}
 
 
-def make_fixed_term_entry(term, vector, n_seeds=5, count=100, tags=None):
-    arr16 = np.array([vector], dtype=np.float16).repeat(n_seeds, axis=0)
+def make_fixed_term_entry(term, vector, count=100, tags=None):
+    arr16 = np.array(vector, dtype=np.float16)
     return {
         "term": term,
         "count_": count,
         "tags": tags if tags is not None else {"N"},
-        "vectors": [bytes(arr16[i].tobytes()) for i in range(n_seeds)],
+        "vectors": [bytes(arr16.tobytes())],
     }
 
 
@@ -721,13 +721,13 @@ def test_incomparable_book_scored_alike_with_and_without_selection(
         assert book_scores(body, shared_ids[0])
 
 
-def test_semantic_drift_incomparable_book_does_not_shorten_other_seeds(
+def test_semantic_drift_incomparable_book_does_not_affect_other_books(
     post_semantic_drift,
 ):
 
     books = {
         **default_books(BOOK_IDS),
-        SPARE_ID: book_rows(SPARE_ID, vocab=["labour", "alpha", "beta"], n_seeds=3),
+        SPARE_ID: book_rows(SPARE_ID, vocab=["labour", "alpha", "beta"]),
     }
 
     def query_score(book_ids):
@@ -755,7 +755,7 @@ def test_semantic_drift_incomparable_book_does_not_shorten_other_seeds(
 
 def test_semantic_drift_score_is_independent_of_peer_order(post_semantic_drift):
 
-    books = {**default_books(BOOK_IDS), SPARE_ID: book_rows(SPARE_ID, n_seeds=3)}
+    books = {**default_books(BOOK_IDS), SPARE_ID: book_rows(SPARE_ID)}
 
     def query_score(book_ids):
         body = post_semantic_drift(books=books, book_ids=book_ids, selected=None).json()

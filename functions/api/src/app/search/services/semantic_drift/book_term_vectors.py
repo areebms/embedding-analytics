@@ -29,7 +29,7 @@ class BookTermVectors:
         if not len(terms):
             self.terms = terms
             self.term_iloc: dict[str, int] = {}
-            self.term_vectors = np.zeros((0, 0, 0), dtype=self.DTYPE)
+            self.term_vectors = np.zeros((0, 0), dtype=self.DTYPE)
             self.term_counts = np.zeros(0, dtype=np.int64)
             return
 
@@ -37,9 +37,7 @@ class BookTermVectors:
         self.terms = terms[order]
         self.term_iloc = {str(term): i for i, term in enumerate(self.terms)}
 
-        self.term_vectors = np.ascontiguousarray(
-            np.asarray(term_vectors)[order].transpose(1, 0, 2)
-        )
+        self.term_vectors = np.ascontiguousarray(np.asarray(term_vectors)[order])
 
         self.term_counts = np.asarray(term_counts, dtype=np.int64)[order]
 
@@ -48,15 +46,15 @@ class BookTermVectors:
         iloc = self.term_iloc.get(term)
         return 0 if iloc is None else int(self.term_counts[iloc])
 
-    def get_expr_vectors(self, node: TermNode | OpNode) -> np.ndarray:
+    def get_expr_vector(self, node: TermNode | OpNode) -> np.ndarray:
 
         if isinstance(node, TermNode):
-            return self.term_vectors[:, self.term_iloc[node.term]]
+            return self.term_vectors[self.term_iloc[node.term]]
 
-        left = self.get_expr_vectors(node.args[0])
-        right = self.get_expr_vectors(node.args[1])
+        left = self.get_expr_vector(node.args[0])
+        right = self.get_expr_vector(node.args[1])
         result = left + right if node.op == "+" else left - right
-        return normalize_vectors(result, axis=1)
+        return normalize_vectors(result)
 
     def missing_terms(self, terms: Iterable[str]) -> set[str]:
         return set(terms) - self.term_iloc.keys()
@@ -98,21 +96,17 @@ class BooksTermCache:
         return self.shared_terms_index[key]
 
     @staticmethod
-    def decode_vectors(
-        term_buffers: list[Sequence[bytes]], n_seeds: int | None
-    ) -> np.ndarray:
-        if n_seeds is None:
-            return np.zeros((0, 0, 0), dtype=BookTermVectors.DTYPE)
+    def decode_vectors(term_buffers: list[bytes]) -> np.ndarray:
+        if not term_buffers:
+            return np.zeros((0, 0), dtype=BookTermVectors.DTYPE)
 
-        dim = np.frombuffer(bytes(term_buffers[0][0]), dtype=np.float16).size
-        blob = b"".join(
-            bytes(buffer) for buffers in term_buffers for buffer in buffers[:n_seeds]
-        )
+        dim = np.frombuffer(bytes(term_buffers[0]), dtype=np.float16).size
+        blob = b"".join(bytes(buffer) for buffer in term_buffers)
         return normalize_vectors(
             np.frombuffer(blob, dtype=np.float16)
             .astype(BookTermVectors.DTYPE)
-            .reshape(len(term_buffers), n_seeds, dim),
-            axis=2,
+            .reshape(len(term_buffers), dim),
+            axis=1,
         )
 
     def load_book(self, book_id: BookIndex) -> BookTermVectors:
@@ -121,7 +115,6 @@ class BooksTermCache:
             return self.books_term_vectors[book_id]
 
         terms, term_buffers, term_counts = [], [], []
-        n_seeds = None
         for entry in self.table.get_entries(
             book_id, fields=["term", "tags", "vectors", "count_"]
         ):
@@ -131,14 +124,12 @@ class BooksTermCache:
             if "vectors" not in entry:
                 continue
 
-            buffers = entry["vectors"]
-            n_seeds = len(buffers) if n_seeds is None else min(n_seeds, len(buffers))
             terms.append(entry["term"])
             term_counts.append(int(entry.get("count_", 0)))  # stored as a Decimal
-            term_buffers.append(buffers)
+            term_buffers.append(entry["vectors"][0])
 
         self.books_term_vectors[book_id] = BookTermVectors(
-            terms, self.decode_vectors(term_buffers, n_seeds), term_counts
+            terms, self.decode_vectors(term_buffers), term_counts
         )
 
         request_log.get({}).setdefault("cache_warmed", {})[str(book_id)] = len(terms)

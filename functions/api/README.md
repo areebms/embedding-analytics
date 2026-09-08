@@ -35,9 +35,9 @@ the rest of this document readable. Each layer is the one below it, reduced:
 
 | Layer | Name | Shape |
 |---|---|---|
-| The query's cosine to every term in one book | similarity vectors | `(n_seeds, n_terms)` |
-| Two books compared over the query's 75-term neighbourhood | `local_similarity` | `(n_seeds,)`, per pair |
-| Its mean, across seeds and across peers | `mean_local_similarity` | scalar |
+| The query's cosine to every term in one book | similarity vectors | `(n_terms,)` |
+| Two books compared over the query's 75-term neighbourhood | `local_similarity` | scalar, per pair |
+| Its mean across peers | `mean_local_similarity` | scalar |
 | What that scalar is taken to mean | `DefinitionalAgreement` / `…ToCorpus` | model |
 
 **Local** is doing work: the comparison runs over the 75 terms nearest the query
@@ -60,7 +60,7 @@ alignment *is* valid. Comparing two books means comparing two such profiles:
    terms the pair raises `NoLocalNearestTermsError` rather than reporting a thin
    comparison.
 3. Read both books' similarity-to-query over those 75 anchors, center each,
-   L2-normalize each, and take the dot product — per seed.
+   L2-normalize each, and take the dot product.
 
 The centering is what makes step 3 informative. The 75 anchors are by
 construction the terms closest to the query in the measuring book, so their
@@ -139,8 +139,8 @@ lists from scratch, repeated for every expression even though the same two
 books recur across all of them.
 
 **The decision.** `BooksSimilarityCache.warm_cache` stacks every expression's
-query vectors for a book into one matmul — `(n_seeds, n_terms, dim) @ (n_seeds,
-dim, n_exprs)` — instead of calling it once per expression. `get_shared_term_indexes`
+query vectors for a book into one matmul — `(n_terms, dim) @ (dim, n_exprs)` —
+instead of calling it once per expression. `get_shared_term_indexes`
 finds shared terms via a sorted-array merge join (`np.searchsorted`) rather
 than a set intersection, and caches the result per book pair, since the same
 pair is shared by every expression in the request. Measured ~4x reduction in
@@ -239,14 +239,14 @@ an expression string, and both are returned.
 The evaluator normalizes after each sub-expression, not once at the end. For
 `labour + (productive - unproductive)`:
 
-1. Fetch per-seed vectors for `productive` and `unproductive`
-2. Compute the difference element-wise across seeds
+1. Fetch the vectors for `productive` and `unproductive`
+2. Compute the difference element-wise
 3. Normalize the contrast direction to unit length
-4. Add it to the per-seed `labour` vectors
-5. Normalize the final query vectors
+4. Add it to the `labour` vector
+5. Normalize the final query vector
 6. Take the query's cosine to every term each book uses — the second-order
    embedding
-7. Compare books over their top 75 shared terms, per seed
+7. Compare books over their top 75 shared terms
 
 Per-operation normalization prevents high-frequency or high-norm terms from
 dominating combined expressions, and makes a contrast a *direction* that tilts

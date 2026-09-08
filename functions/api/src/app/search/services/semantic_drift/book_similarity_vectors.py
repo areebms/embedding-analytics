@@ -12,6 +12,7 @@ from shared.commons import BookIndex
 
 
 class BookSimilarityVectors:
+    """Second Order Vectors with respect to SearchExpr"""
 
     def __init__(
         self,
@@ -29,19 +30,14 @@ class BookSimilarityVectors:
         self.masked_iloc = np.cumsum(self.is_valid) - 1
 
         self.terms = book_terms[self.is_valid]
-        self.similarity_vectors = similarity_vectors[:, self.is_valid]
-        self.mean_similarities_to_query = self.similarity_vectors.mean(axis=0)
+        self.similarity_vectors = similarity_vectors[self.is_valid]
 
     @staticmethod
-    def get_similarity_vectors(query_vectors: np.ndarray, term_vectors: np.ndarray):
-        # return has shape (n_seeds, n_terms)
-        n_seeds = min(query_vectors.shape[0], term_vectors.shape[0])
-        return np.matmul(term_vectors[:n_seeds], query_vectors[:n_seeds, :, None])[
-            ..., 0
-        ]
+    def get_similarity_vectors(query_vector: np.ndarray, term_vectors: np.ndarray):
+        # return has shape (n_terms,)
+        return term_vectors @ query_vector
 
     def get_local_similarity(self, peer: BookSimilarityVectors):
-        # returns one value per seed
 
         indexes, peer_indexes = self.books_term_cache.get_shared_term_indexes(
             self.book_id, peer.book_id
@@ -56,21 +52,15 @@ class BookSimilarityVectors:
             )
 
         # vectors of terms closest to the expression.
-        shared_similarity_vectors = self.mean_similarities_to_query[shared_indexes]
+        shared_similarity_vectors = self.similarity_vectors[shared_indexes]
         sorted_iloc = np.argsort(-shared_similarity_vectors)[
             :NUM_NEAREST_TERMS_FOR_LOCAL_COSINE_SIMILARITY
         ]
 
-        n_seeds = min(
-            self.similarity_vectors.shape[0], peer.similarity_vectors.shape[0]
-        )
-
         # Similarity vectors for terms shared between books.
-        shared_book_vectors = self.similarity_vectors[:n_seeds][
-            :, shared_indexes[sorted_iloc]
-        ]
-        shared_peer_vectors = peer.similarity_vectors[:n_seeds][
-            :, shared_peer_indexes[sorted_iloc]
+        shared_book_vectors = self.similarity_vectors[shared_indexes[sorted_iloc]]
+        shared_peer_vectors = peer.similarity_vectors[
+            shared_peer_indexes[sorted_iloc]
         ]
         return self.correlate_vectors(shared_book_vectors, shared_peer_vectors)
 
@@ -110,7 +100,7 @@ class BooksSimilarityCache:
             book_id,
             expr,
             BookSimilarityVectors.get_similarity_vectors(
-                book_term_vectors.get_expr_vectors(expr.tree),
+                book_term_vectors.get_expr_vector(expr.tree),
                 book_term_vectors.term_vectors,
             ),
         )
@@ -151,16 +141,11 @@ class BooksSimilarityCache:
                 continue
 
             book_expr_vectors = np.stack(
-                [book_term_vectors.get_expr_vectors(expr.tree) for expr in book_exprs],
+                [book_term_vectors.get_expr_vector(expr.tree) for expr in book_exprs],
                 axis=-1,
             )
-            n_seeds = min(
-                book_expr_vectors.shape[0], book_term_vectors.term_vectors.shape[0]
-            )
-            # (n_seeds, n_terms, dim) @ (n_seeds, dim, n_exprs)
-            book_expr_similarities = np.matmul(
-                book_term_vectors.term_vectors[:n_seeds], book_expr_vectors[:n_seeds]
-            )
+            # (n_terms, dim) @ (dim, n_exprs)
+            book_expr_similarities = book_term_vectors.term_vectors @ book_expr_vectors
 
             for index, expr in enumerate(book_exprs):
-                self._store(book_id, expr, book_expr_similarities[..., index])
+                self._store(book_id, expr, book_expr_similarities[:, index])

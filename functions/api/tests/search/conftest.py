@@ -36,7 +36,6 @@ VOCAB = NAMED_VOCAB + FILLER_VOCAB
 
 def make_term_entry(
     term: str,
-    n_seeds: int = 5,
     dim: int = 4,
     count: int = 100,
     tags: set[str] | None = None,
@@ -44,19 +43,18 @@ def make_term_entry(
 ) -> dict:
     """Build a BookTermTable-shaped dict with realistic byte vectors."""
     rng = np.random.default_rng(seed)
-    vectors = rng.normal(size=(n_seeds, dim))
-    arr16 = vectors.astype(np.float16)
+    arr16 = rng.normal(size=dim).astype(np.float16)
     return {
         "term": term,
         "count_": count,
         "tags": tags if tags is not None else {"N"},
-        "vectors": [bytes(arr16[i].tobytes()) for i in range(arr16.shape[0])],
+        "vectors": [bytes(arr16.tobytes())],
     }
 
 
-def book_rows(book_seed, vocab=VOCAB, n_seeds=5):
+def book_rows(book_seed, vocab=VOCAB):
     return {
-        term: make_term_entry(term, n_seeds=n_seeds, seed=book_seed * 100 + i)
+        term: make_term_entry(term, seed=book_seed * 100 + i)
         for i, term in enumerate(vocab)
     }
 

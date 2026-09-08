@@ -84,7 +84,7 @@ def get_comparative_terms(
 
     for book_id in book_ids:
         book_similarity_vectors = books_similarity_cache.load_book(book_id, query)
-        book_similarities = book_similarity_vectors.mean_similarities_to_query
+        book_similarities = book_similarity_vectors.similarity_vectors
         book_similarities_list.append(book_similarities)
         book_terms_list.append(book_similarity_vectors.terms)
         book_similarities_centered_list.append(
@@ -164,11 +164,7 @@ def get_mean_local_similarity_per_book(
     against_corpus: bool,
 ):
 
-    n_seeds = min(len(similarity) for similarity in local_similarities_per_peer)
-    truncated = [similarity[:n_seeds] for similarity in local_similarities_per_peer]
-
-    mean_local_similarities_per_seed = np.mean(truncated, axis=0)
-    mean_local_similarity = float(np.mean(mean_local_similarities_per_seed))
+    mean_local_similarity = float(np.mean(local_similarities_per_peer))
 
     if against_corpus:
         return DefinitionalAgreementToCorpus(

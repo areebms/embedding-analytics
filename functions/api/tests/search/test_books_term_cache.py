@@ -137,28 +137,28 @@ def test_get_missing_terms_by_book_asks_only_the_books_named():
     assert list(books.get_missing_terms_by_book(book_ids, ["labour"])) == book_ids
 
 
-def test_get_expr_vectors_combines_leaves_by_operator():
+def test_get_expr_vector_combines_leaves_by_operator():
     vectors = _term_cache().load_book(BookIndex(1))
-    labour = vectors.get_expr_vectors(TermNode(term="labour"))
-    value = vectors.get_expr_vectors(TermNode(term="value"))
+    labour = vectors.get_expr_vector(TermNode(term="labour"))
+    value = vectors.get_expr_vector(TermNode(term="value"))
 
     def unit(v):
-        return v / np.linalg.norm(v, axis=1, keepdims=True)
+        return v / np.linalg.norm(v)
 
     def expr(op, *terms):
-        return vectors.get_expr_vectors(
+        return vectors.get_expr_vector(
             OpNode(op=op, args=[TermNode(term=term) for term in terms])
         )
 
     plus, minus = expr("+", "labour", "value"), expr("-", "labour", "value")
 
-    assert plus.shape == labour.shape  # one vector per seed, not one per book
+    assert plus.shape == labour.shape
     np.testing.assert_allclose(plus, unit(labour + value), rtol=1e-5)
     np.testing.assert_allclose(minus, unit(labour - value), rtol=1e-5)
 
     # Nesting recurses on both sides, so an inner result is renormalized before it
     # is combined -- (labour + value) - wage is NOT labour + value - wage.
-    nested = vectors.get_expr_vectors(
+    nested = vectors.get_expr_vector(
         OpNode(
             op="-",
             args=[
@@ -167,7 +167,7 @@ def test_get_expr_vectors_combines_leaves_by_operator():
             ],
         )
     )
-    wage = vectors.get_expr_vectors(TermNode(term="wage"))
+    wage = vectors.get_expr_vector(TermNode(term="wage"))
     np.testing.assert_allclose(nested, unit(plus - wage), rtol=1e-5)
     assert not np.allclose(nested, unit(labour + value - wage))
 

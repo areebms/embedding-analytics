@@ -42,6 +42,12 @@ BookIndexField = Annotated[
 ]
 
 
+class BookMetadata(BaseModel):
+    author: str
+    title: str
+    published_year: int | None = None
+
+
 class PipelineEntry(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
@@ -49,6 +55,7 @@ class PipelineEntry(BaseModel):
     book_id: BookIndexField
     subject_ids: set[BookIndexField] = Field(default_factory=set)
     status: EntryStatus | None = None
+    metadata: BookMetadata | None = None
 
     @property
     def s3_metadata_key(self) -> str:

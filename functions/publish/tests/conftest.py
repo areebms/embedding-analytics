@@ -4,7 +4,6 @@ import tempfile
 
 import numpy as np
 import pytest
-from gensim.models import KeyedVectors
 
 
 # ── Environment ───────────────────────────────────────────────────────
@@ -27,6 +26,7 @@ from shared.s3 import upload_csv, upload_file, upload_json
 from shared.tables.book_terms import get_book_term_table
 from shared.tables.corpus_terms import get_corpus_term_table
 from shared.tables.pipeline_entries import (
+    BookMetadata,
     EntryStatus,
     PipelineEntry,
     get_pipeline_entries,
@@ -64,6 +64,10 @@ SMITH_METADATA = {
 
 SMITH_PUBLISHED_YEAR = 1776
 
+SMITH_STALE_METADATA = BookMetadata(
+    author="Anon", title="Untitled", published_year=SMITH_PUBLISHED_YEAR
+)
+
 SMITH_TOKEN_LEMMAS = [
     ["labour", "value", "rent"],
     ["labour", "value"],
@@ -78,26 +82,19 @@ SMITH_TOKEN_TAGS = [
 # ── Helpers ───────────────────────────────────────────────────────────
 
 
-def _create_keyed_vectors(term_counts, vector_dim, rng):
-    """Build a gensim KeyedVectors with deterministic random vectors."""
-    kv = KeyedVectors(vector_size=vector_dim)
+def _upload_embeddings(book_id, term_counts, rng):
     terms = list(term_counts)
-    vectors = rng.randn(len(terms), vector_dim).astype(np.float32)
-    kv.add_vectors(terms, vectors)
-    for term, count in term_counts.items():
-        kv.set_vecattr(term, "count", count)
-    return kv
-
-
-def _save_keyed_vectors_to_s3(s3_key, kv):
-    """Save a KeyedVectors to a temp file, upload to moto S3."""
-    with tempfile.NamedTemporaryFile(suffix=".model", delete=False) as tmp:
-        kv.save(tmp.name)
-        tmp_path = tmp.name
-    try:
-        upload_file(s3_key, tmp_path)
-    finally:
-        os.unlink(tmp_path)
+    with tempfile.NamedTemporaryFile(suffix=".npz") as file:
+        np.savez(
+            file,
+            terms=np.asarray(terms, dtype=np.str_),
+            vectors=rng.randn(len(terms), VECTOR_DIM).astype(np.float32),
+            attr_count=np.asarray(
+                [term_counts[term] for term in terms], dtype=np.int64
+            ),
+        )
+        file.flush()
+        upload_file(f"embeddings/{book_id}.npz", file.name)
 
 
 def _upload_pos_data(entry, token_lemmas, token_tags):
@@ -211,15 +208,11 @@ def seeded_ricardo(term_table, corpus_term_table):
 @pytest.fixture
 def smith_s3_data(moto_dynamo):
     """Upload all S3 artifacts needed for publish(BOOK_SMITH):
-    centroid model, POS CSVs, and metadata JSON.
+    the embeddings archive, POS CSVs, and metadata JSON.
     Also populates the PipelineTable entry."""
     rng = np.random.RandomState(42)
 
-    # Centroid model (aligned, mean across seeds).
-    centroid_kv = _create_keyed_vectors(SMITH_TERM_COUNTS, VECTOR_DIM, rng)
-    _save_keyed_vectors_to_s3(
-        f"kvectors/{BOOK_SMITH}/aligned/centroid.model", centroid_kv
-    )
+    _upload_embeddings(BOOK_SMITH, SMITH_TERM_COUNTS, rng)
 
     # POS data: token lemmas and tags as CSVs.
     # Sentences are rows. Each term appears with a noun tag (NN),
@@ -227,7 +220,7 @@ def smith_s3_data(moto_dynamo):
     entry = PipelineEntry(
         book_id=BOOK_SMITH,
         status=EntryStatus.EMBEDDINGS_CREATED,
-        published_year=SMITH_PUBLISHED_YEAR,
+        metadata=SMITH_STALE_METADATA,
     )
     _upload_pos_data(entry, SMITH_TOKEN_LEMMAS, SMITH_TOKEN_TAGS)
 

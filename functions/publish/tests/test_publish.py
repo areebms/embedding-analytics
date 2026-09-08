@@ -1,7 +1,7 @@
 """End-to-end tests for the publish() function in main.py.
 
 Uses moto for DynamoDB (BookTermTable, CorpusTermTable, PipelineTable) and
-S3 (centroid models, seed models, POS CSVs, metadata JSON).
+S3 (the embeddings archive, POS CSVs, metadata JSON).
 
 These tests call the actual publish() function, not a reimplementation.
 """
@@ -17,11 +17,14 @@ from conftest import (
     BOOK_SMITH,
     BOOK_RICARDO,
     SMITH_METADATA,
+    SMITH_PUBLISHED_YEAR,
+    SMITH_STALE_METADATA,
     SMITH_TERM_COUNTS,
+    SMITH_TOKEN_LEMMAS,
+    SMITH_TOKEN_TAGS,
     VECTOR_DIM,
-    _create_keyed_vectors,
-    _save_keyed_vectors_to_s3,
     _seed_book,
+    _upload_embeddings,
     _upload_pos_data,
 )
 
@@ -94,9 +97,16 @@ def test_publish_populates_corpus_term_table(smith_s3_data, corpus_term_table):
 def test_publish_updates_pipeline_metadata(smith_s3_data, pipeline_entries):
     _run_publish()
 
-    entry = pipeline_entries.get_entry(BOOK_SMITH, fields=["author", "title"])
-    assert entry.author == "Smith, Adam"
-    assert entry.title == "The Wealth of Nations"
+    entry = pipeline_entries.get_entry(BOOK_SMITH, fields=["metadata"])
+    assert entry.metadata.author == "Smith, Adam"
+    assert entry.metadata.title == "The Wealth of Nations"
+
+
+def test_publish_keeps_the_published_year(smith_s3_data, pipeline_entries):
+    _run_publish()
+
+    entry = pipeline_entries.get_entry(BOOK_SMITH, fields=["metadata"])
+    assert entry.metadata.published_year == SMITH_PUBLISHED_YEAR
 
 
 def test_publish_leaves_the_status_intact(smith_s3_data, pipeline_entries):
@@ -128,19 +138,16 @@ def test_publish_filters_terms_with_non_content_pos_tags(moto_dynamo, term_table
     excluded from the term intersection and not written to BookTermTable."""
     rng = np.random.RandomState(99)
 
-    # Include "the" in the centroid model alongside the normal terms.
+    # Include "the" in the embeddings alongside the normal terms.
     counts_with_stopword = dict(SMITH_TERM_COUNTS)
     counts_with_stopword["the"] = 500
 
-    centroid_kv = _create_keyed_vectors(counts_with_stopword, VECTOR_DIM, rng)
-    _save_keyed_vectors_to_s3(
-        f"kvectors/{BOOK_SMITH}/aligned/centroid.model", centroid_kv
-    )
+    _upload_embeddings(BOOK_SMITH, counts_with_stopword, rng)
 
     entry = PipelineEntry(
         book_id=BOOK_SMITH,
         status=EntryStatus.EMBEDDINGS_CREATED,
-        published_year=1776,
+        metadata=SMITH_STALE_METADATA,
     )
 
     # "the" only gets a DT tag — should be filtered out.
@@ -207,3 +214,31 @@ def test_republish_does_not_affect_other_books(
     row = corpus_term_table.get_term("labour")
     assert BOOK_SMITH in row["book_ids"]
     assert BOOK_RICARDO in row["book_ids"]
+
+
+def test_republish_drops_terms_the_re_embed_lost(
+    smith_s3_data, term_table, corpus_term_table
+):
+    """A term that survives the first publish but is absent from the second
+    embedding must leave both BookTermTable and the corpus row."""
+    _run_publish()
+
+    assert "rent" in _written_terms(term_table)
+
+    surviving_counts = {
+        term: count for term, count in SMITH_TERM_COUNTS.items() if term != "rent"
+    }
+    _upload_embeddings(BOOK_SMITH, surviving_counts, np.random.RandomState(7))
+    _upload_pos_data(
+        smith_s3_data,
+        [[term for term in row if term != "rent"] for row in SMITH_TOKEN_LEMMAS],
+        [SMITH_TOKEN_TAGS[0][:-1], SMITH_TOKEN_TAGS[1]],
+    )
+
+    _run_publish()
+
+    assert _written_terms(term_table) == set(surviving_counts)
+    assert term_table.get_entry("rent", BOOK_SMITH) is None
+    assert corpus_term_table.get_term("rent") is None
+    assert corpus_term_table.get_term("labour")["book_ids"] == {BOOK_SMITH}
+    assert corpus_term_table.get_term("value")["book_ids"] == {BOOK_SMITH}

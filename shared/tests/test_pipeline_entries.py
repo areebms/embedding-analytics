@@ -119,8 +119,9 @@ def test_update_leaves_unset_fields_intact(pipeline_entries):
     pipeline_entries.put_entry(PipelineEntry(book_id=INDEX, subject_ids={SUBJECT}))
     pipeline_entries.table.update_item(
         Key={"book_id": INDEX},
-        UpdateExpression="SET author = :a",
-        ExpressionAttributeValues={":a": "Marx, Karl"},
+        UpdateExpression="SET #metadata = :m",
+        ExpressionAttributeNames={"#metadata": "metadata"},
+        ExpressionAttributeValues={":m": {"author": "Marx, Karl", "title": "Capital"}},
     )
 
     pipeline_entries.update_entries(
@@ -130,7 +131,7 @@ def test_update_leaves_unset_fields_intact(pipeline_entries):
     )
 
     item = pipeline_entries.table.get_item(Key={"book_id": INDEX})["Item"]
-    assert item["author"] == "Marx, Karl"
+    assert item["metadata"]["author"] == "Marx, Karl"
     assert item["status"] == EntryStatus.SCRAPED_HTML
 
 
@@ -302,10 +303,15 @@ def test_row_carrying_later_stage_fields_still_parses(pipeline_entries):
     )
     pipeline_entries.table.update_item(
         Key={"book_id": INDEX},
-        UpdateExpression="SET author = :a, mean_disparity = :d",
-        ExpressionAttributeValues={":a": "Marx, Karl", ":d": Decimal("0.42")},
+        UpdateExpression="SET #metadata = :m, mean_disparity = :d",
+        ExpressionAttributeNames={"#metadata": "metadata"},
+        ExpressionAttributeValues={
+            ":m": {"author": "Marx, Karl", "title": "Capital"},
+            ":d": Decimal("0.42"),
+        },
     )
 
     entry = pipeline_entries.get_entry(INDEX)
     assert entry.status is EntryStatus.SCRAPED_HTML
-    assert not hasattr(entry, "author")
+    assert entry.metadata.author == "Marx, Karl"
+    assert not hasattr(entry, "mean_disparity")

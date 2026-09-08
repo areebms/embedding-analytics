@@ -55,6 +55,11 @@ class BaseTable:
             for item in items:
                 batch.put_item(Item=item)
 
+    def batch_delete_entries(self, keys):
+        with self.table.batch_writer() as batch:
+            for key in keys:
+                batch.delete_item(Key=key)
+
     def list_all(self, **params):
         items = []
         while True:

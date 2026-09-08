@@ -57,3 +57,8 @@ class BookTermTable(BaseTable):
         return super().batch_get_entries(
             [{"term": term, "book_id": book_id} for term in terms], fields
         )
+
+    def remove_terms(self, book_id, terms):
+        super().batch_delete_entries(
+            [{"term": term, "book_id": book_id} for term in terms]
+        )

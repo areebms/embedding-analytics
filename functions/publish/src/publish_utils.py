@@ -2,13 +2,13 @@ import logging
 from collections import defaultdict
 
 import numpy as np
-from gensim.models import KeyedVectors
 
 from shared.commons import BookIndex
 from shared.s3 import load_csv, load_file, load_json
 from shared.tables.book_terms import get_book_term_table
 from shared.tables.corpus_terms import get_corpus_term_table
 from shared.tables.pipeline_entries import (
+    BookMetadata,
     EntryStatus,
     PipelineEntry,
     get_pipeline_entries,
@@ -17,29 +17,31 @@ from shared.tables.pipeline_entries import (
 logger = logging.getLogger(__name__)
 
 
-class BookCentroidData:
+class BookEmbeddings:
 
-    def __init__(self, centroid):
-        self.centroid_kvector = centroid
+    def __init__(self, terms, vectors, counts):
+        self.term_ilocs = {str(term): iloc for iloc, term in enumerate(terms)}
+        self.vectors = vectors
+        self.counts = counts
 
     @classmethod
     def from_s3(cls, entry: PipelineEntry):
-        logger.info("%s: loading centroid model", entry.book_id)
-        with load_file(f"kvectors/{entry.book_id}/aligned/centroid.model") as (
-            _,
-            local_path,
-        ):
-            return cls(KeyedVectors.load(local_path))
+        logger.info("%s: loading embeddings", entry.book_id)
+        with load_file(entry.s3_embeddings_key) as (_, local_path):
+            with np.load(local_path, allow_pickle=False) as archive:
+                return cls(
+                    archive["terms"], archive["vectors"], archive["attr_count"]
+                )
 
     @property
     def vocab(self):
-        return set(self.centroid_kvector.key_to_index)
+        return set(self.term_ilocs)
 
     def get_vector(self, term) -> bytes:
-        return self.centroid_kvector[term].astype(np.float16).tobytes()
+        return self.vectors[self.term_ilocs[term]].astype(np.float16).tobytes()
 
     def get_count(self, term) -> int:
-        return int(self.centroid_kvector.get_vecattr(term, "count"))
+        return int(self.counts[self.term_ilocs[term]])
 
 
 class RawPOSData:
@@ -78,7 +80,7 @@ class RawPOSData:
         return set(self.lemma_tags)
 
 
-def update_book_term_table(book_id, terms, centroid_data_obj, raw_pos_data_obj):
+def update_book_term_table(book_id, terms, book_embeddings, raw_pos_data_obj):
     logger.info("%s: updating BookTermTable for %d terms", book_id, len(terms))
     term_table = get_book_term_table()
 
@@ -86,8 +88,8 @@ def update_book_term_table(book_id, terms, centroid_data_obj, raw_pos_data_obj):
         {
             "term": term,
             "book_id": book_id,
-            "count_": centroid_data_obj.get_count(term),
-            "vector": centroid_data_obj.get_vector(term),
+            "count_": book_embeddings.get_count(term),
+            "vector": book_embeddings.get_vector(term),
             "ilocs": raw_pos_data_obj.lemma_iloc[term],
             "tags": raw_pos_data_obj.lemma_tags[term],
         }
@@ -99,14 +101,21 @@ def update_book_term_table(book_id, terms, centroid_data_obj, raw_pos_data_obj):
     logger.info("%s: BookTermTable batch write complete", book_id)
 
 
+def published_year(entry):
+    return entry.metadata.published_year if entry.metadata else None
+
+
 def save_metadata(entry, pipeline_entries):
     logger.info("%s: saving metadata from %s", entry.book_id, entry.s3_metadata_key)
     metadata = load_json(entry.s3_metadata_key)
     pipeline_entries.update_entries(
         PipelineEntry(
             book_id=entry.book_id,
-            author=";".join(metadata["author"]),
-            title=metadata["title"][0],
+            metadata=BookMetadata(
+                author=";".join(metadata["author"]),
+                title=metadata["title"][0],
+                published_year=published_year(entry),
+            ),
         )
     )
 
@@ -138,6 +147,7 @@ def remove_deprecated_terms(book_id, terms):
     logger.info(
         "%s: republish — removing %d deprecated terms", book_id, len(deprecated_terms)
     )
+    term_table.remove_terms(book_id, deprecated_terms)
     get_corpus_term_table().remove_book_terms(book_id, deprecated_terms)
 
 
@@ -146,7 +156,7 @@ def publish(book_id: BookIndex):
     pipeline_entries = get_pipeline_entries()
 
     try:
-        entry = pipeline_entries.get_entry(book_id, ["status", "published_year"])
+        entry = pipeline_entries.get_entry(book_id, ["status", "metadata"])
     except LookupError:
         logger.warning("%s: has no pipeline entry", book_id)
         return
@@ -156,27 +166,27 @@ def publish(book_id: BookIndex):
         return
 
     logger.info(
-        "%s: status=%s published_year=%s", book_id, entry.status, entry.published_year
+        "%s: status=%s published_year=%s", book_id, entry.status, published_year(entry)
     )
 
-    centroid_data_obj = BookCentroidData.from_s3(entry)
+    book_embeddings = BookEmbeddings.from_s3(entry)
     raw_pos_data_obj = RawPOSData.from_s3(entry)
     raw_pos_data_obj.collect_data()
 
     pos_terms = raw_pos_data_obj.get_terms()
-    centroid_vocab = centroid_data_obj.vocab
-    terms = pos_terms & centroid_vocab
+    embedding_vocab = book_embeddings.vocab
+    terms = pos_terms & embedding_vocab
 
     logger.info(
-        "%s: %d terms after intersection (pos=%d, centroid=%d)",
+        "%s: %d terms after intersection (pos=%d, embedding=%d)",
         book_id,
         len(terms),
         len(pos_terms),
-        len(centroid_vocab),
+        len(embedding_vocab),
     )
 
     remove_deprecated_terms(book_id, terms)
-    update_book_term_table(book_id, terms, centroid_data_obj, raw_pos_data_obj)
+    update_book_term_table(book_id, terms, book_embeddings, raw_pos_data_obj)
     update_term_table(book_id, terms)
     save_metadata(entry, pipeline_entries)
     logger.info("%s: publish complete (%d terms)", book_id, len(terms))

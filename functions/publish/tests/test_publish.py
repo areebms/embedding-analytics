@@ -7,7 +7,6 @@ These tests call the actual publish() function, not a reimplementation.
 """
 
 import json
-from decimal import Decimal
 
 import numpy as np
 
@@ -18,9 +17,8 @@ from conftest import (
     BOOK_SMITH,
     BOOK_RICARDO,
     SMITH_METADATA,
-    SMITH_TERM_ATTRS,
+    SMITH_TERM_COUNTS,
     VECTOR_DIM,
-    NUM_SEEDS,
     _create_keyed_vectors,
     _save_keyed_vectors_to_s3,
     _seed_book,
@@ -44,15 +42,15 @@ def _written_terms(term_table, book_id=BOOK_SMITH):
 def test_publish_writes_terms_to_term_table(smith_s3_data, term_table):
     _run_publish()
 
-    assert _written_terms(term_table) == set(SMITH_TERM_ATTRS)
+    assert _written_terms(term_table) == set(SMITH_TERM_COUNTS)
 
 
 def test_publish_writes_correct_counts_to_term_table(smith_s3_data, term_table):
     _run_publish()
 
-    for term, attrs in SMITH_TERM_ATTRS.items():
+    for term, count in SMITH_TERM_COUNTS.items():
         row = term_table.get_entry(term, BOOK_SMITH, fields=["count_"])
-        assert int(row["count_"]) == attrs["count"]
+        assert int(row["count_"]) == count
 
 
 def test_publish_writes_pos_tags_to_term_table(smith_s3_data, term_table):
@@ -68,29 +66,18 @@ def test_publish_writes_pos_tags_to_term_table(smith_s3_data, term_table):
     assert rent_row["tags"] == {"N"}
 
 
-def test_publish_writes_seed_vectors_to_term_table(smith_s3_data, term_table):
+def test_publish_writes_the_vector_to_term_table(smith_s3_data, term_table):
     _run_publish()
 
-    row = term_table.get_entry("labour", BOOK_SMITH, fields=["vectors", "seeds"])
-    assert len(row["vectors"]) == 2  # NUM_SEEDS
-    assert len(row["seeds"]) == 2
-
-
-def test_publish_writes_alignment_stats_to_term_table(smith_s3_data, term_table):
-    _run_publish()
-
-    row = term_table.get_entry("labour", BOOK_SMITH, fields=["alignment_stats"])
-    stats = row["alignment_stats"]
-    attrs = SMITH_TERM_ATTRS["labour"]
-    assert stats["variance"] == Decimal(str(attrs["variance"]))
-    assert stats["disparity"] == Decimal(str(attrs["disparity"]))
-    assert stats["r_squared"] == Decimal(str(attrs["r_squared"]))
+    row = term_table.get_entry("labour", BOOK_SMITH, fields=["vector"])
+    vector = np.frombuffer(bytes(row["vector"]), dtype=np.float16)
+    assert vector.shape == (VECTOR_DIM,)
 
 
 def test_publish_writes_ilocs_to_term_table(smith_s3_data, term_table):
     _run_publish()
 
-    for term in SMITH_TERM_ATTRS:
+    for term in SMITH_TERM_COUNTS:
         row = term_table.get_entry(term, BOOK_SMITH, fields=["ilocs"])
         assert row["ilocs"], f"Expected non-empty ilocs for '{term}'"
 
@@ -98,7 +85,7 @@ def test_publish_writes_ilocs_to_term_table(smith_s3_data, term_table):
 def test_publish_populates_corpus_term_table(smith_s3_data, corpus_term_table):
     _run_publish()
 
-    for term in SMITH_TERM_ATTRS:
+    for term in SMITH_TERM_COUNTS:
         row = corpus_term_table.get_term(term)
         assert row is not None, f"Missing corpus row for '{term}'"
         assert BOOK_SMITH in row["book_ids"]
@@ -142,24 +129,13 @@ def test_publish_filters_terms_with_non_content_pos_tags(moto_dynamo, term_table
     rng = np.random.RandomState(99)
 
     # Include "the" in the centroid model alongside the normal terms.
-    attrs_with_stopword = dict(SMITH_TERM_ATTRS)
-    attrs_with_stopword["the"] = {
-        "count": 500,
-        "variance": 0.01,
-        "disparity": 0.01,
-        "r_squared": 0.99,
-    }
+    counts_with_stopword = dict(SMITH_TERM_COUNTS)
+    counts_with_stopword["the"] = 500
 
-    centroid_kv = _create_keyed_vectors(attrs_with_stopword, VECTOR_DIM, rng)
+    centroid_kv = _create_keyed_vectors(counts_with_stopword, VECTOR_DIM, rng)
     _save_keyed_vectors_to_s3(
         f"kvectors/{BOOK_SMITH}/aligned/centroid.model", centroid_kv
     )
-
-    for seed_idx in range(NUM_SEEDS):
-        seed_kv = _create_keyed_vectors(attrs_with_stopword, VECTOR_DIM, rng)
-        _save_keyed_vectors_to_s3(
-            f"kvectors/{BOOK_SMITH}/aligned/{seed_idx}-seed.model", seed_kv
-        )
 
     entry = PipelineEntry(
         book_id=BOOK_SMITH,
@@ -182,7 +158,7 @@ def test_publish_filters_terms_with_non_content_pos_tags(moto_dynamo, term_table
 
     written_terms = _written_terms(term_table)
     assert "the" not in written_terms
-    assert written_terms == set(SMITH_TERM_ATTRS)
+    assert written_terms == set(SMITH_TERM_COUNTS)
 
 
 # ── Republish (prior data exists) ────────────────────────────────────

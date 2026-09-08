@@ -1,12 +1,11 @@
 import logging
 from collections import defaultdict
-from decimal import Decimal
 
 import numpy as np
 from gensim.models import KeyedVectors
 
 from shared.commons import BookIndex
-from shared.s3 import load_csv, load_file, load_json, yield_s3_files
+from shared.s3 import load_csv, load_file, load_json
 from shared.tables.book_terms import get_book_term_table
 from shared.tables.corpus_terms import get_corpus_term_table
 from shared.tables.pipeline_entries import (
@@ -19,8 +18,6 @@ logger = logging.getLogger(__name__)
 
 
 class BookCentroidData:
-
-    alignment_quality_attr = ["variance", "disparity", "r_squared"]
 
     def __init__(self, centroid):
         self.centroid_kvector = centroid
@@ -38,11 +35,8 @@ class BookCentroidData:
     def vocab(self):
         return set(self.centroid_kvector.key_to_index)
 
-    def get_alignment_stats(self, term):
-        return {
-            attr: Decimal(str(self.centroid_kvector.get_vecattr(term, attr)))
-            for attr in self.alignment_quality_attr
-        }
+    def get_vector(self, term) -> bytes:
+        return self.centroid_kvector[term].astype(np.float16).tobytes()
 
     def get_count(self, term) -> int:
         return int(self.centroid_kvector.get_vecattr(term, "count"))
@@ -84,71 +78,21 @@ class RawPOSData:
         return set(self.lemma_tags)
 
 
-class RawKVectorStack:
-
-    def __init__(self, s3_keys, kvectors):
-        self.s3_keys = s3_keys
-        self.kvectors = kvectors
-
-        self.term_vectors = defaultdict(dict)
-
-    @staticmethod
-    def get_seed(model_s3_key):
-        return int(model_s3_key.split("/")[-1].split("-")[0])
-
-    @classmethod
-    def from_s3(cls, book_id):
-        s3_keys = []
-        kvectors = []
-        for key, local_path in yield_s3_files(
-            f"kvectors/{book_id}/aligned/", ".model"
-        ):
-            if key.endswith("/centroid.model"):
-                continue
-            s3_keys.append(key)
-            kvectors.append(KeyedVectors.load(local_path))
-
-        logger.info("%s: loaded %d seed models", book_id, len(kvectors))
-        return cls(s3_keys, kvectors)
-
-    def collect_data(self):
-        if not self.kvectors:
-            logger.warning("no seed kvectors found; skipping term vector collection")
-            return self.term_vectors
-        for term in self.kvectors[0].key_to_index:
-            for s3_key, kvector in zip(self.s3_keys, self.kvectors):
-                self.term_vectors[term][self.get_seed(s3_key)] = (
-                    kvector[term].astype(np.float16).tobytes()
-                )
-
-        logger.info(
-            "kvector collect_data complete: %d terms across %d seeds",
-            len(self.term_vectors),
-            len(self.kvectors),
-        )
-        return self.term_vectors
-
-
 def update_book_term_table(book_id, terms, centroid_data_obj, raw_pos_data_obj):
     logger.info("%s: updating BookTermTable for %d terms", book_id, len(terms))
-    raw_vector_stack_data = RawKVectorStack.from_s3(book_id).collect_data()
     term_table = get_book_term_table()
 
-    items = []
-    for term in sorted(terms):
-        seeds = sorted(raw_vector_stack_data[term].keys())
-        items.append(
-            {
-                "term": term,
-                "book_id": book_id,
-                "alignment_stats": centroid_data_obj.get_alignment_stats(term),
-                "count_": centroid_data_obj.get_count(term),
-                "ilocs": raw_pos_data_obj.lemma_iloc[term],
-                "tags": raw_pos_data_obj.lemma_tags[term],
-                "seeds": seeds,
-                "vectors": [raw_vector_stack_data[term][seed] for seed in seeds],
-            }
-        )
+    items = [
+        {
+            "term": term,
+            "book_id": book_id,
+            "count_": centroid_data_obj.get_count(term),
+            "vector": centroid_data_obj.get_vector(term),
+            "ilocs": raw_pos_data_obj.lemma_iloc[term],
+            "tags": raw_pos_data_obj.lemma_tags[term],
+        }
+        for term in sorted(terms)
+    ]
 
     logger.info("%s: submitting %d items to DynamoDB batch writer", book_id, len(items))
     term_table.batch_put_entries(items)

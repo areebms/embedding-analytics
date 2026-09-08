@@ -39,12 +39,11 @@ from shared.tests_utils import aws, bucket, entries  # noqa: F401
 BOOK_SMITH = BookIndex(3300)
 BOOK_RICARDO = BookIndex(33310)
 VECTOR_DIM = 10
-NUM_SEEDS = 2
 
-SMITH_TERM_ATTRS = {
-    "labour": {"count": 42, "variance": 0.1, "disparity": 0.05, "r_squared": 0.95},
-    "value": {"count": 30, "variance": 0.15, "disparity": 0.08, "r_squared": 0.90},
-    "rent": {"count": 10, "variance": 0.2, "disparity": 0.1, "r_squared": 0.85},
+SMITH_TERM_COUNTS = {
+    "labour": 42,
+    "value": 30,
+    "rent": 10,
 }
 
 SMITH_TERMS = [
@@ -79,16 +78,14 @@ SMITH_TOKEN_TAGS = [
 # ── Helpers ───────────────────────────────────────────────────────────
 
 
-def _create_keyed_vectors(terms_attrs, vector_dim, rng):
-    """Build a gensim KeyedVectors with deterministic random vectors
-    and the given term attributes (count, variance, disparity, r_squared)."""
+def _create_keyed_vectors(term_counts, vector_dim, rng):
+    """Build a gensim KeyedVectors with deterministic random vectors."""
     kv = KeyedVectors(vector_size=vector_dim)
-    terms = list(terms_attrs.keys())
+    terms = list(term_counts)
     vectors = rng.randn(len(terms), vector_dim).astype(np.float32)
     kv.add_vectors(terms, vectors)
-    for term, attrs in terms_attrs.items():
-        for attr_name, attr_value in attrs.items():
-            kv.set_vecattr(term, attr_name, attr_value)
+    for term, count in term_counts.items():
+        kv.set_vecattr(term, "count", count)
     return kv
 
 
@@ -214,22 +211,15 @@ def seeded_ricardo(term_table, corpus_term_table):
 @pytest.fixture
 def smith_s3_data(moto_dynamo):
     """Upload all S3 artifacts needed for publish(BOOK_SMITH):
-    centroid model, seed models, POS CSVs, and metadata JSON.
+    centroid model, POS CSVs, and metadata JSON.
     Also populates the PipelineTable entry."""
     rng = np.random.RandomState(42)
 
     # Centroid model (aligned, mean across seeds).
-    centroid_kv = _create_keyed_vectors(SMITH_TERM_ATTRS, VECTOR_DIM, rng)
+    centroid_kv = _create_keyed_vectors(SMITH_TERM_COUNTS, VECTOR_DIM, rng)
     _save_keyed_vectors_to_s3(
         f"kvectors/{BOOK_SMITH}/aligned/centroid.model", centroid_kv
     )
-
-    # Per-seed models (each seed has the same terms, different vectors).
-    for seed_idx in range(NUM_SEEDS):
-        seed_kv = _create_keyed_vectors(SMITH_TERM_ATTRS, VECTOR_DIM, rng)
-        _save_keyed_vectors_to_s3(
-            f"kvectors/{BOOK_SMITH}/aligned/{seed_idx}-seed.model", seed_kv
-        )
 
     # POS data: token lemmas and tags as CSVs.
     # Sentences are rows. Each term appears with a noun tag (NN),

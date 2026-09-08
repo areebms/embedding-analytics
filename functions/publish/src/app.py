@@ -2,6 +2,7 @@ import json
 import logging
 
 from publish_utils import publish
+from shared.commons import BookIndex
 from shared.lambda_event import extract_index
 
 
@@ -16,7 +17,7 @@ def handler(event, context):
         logger.warning("Publish request missing index")
         return {"statusCode": 400, "body": json.dumps({"error": "index is required"})}
 
-    publish(index)
+    publish(BookIndex.parse(index))
     logger.info("Publish handler completed successfully for %s", index)
 
     return {

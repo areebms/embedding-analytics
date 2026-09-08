@@ -1,6 +1,3 @@
-import csv
-import io
-import json
 import logging
 from collections import defaultdict
 from decimal import Decimal
@@ -8,10 +5,15 @@ from decimal import Decimal
 import numpy as np
 from gensim.models import KeyedVectors
 
-from shared.s3 import get_s3_loader
-from shared.tables.pipeline import get_pipeline_table
+from shared.commons import BookIndex
+from shared.s3 import load_csv, load_file, load_json, yield_s3_files
 from shared.tables.book_terms import get_book_term_table
 from shared.tables.corpus_terms import get_corpus_term_table
+from shared.tables.pipeline_entries import (
+    EntryStatus,
+    PipelineEntry,
+    get_pipeline_entries,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,9 +26,9 @@ class BookCentroidData:
         self.centroid_kvector = centroid
 
     @classmethod
-    def from_s3(cls, loader, index):
-        logger.info("%s: loading centroid model", index)
-        with loader.load_file(f"kvectors/{index}/aligned/centroid.model") as (
+    def from_s3(cls, entry: PipelineEntry):
+        logger.info("%s: loading centroid model", entry.book_id)
+        with load_file(f"kvectors/{entry.book_id}/aligned/centroid.model") as (
             _,
             local_path,
         ):
@@ -56,17 +58,10 @@ class RawPOSData:
         self.lemma_tags = defaultdict(set)
 
     @classmethod
-    def from_s3(cls, loader, index):
-        table = get_pipeline_table()
-        item = table.get_entry(index, ["s3_token_lemmas_key", "s3_token_tags_key"])
-
-        logger.info("%s: loading POS data", index)
-        token_lemmas = list(
-            csv.reader(io.StringIO(loader.load_text(item["s3_token_lemmas_key"])))
-        )
-        token_tags = list(
-            csv.reader(io.StringIO(loader.load_text(item["s3_token_tags_key"])))
-        )
+    def from_s3(cls, entry: PipelineEntry):
+        logger.info("%s: loading POS data", entry.book_id)
+        token_lemmas = list(load_csv(entry.s3_token_lemmas_key))
+        token_tags = list(load_csv(entry.s3_token_tags_key))
         return cls(token_lemmas, token_tags)
 
     def collect_data(self):
@@ -102,18 +97,18 @@ class RawKVectorStack:
         return int(model_s3_key.split("/")[-1].split("-")[0])
 
     @classmethod
-    def from_s3(cls, loader, index):
+    def from_s3(cls, book_id):
         s3_keys = []
         kvectors = []
-        for key, local_path in loader.yield_s3_files(
-            f"kvectors/{index}/aligned/", ".model"
+        for key, local_path in yield_s3_files(
+            f"kvectors/{book_id}/aligned/", ".model"
         ):
             if key.endswith("/centroid.model"):
                 continue
             s3_keys.append(key)
             kvectors.append(KeyedVectors.load(local_path))
 
-        logger.info("%s: loaded %d seed models", index, len(kvectors))
+        logger.info("%s: loaded %d seed models", book_id, len(kvectors))
         return cls(s3_keys, kvectors)
 
     def collect_data(self):
@@ -134,11 +129,9 @@ class RawKVectorStack:
         return self.term_vectors
 
 
-def update_book_term_table(
-    index, terms, s3_loader, centroid_data_obj, raw_pos_data_obj
-):
-    logger.info("%s: updating BookTermTable for %d terms", index, len(terms))
-    raw_vector_stack_data = RawKVectorStack.from_s3(s3_loader, index).collect_data()
+def update_book_term_table(book_id, terms, centroid_data_obj, raw_pos_data_obj):
+    logger.info("%s: updating BookTermTable for %d terms", book_id, len(terms))
+    raw_vector_stack_data = RawKVectorStack.from_s3(book_id).collect_data()
     term_table = get_book_term_table()
 
     items = []
@@ -147,7 +140,7 @@ def update_book_term_table(
         items.append(
             {
                 "term": term,
-                "platform_data": index,
+                "book_id": book_id,
                 "alignment_stats": centroid_data_obj.get_alignment_stats(term),
                 "count_": centroid_data_obj.get_count(term),
                 "ilocs": raw_pos_data_obj.lemma_iloc[term],
@@ -157,33 +150,36 @@ def update_book_term_table(
             }
         )
 
-    logger.info("%s: submitting %d items to DynamoDB batch writer", index, len(items))
+    logger.info("%s: submitting %d items to DynamoDB batch writer", book_id, len(items))
     term_table.batch_put_entries(items)
-    logger.info("%s: BookTermTable batch write complete", index)
+    logger.info("%s: BookTermTable batch write complete", book_id)
 
 
-def save_metadata(index, s3_loader, s3_metadata_key, pipeline_table):
-    logger.info("%s: saving metadata from %s", index, s3_metadata_key)
-    metadata = json.loads(s3_loader.load_text(s3_metadata_key))
-    pipeline_table.update_entries(
-        index,
-        {"author": ";".join(metadata["author"]), "title": metadata["title"][0]},
+def save_metadata(entry, pipeline_entries):
+    logger.info("%s: saving metadata from %s", entry.book_id, entry.s3_metadata_key)
+    metadata = load_json(entry.s3_metadata_key)
+    pipeline_entries.update_entries(
+        PipelineEntry(
+            book_id=entry.book_id,
+            author=";".join(metadata["author"]),
+            title=metadata["title"][0],
+        )
     )
 
 
-def update_term_table(index, terms):
-    logger.info("%s: updating CorpusTermTable for %d terms", index, len(terms))
+def update_term_table(book_id, terms):
+    logger.info("%s: updating CorpusTermTable for %d terms", book_id, len(terms))
     corpus_term_table = get_corpus_term_table()
     for term in terms:
-        corpus_term_table.add_book(term, index)
-    logger.info("%s: CorpusTermTable update complete", index)
+        corpus_term_table.add_book(term, book_id)
+    logger.info("%s: CorpusTermTable update complete", book_id)
 
 
-def remove_deprecated_terms(index, terms):
+def remove_deprecated_terms(book_id, terms):
     term_table = get_book_term_table()
 
     existing_terms = set(
-        row["term"] for row in term_table.get_entries(index, fields=["term"])
+        row["term"] for row in term_table.get_entries(book_id, fields=["term"])
     )
 
     if not existing_terms:
@@ -192,36 +188,35 @@ def remove_deprecated_terms(index, terms):
     deprecated_terms = existing_terms - terms
 
     if not deprecated_terms:
-        logger.info("%s: republish — no deprecated terms", index)
+        logger.info("%s: republish — no deprecated terms", book_id)
         return
 
     logger.info(
-        "%s: republish — removing %d deprecated terms", index, len(deprecated_terms)
+        "%s: republish — removing %d deprecated terms", book_id, len(deprecated_terms)
     )
-    corpus_term_table = get_corpus_term_table()
-    corpus_term_table.remove_book_terms(index, deprecated_terms)
+    get_corpus_term_table().remove_book_terms(book_id, deprecated_terms)
 
 
-def publish(index):
-    logger.info("%s: starting publish", index)
-    s3_loader = get_s3_loader()
-    pipeline_table = get_pipeline_table()
+def publish(book_id: BookIndex):
+    logger.info("%s: starting publish", book_id)
+    pipeline_entries = get_pipeline_entries()
 
-    item = pipeline_table.get_entry(index, ["s3_metadata_key", "published_year"])
-    s3_metadata_key = item.get("s3_metadata_key")
-    if not s3_metadata_key:
-        logger.warning("%s: has not been scraped", index)
+    try:
+        entry = pipeline_entries.get_entry(book_id, ["status", "published_year"])
+    except LookupError:
+        logger.warning("%s: has no pipeline entry", book_id)
+        return
+
+    if entry.status is None or entry.status < EntryStatus.EMBEDDINGS_CREATED:
+        logger.warning("%s: has no embeddings", book_id)
         return
 
     logger.info(
-        "%s: s3_metadata_key=%s published_year=%s",
-        index,
-        s3_metadata_key,
-        item.get("published_year"),
+        "%s: status=%s published_year=%s", book_id, entry.status, entry.published_year
     )
 
-    centroid_data_obj = BookCentroidData.from_s3(s3_loader, index)
-    raw_pos_data_obj = RawPOSData.from_s3(s3_loader, index)
+    centroid_data_obj = BookCentroidData.from_s3(entry)
+    raw_pos_data_obj = RawPOSData.from_s3(entry)
     raw_pos_data_obj.collect_data()
 
     pos_terms = raw_pos_data_obj.get_terms()
@@ -230,14 +225,14 @@ def publish(index):
 
     logger.info(
         "%s: %d terms after intersection (pos=%d, centroid=%d)",
-        index,
+        book_id,
         len(terms),
         len(pos_terms),
         len(centroid_vocab),
     )
 
-    remove_deprecated_terms(index, terms)
-    update_book_term_table(index, terms, s3_loader, centroid_data_obj, raw_pos_data_obj)
-    update_term_table(index, terms)
-    save_metadata(index, s3_loader, s3_metadata_key, pipeline_table)
-    logger.info("%s: publish complete (%d terms)", index, len(terms))
+    remove_deprecated_terms(book_id, terms)
+    update_book_term_table(book_id, terms, centroid_data_obj, raw_pos_data_obj)
+    update_term_table(book_id, terms)
+    save_metadata(entry, pipeline_entries)
+    logger.info("%s: publish complete (%d terms)", book_id, len(terms))

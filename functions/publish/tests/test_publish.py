@@ -6,24 +6,25 @@ S3 (centroid models, seed models, POS CSVs, metadata JSON).
 These tests call the actual publish() function, not a reimplementation.
 """
 
-import os
+import json
 from decimal import Decimal
 
 import numpy as np
 
-from shared.tables.pipeline_entries import EntryStatus, metadata_key
+from shared.s3 import upload_json
+from shared.tables.pipeline_entries import EntryStatus, PipelineEntry
 
 from conftest import (
     BOOK_SMITH,
     BOOK_RICARDO,
+    SMITH_METADATA,
     SMITH_TERM_ATTRS,
     VECTOR_DIM,
     NUM_SEEDS,
     _create_keyed_vectors,
     _save_keyed_vectors_to_s3,
-    _upload_csv_to_s3,
-    _upload_json_to_s3,
     _seed_book,
+    _upload_pos_data,
 )
 
 
@@ -33,16 +34,17 @@ def _run_publish(book_id=BOOK_SMITH):
     publish(book_id)
 
 
+def _written_terms(term_table, book_id=BOOK_SMITH):
+    return {row["term"] for row in term_table.get_entries(book_id, fields=["term"])}
+
+
 # ── First-time publish ────────────────────────────────────────────────
 
 
 def test_publish_writes_terms_to_term_table(smith_s3_data, term_table):
     _run_publish()
 
-    written_terms = {
-        row["term"] for row in term_table.get_entries(BOOK_SMITH, fields=["term"])
-    }
-    assert written_terms == set(SMITH_TERM_ATTRS.keys())
+    assert _written_terms(term_table) == set(SMITH_TERM_ATTRS)
 
 
 def test_publish_writes_correct_counts_to_term_table(smith_s3_data, term_table):
@@ -102,19 +104,41 @@ def test_publish_populates_corpus_term_table(smith_s3_data, corpus_term_table):
         assert BOOK_SMITH in row["book_ids"]
 
 
-def test_publish_updates_pipeline_metadata(smith_s3_data, pipeline_table):
+def test_publish_updates_pipeline_metadata(smith_s3_data, pipeline_entries):
     _run_publish()
 
-    row = pipeline_table.get_entry(BOOK_SMITH, fields=["author", "title"])
-    assert row["author"] == "Smith, Adam"
-    assert row["title"] == "The Wealth of Nations"
+    entry = pipeline_entries.get_entry(BOOK_SMITH, fields=["author", "title"])
+    assert entry.author == "Smith, Adam"
+    assert entry.title == "The Wealth of Nations"
+
+
+def test_publish_leaves_the_status_intact(smith_s3_data, pipeline_entries):
+    _run_publish()
+
+    entry = pipeline_entries.get_entry(BOOK_SMITH, fields=["status"])
+    assert entry.status is EntryStatus.EMBEDDINGS_CREATED
+
+
+def test_publish_skips_a_book_with_no_pipeline_entry(moto_dynamo, term_table):
+    _run_publish()
+
+    assert _written_terms(term_table) == set()
+
+
+def test_publish_skips_a_book_with_no_embeddings(pipeline_entries, term_table):
+    """A book that has not reached EMBEDDED has no embeddings to read."""
+    pipeline_entries.put_entry(
+        PipelineEntry(book_id=BOOK_SMITH, status=EntryStatus.TOKENIZED)
+    )
+
+    _run_publish()
+
+    assert _written_terms(term_table) == set()
 
 
 def test_publish_filters_terms_with_non_content_pos_tags(moto_dynamo, term_table):
     """Terms that only appear with non-content POS tags (e.g. DT) should be
     excluded from the term intersection and not written to BookTermTable."""
-    s3 = moto_dynamo.resource("s3")
-    bucket = os.environ["S3_BUCKET"]
     rng = np.random.RandomState(99)
 
     # Include "the" in the centroid model alongside the normal terms.
@@ -128,50 +152,37 @@ def test_publish_filters_terms_with_non_content_pos_tags(moto_dynamo, term_table
 
     centroid_kv = _create_keyed_vectors(attrs_with_stopword, VECTOR_DIM, rng)
     _save_keyed_vectors_to_s3(
-        s3, bucket, f"kvectors/{BOOK_SMITH}/aligned/centroid.model", centroid_kv
+        f"kvectors/{BOOK_SMITH}/aligned/centroid.model", centroid_kv
     )
 
     for seed_idx in range(NUM_SEEDS):
         seed_kv = _create_keyed_vectors(attrs_with_stopword, VECTOR_DIM, rng)
         _save_keyed_vectors_to_s3(
-            s3, bucket, f"kvectors/{BOOK_SMITH}/aligned/{seed_idx}-seed.model", seed_kv
+            f"kvectors/{BOOK_SMITH}/aligned/{seed_idx}-seed.model", seed_kv
         )
+
+    entry = PipelineEntry(
+        book_id=BOOK_SMITH,
+        status=EntryStatus.EMBEDDINGS_CREATED,
+        published_year=1776,
+    )
 
     # "the" only gets a DT tag — should be filtered out.
     token_lemmas = [["labour", "value", "rent", "the"], ["labour", "value"]]
     token_tags = [["NN", "NN", "NN", "DT"], ["VB", "NN"]]
-    lemmas_key = f"tokens/{BOOK_SMITH}/lemmas.csv"
-    tags_key = f"tokens/{BOOK_SMITH}/tags.csv"
-    _upload_csv_to_s3(s3, bucket, lemmas_key, token_lemmas)
-    _upload_csv_to_s3(s3, bucket, tags_key, token_tags)
+    _upload_pos_data(entry, token_lemmas, token_tags)
 
-    _upload_json_to_s3(
-        s3,
-        bucket,
-        metadata_key(BOOK_SMITH),
-        {"author": ["Smith, Adam"], "title": ["The Wealth of Nations"]},
-    )
+    upload_json(entry.s3_metadata_key, json.dumps(SMITH_METADATA))
 
-    from shared.tables.pipeline import get_pipeline_table
+    from shared.tables.pipeline_entries import get_pipeline_entries
 
-    pt = get_pipeline_table()
-    pt.table.put_item(
-        Item={
-            "platform_data": BOOK_SMITH,
-            "pipeline_status": EntryStatus.SCRAPED_HTML,
-            "s3_token_lemmas_key": lemmas_key,
-            "s3_token_tags_key": tags_key,
-            "published_year": 1776,
-        }
-    )
+    get_pipeline_entries().put_entry(entry)
 
     _run_publish()
 
-    written_terms = {
-        row["term"] for row in term_table.get_entries(BOOK_SMITH, fields=["term"])
-    }
+    written_terms = _written_terms(term_table)
     assert "the" not in written_terms
-    assert written_terms == set(SMITH_TERM_ATTRS.keys())
+    assert written_terms == set(SMITH_TERM_ATTRS)
 
 
 # ── Republish (prior data exists) ────────────────────────────────────

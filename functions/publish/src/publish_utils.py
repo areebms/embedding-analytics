@@ -12,7 +12,6 @@ from shared.s3 import get_s3_loader
 from shared.tables.pipeline import get_pipeline_table
 from shared.tables.book_terms import get_book_term_table
 from shared.tables.corpus_terms import get_corpus_term_table
-from shared.tables.vectors import get_pinecone_table
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +41,6 @@ class BookCentroidData:
             attr: Decimal(str(self.centroid_kvector.get_vecattr(term, attr)))
             for attr in self.alignment_quality_attr
         }
-
-    def get_pinecone_vector(self, term) -> np.ndarray:
-        return np.array(self.centroid_kvector[term], dtype=np.float32)
 
     def get_count(self, term) -> int:
         return int(self.centroid_kvector.get_vecattr(term, "count"))
@@ -138,26 +134,6 @@ class RawKVectorStack:
         return self.term_vectors
 
 
-def update_pinecone_table(index, terms, centroid_data_obj, raw_pos_data_obj):
-    logger.info("%s: upserting %d vectors to Pinecone", index, len(terms))
-    pinecone = get_pinecone_table()
-
-    pinecone_data = []
-    for term in terms:
-        pinecone_data.append(
-            {
-                "book_id": index,
-                "term": term,
-                "vector": centroid_data_obj.get_pinecone_vector(term),
-                "pos": sorted(raw_pos_data_obj.lemma_tags[term]),
-                "count": centroid_data_obj.get_count(term),
-            }
-        )
-
-    pinecone.batch_upsert(pinecone_data)
-    logger.info("%s: Pinecone upsert complete", index)
-
-
 def update_book_term_table(
     index, terms, s3_loader, centroid_data_obj, raw_pos_data_obj
 ):
@@ -223,9 +199,7 @@ def remove_deprecated_terms(index, terms):
         "%s: republish — removing %d deprecated terms", index, len(deprecated_terms)
     )
     corpus_term_table = get_corpus_term_table()
-    pinecone_table = get_pinecone_table()
     corpus_term_table.remove_book_terms(index, deprecated_terms)
-    pinecone_table.delete_book_terms(index, deprecated_terms)
 
 
 def publish(index):
@@ -264,7 +238,6 @@ def publish(index):
 
     remove_deprecated_terms(index, terms)
     update_book_term_table(index, terms, s3_loader, centroid_data_obj, raw_pos_data_obj)
-    update_pinecone_table(index, terms, centroid_data_obj, raw_pos_data_obj)
     update_term_table(index, terms)
     save_metadata(index, s3_loader, s3_metadata_key, pipeline_table)
     logger.info("%s: publish complete (%d terms)", index, len(terms))

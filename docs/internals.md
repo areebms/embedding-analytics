@@ -18,7 +18,7 @@ and resume safely.
 | `scrape` | Gutenberg subject, then book ID | Pipeline rows, then HTML, text, and metadata in S3 |
 | `tokenize` | Raw text | Token, lemma, and POS-tag CSVs in S3 |
 | `create-embeddings` | Token lemmas | Centroid and replicate models in S3 |
-| `publish` | Aligned models + token metadata | Term vectors, counts, POS tags, stability metrics in DynamoDB and Pinecone |
+| `publish` | Aligned models + token metadata | Term vectors, counts, POS tags, stability metrics in DynamoDB |
 | `api` | HTTP request | Books, terms, semantic-drift, and parse responses as JSON |
 
 ```text

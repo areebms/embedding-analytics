@@ -40,7 +40,7 @@ def env_for(name: str) -> dict[str, str]:
     AWS_REGION is never listed: Lambda injects it into every runtime and rejects it as
     a reserved key.
 
-    TODO: ANTHROPIC_API_KEY (and OPENAI/PINECONE, when those services convert) is read
+    TODO: ANTHROPIC_API_KEY (and OPENAI, when those services convert) is read
     here and baked into the synthesized template, which cdk deploy uploads to the CDK
     staging bucket. Move the secrets to SSM and reference them with
     ssm.StringParameter.value_for_string_parameter, so only the parameter name lands in

@@ -376,9 +376,7 @@ REDIS_URL=              # optional
 REDIS_PREFIX=
 PRODUCTION_DOMAIN=      # Frontend URL, for CORS
 OPENAI_API_KEY=         # Required for /parse-describe
-PINECONE_API_KEY=       # Required by publish
 ANTHROPIC_API_KEY=      # Required by standardize-html
-PINECONE_INDEX_NAME=
 ```
 
 ### Prerequisites

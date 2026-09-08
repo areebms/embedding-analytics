@@ -121,7 +121,6 @@ Processing a book, and deployment, are covered in [Operations](docs/operations.m
 ## What's next
 
 - [ ] Integrate LLMs within the Scrape lambda.
-- [ ] Update `publish` to remove Pinecone used by previous API version.
 - [ ] Increase number of books in corpus
 
 

@@ -8,7 +8,6 @@ import numpy as np
 import pytest
 from gensim.models import KeyedVectors
 from moto import mock_aws
-from unittest.mock import MagicMock
 
 
 # ── Environment ───────────────────────────────────────────────────────
@@ -207,14 +206,6 @@ def corpus_term_table(moto_dynamo):
 @pytest.fixture
 def pipeline_table(moto_dynamo):
     return get_pipeline_table()
-
-
-@pytest.fixture
-def pinecone_table():
-    mock = MagicMock()
-    mock.delete_book = MagicMock()
-    mock.batch_upsert = MagicMock()
-    return mock
 
 
 # ── Fixtures: seeded data ─────────────────────────────────────────────

@@ -10,4 +10,4 @@ vector (float16), per-seed aligned vectors (float16), token occurrence positions
 metadata.
 
 Republishing prunes: terms that no longer exist after retraining are removed from
-both Pinecone and the corpus vocabulary table.
+the corpus vocabulary table.

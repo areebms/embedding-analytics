@@ -38,6 +38,7 @@ from shared.tests_utils import aws, bucket, entries  # noqa: F401
 
 BOOK_SMITH = BookIndex(3300)
 BOOK_RICARDO = BookIndex(33310)
+SUBJECT = BookIndex(42)
 VECTOR_DIM = 10
 
 SMITH_TERM_COUNTS = {
@@ -206,27 +207,32 @@ def seeded_ricardo(term_table, corpus_term_table):
 
 
 @pytest.fixture
-def smith_s3_data(moto_dynamo):
-    """Upload all S3 artifacts needed for publish(BOOK_SMITH):
-    the embeddings archive, POS CSVs, and metadata JSON.
-    Also populates the PipelineTable entry."""
-    rng = np.random.RandomState(42)
+def book_s3_data(moto_dynamo):
 
-    _upload_embeddings(BOOK_SMITH, SMITH_TERM_COUNTS, rng)
+    def _book_s3_data(book_id=BOOK_SMITH, term_counts=SMITH_TERM_COUNTS):
+        _upload_embeddings(book_id, term_counts, np.random.RandomState(42))
 
-    # POS data: token lemmas and tags as CSVs.
-    # Sentences are rows. Each term appears with a noun tag (NN),
-    # "labour" also appears as a verb (VB) to match SMITH_TERMS tags.
-    entry = PipelineEntry(
-        book_id=BOOK_SMITH,
-        status=EntryStatus.EMBEDDINGS_CREATED,
-        metadata=SMITH_STALE_METADATA,
-    )
-    _upload_pos_data(entry, SMITH_TOKEN_LEMMAS, SMITH_TOKEN_TAGS)
+        # POS data: token lemmas and tags as CSVs.
+        # Sentences are rows. Each term appears with a noun tag (NN),
+        # "labour" also appears as a verb (VB) to match SMITH_TERMS tags.
+        entry = PipelineEntry(
+            book_id=book_id,
+            subject_ids={SUBJECT},
+            status=EntryStatus.EMBEDDINGS_CREATED,
+            metadata=SMITH_STALE_METADATA,
+        )
+        _upload_pos_data(entry, SMITH_TOKEN_LEMMAS, SMITH_TOKEN_TAGS)
 
-    # Metadata JSON.
-    upload_json(entry.s3_metadata_key, json.dumps(SMITH_METADATA))
+        # Metadata JSON.
+        upload_json(entry.s3_metadata_key, json.dumps(SMITH_METADATA))
 
-    get_pipeline_entries().put_entry(entry)
+        get_pipeline_entries().put_entry(entry)
 
-    return entry
+        return entry
+
+    return _book_s3_data
+
+
+@pytest.fixture
+def smith_s3_data(book_s3_data):
+    return book_s3_data()

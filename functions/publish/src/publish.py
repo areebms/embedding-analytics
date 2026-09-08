@@ -15,6 +15,60 @@ from shared.tables.pipeline_entries import (
 )
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+PENDING = (EntryStatus.EMBEDDINGS_CREATED,)
+FIELDS = ["book_id", "status", "metadata"]
+MAX_BOOKS_PER_SUBJECT = 50
+
+
+def resolve_subject(subject_id: str) -> list[BookIndex]:
+    book_ids = get_pipeline_entries().get_indexes(
+        status=EntryStatus.EMBEDDINGS_CREATED, subject_id=subject_id
+    )
+
+    if len(book_ids) > MAX_BOOKS_PER_SUBJECT:
+        logger.info(
+            "%s resolved %d books; taking the first %d, the rest keep %s "
+            "for the next run.",
+            subject_id,
+            len(book_ids),
+            MAX_BOOKS_PER_SUBJECT,
+            EntryStatus.EMBEDDINGS_CREATED,
+        )
+        book_ids = book_ids[:MAX_BOOKS_PER_SUBJECT]
+
+    return book_ids
+
+
+def get_entries(book_ids: list[str]) -> list[PipelineEntry]:
+    book_ids = list(book_ids)
+    keys = [{"book_id": str(BookIndex.parse(book_id))} for book_id in book_ids]
+    entries = [
+        PipelineEntry.model_validate(item)
+        for item in get_pipeline_entries().batch_get_entries(keys, FIELDS)
+    ]
+
+    if len(entries) != len(book_ids):
+        logger.warning(
+            "%d of %d book(s) have no pipeline entry.",
+            len(book_ids) - len(entries),
+            len(book_ids),
+        )
+
+    pending = []
+    for entry in entries:
+        if entry.status in PENDING:
+            pending.append(entry)
+        else:
+            logger.info(
+                "%s is at %s, not %s; skipping publish.",
+                entry.book_id,
+                entry.status,
+                ", ".join(PENDING),
+            )
+
+    return sorted(pending, key=lambda entry: entry.book_id)
 
 
 class BookEmbeddings:
@@ -151,22 +205,13 @@ def remove_deprecated_terms(book_id, terms):
     get_corpus_term_table().remove_book_terms(book_id, deprecated_terms)
 
 
-def publish(book_id: BookIndex):
-    logger.info("%s: starting publish", book_id)
-    pipeline_entries = get_pipeline_entries()
-
-    try:
-        entry = pipeline_entries.get_entry(book_id, ["status", "metadata"])
-    except LookupError:
-        logger.warning("%s: has no pipeline entry", book_id)
-        return
-
-    if entry.status is None or entry.status < EntryStatus.EMBEDDINGS_CREATED:
-        logger.warning("%s: has no embeddings", book_id)
-        return
-
+def publish_entry(entry: PipelineEntry) -> None:
+    book_id = entry.book_id
     logger.info(
-        "%s: status=%s published_year=%s", book_id, entry.status, published_year(entry)
+        "%s: starting publish, status=%s published_year=%s",
+        book_id,
+        entry.status,
+        published_year(entry),
     )
 
     book_embeddings = BookEmbeddings.from_s3(entry)
@@ -188,5 +233,42 @@ def publish(book_id: BookIndex):
     remove_deprecated_terms(book_id, terms)
     update_book_term_table(book_id, terms, book_embeddings, raw_pos_data_obj)
     update_term_table(book_id, terms)
-    save_metadata(entry, pipeline_entries)
+    save_metadata(entry, get_pipeline_entries())
     logger.info("%s: publish complete (%d terms)", book_id, len(terms))
+
+
+def publish_entries(entries: list[PipelineEntry]) -> dict:
+    published = []
+    failed = []
+    for entry in entries:
+        try:
+            publish_entry(entry)
+        except Exception:
+            logger.exception(
+                "%s failed to publish; left at %s.",
+                entry.book_id,
+                EntryStatus.EMBEDDINGS_CREATED,
+            )
+            failed.append(str(entry.book_id))
+            continue
+
+        published.append(str(entry.book_id))
+
+    logger.info(
+        "%d of %d book(s) published, %d failed.",
+        len(published),
+        len(entries),
+        len(failed),
+    )
+    return {"found": len(entries), "published": len(published), "failed": failed}
+
+
+if __name__ == "__main__":  # pragma: no cover
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+    )
+
+    book_ids = get_pipeline_entries().get_indexes(EntryStatus.EMBEDDINGS_CREATED)
+    logger.info("Publishing %d books: %s", len(book_ids), book_ids)
+
+    publish_entries(get_entries(book_ids))

@@ -1,26 +1,26 @@
-import json
 import logging
+from typing import Any
 
-from publish_utils import publish
-from shared.commons import BookIndex
-from shared.lambda_event import extract_index
-
+from publish import get_entries, publish_entries, resolve_subject
+from shared.lambda_event import extract_field
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
-def handler(event, context):
+def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     logger.info("Publish request received", extra={"event": event})
-    index = extract_index(event)
-    if not index:
-        logger.warning("Publish request missing index")
-        return {"statusCode": 400, "body": json.dumps({"error": "index is required"})}
 
-    publish(BookIndex.parse(index))
-    logger.info("Publish handler completed successfully for %s", index)
+    book_ids = extract_field(event, "book_ids")
+    subject_id = extract_field(event, "subject_id")
 
-    return {
-        "statusCode": 200,
-        "body": json.dumps({"index": index}),
-    }
+    if sum([bool(book_ids), bool(subject_id)]) != 1:
+        raise ValueError("Exactly one of 'book_ids' or 'subject_id' must be provided")
+
+    if subject_id:
+        book_ids = resolve_subject(subject_id)
+
+    status = publish_entries(get_entries(book_ids))
+
+    logger.info("Publish completed", extra=status)
+    return status

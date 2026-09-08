@@ -7,12 +7,13 @@ from functools import lru_cache
 from typing import Literal
 
 from app.core.logging import add_to_log
+from app.core.tables import get_book_term_table
 from app.search.services.utils import extract_terms, serialize_expression
 from app.search.constants import PARSE_SYSTEM_PROMPT, FALLBACK_PROMPT
 from app.search.schemas.semantic_drift import OpNode, TermNode
 from app.search.errors import TermResolutionError
 from shared.commons import BookIndex
-from shared.tables.book_terms import ADVERB_TAGS, get_book_term_table
+from shared.tables.book_terms import ADVERB_TAGS
 
 
 def get_openai_client():

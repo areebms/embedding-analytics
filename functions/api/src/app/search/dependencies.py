@@ -2,8 +2,8 @@ from typing import Annotated
 
 from fastapi import Depends
 
+from app.core.tables import BookTermTable, get_book_term_table
 from app.search.services.semantic_drift import BooksSimilarityCache, BooksTermCache
-from shared.tables.book_terms import BookTermTable, get_book_term_table
 
 BookTermTableDep = Annotated[BookTermTable, Depends(get_book_term_table)]
 

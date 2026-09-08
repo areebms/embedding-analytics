@@ -16,7 +16,6 @@ from app.search.services.semantic_drift import BooksSimilarityCache
 from app.search.services.semantic_drift.mean_local_similarities import (
     center_locally,
     get_is_local,
-    get_mean_local_similarity_per_book,
     get_n_highest_similarities,
 )
 from shared.commons import BookIndex
@@ -129,21 +128,11 @@ def assert_response_shape(
         ]
         for entry in book_scores(body, book_id):
             assert entry["mean_local_similarity"] is not None  # measured, not a gap
-            assert entry["n_seeds"] == 5
-            lo, hi = entry["ci"]
-            assert math.isfinite(lo) and math.isfinite(hi)
-            assert lo < entry["mean_local_similarity"] < hi
             assert entry["occurrences"] > 0  # measured, so the book uses the terms
             # n_books exists only against the corpus; pinned it could only say 1.
             if against_corpus:
                 assert entry["n_books"] == expected_n_books
-    expected_fields = {
-        "book_id",
-        "mean_local_similarity",
-        "ci",
-        "occurrences",
-        "n_seeds",
-    }
+    expected_fields = {"book_id", "mean_local_similarity", "occurrences"}
     if against_corpus:
         expected_fields |= {"n_books"}
     for _, books in term_books(body):
@@ -591,8 +580,6 @@ def test_comparative_thin_local_terms_are_not_measured_at_all(post_semantic_drif
     # A full book clears the floor and is measured.
     full = score(body, full_ids[0], "labour")
     assert full["mean_local_similarity"] is not None
-    lo, hi = full["ci"]
-    assert lo <= full["mean_local_similarity"] <= hi
     assert (
         books_by_id(body)[full_ids[0]]["n_shared_terms"]
         >= NUM_NEAREST_TERMS_FOR_LOCAL_COSINE_SIMILARITY
@@ -750,7 +737,6 @@ def test_semantic_drift_incomparable_book_does_not_shorten_other_seeds(
     body, with_incomparable = query_score([*BOOK_IDS, SPARE_ID])
     _, without = query_score(BOOK_IDS)
 
-    assert with_incomparable["n_seeds"] == 5  # every other book carries five seeds
     # the spare backs nothing, and costs nothing
     assert with_incomparable["n_books"] == len(BOOK_IDS) - 1
     # The spare's presence is invisible to the books it can't be compared with.
@@ -767,52 +753,6 @@ def test_semantic_drift_incomparable_book_does_not_shorten_other_seeds(
     assert books_by_id(body)[SPARE_ID]["n_shared_terms"] == 1
 
 
-def test_corpus_interval_measures_peer_spread_not_seed_spread():
-    """Against the corpus the peers are the unit of replication, not the seeds.
-
-    Two peers, each perfectly stable across its own seeds but disagreeing with
-    each other, is the case that separates the two estimators: seed spread is
-    zero, peer spread is not.
-    """
-
-    book_id = BookIndex(SELECTED_ID)
-    peers = [np.full(5, 0.2), np.full(5, 0.8)]
-
-    corpus = get_mean_local_similarity_per_book(
-        book_id, peers, occurrences=10, against_corpus=True
-    )
-    pinned = get_mean_local_similarity_per_book(
-        book_id, peers, occurrences=10, against_corpus=False
-    )
-
-    # Same value either way -- only the interval differs.
-    assert corpus.mean_local_similarity == pytest.approx(0.5)
-    assert pinned.mean_local_similarity == pytest.approx(0.5)
-
-    # Every seed sees the same average, so seed spread is exactly zero.
-    assert pinned.ci[1] - pinned.ci[0] == 0.0
-    # The peers disagree, and against the corpus that has to show.
-    assert corpus.ci[1] - corpus.ci[0] > 0.0
-    assert corpus.ci[0] < corpus.mean_local_similarity < corpus.ci[1]
-
-
-def test_corpus_interval_falls_back_to_seed_spread_with_one_peer():
-    """One peer leaves no between-book variation to estimate."""
-
-    book_id = BookIndex(SELECTED_ID)
-    peers = [np.array([0.1, 0.2, 0.3, 0.4, 0.5])]
-
-    corpus = get_mean_local_similarity_per_book(
-        book_id, peers, occurrences=10, against_corpus=True
-    )
-    pinned = get_mean_local_similarity_per_book(
-        book_id, peers, occurrences=10, against_corpus=False
-    )
-
-    assert corpus.ci == pytest.approx(pinned.ci)
-    assert corpus.n_books == 1
-
-
 def test_semantic_drift_score_is_independent_of_peer_order(post_semantic_drift):
 
     books = {**default_books(BOOK_IDS), SPARE_ID: book_rows(SPARE_ID, n_seeds=3)}
@@ -824,11 +764,11 @@ def test_semantic_drift_score_is_independent_of_peer_order(post_semantic_drift):
     spare_last = query_score([*BOOK_IDS, SPARE_ID])
     spare_first = query_score([SPARE_ID, *BOOK_IDS])
 
-    assert spare_last["n_seeds"] == 3
-    for field in ("book_id", "occurrences", "n_seeds", "n_books"):
+    for field in ("book_id", "occurrences", "n_books"):
         assert spare_last[field] == spare_first[field]
-    for field in ("mean_local_similarity", "ci"):
-        assert spare_last[field] == pytest.approx(spare_first[field], abs=1e-6)
+    assert spare_last["mean_local_similarity"] == pytest.approx(
+        spare_first["mean_local_similarity"], abs=1e-6
+    )
 
 
 def test_semantic_drift_nearest_terms_not_restricted_to_one_books_vocabulary(
@@ -1018,11 +958,7 @@ def test_semantic_drift_scores_agree_with_and_without_the_batched_cache(
             b["book_id"] for b in plain_books
         ]
         for batched, plain in zip(batched_books, plain_books):
-            assert batched["n_seeds"] == plain["n_seeds"]
             assert batched["n_books"] == plain["n_books"]
             np.testing.assert_allclose(
                 batched["mean_local_similarity"], plain["mean_local_similarity"], atol=1e-6
-            )
-            np.testing.assert_allclose(
-                batched["ci"], plain["ci"], atol=1e-6
             )

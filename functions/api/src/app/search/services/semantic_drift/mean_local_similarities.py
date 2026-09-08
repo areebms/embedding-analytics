@@ -11,7 +11,6 @@ from app.search.constants import (
     NUM_NEAREST_TERMS_FOR_SIMILARITY_CENTERING,
     NUM_RELEVANT_TERMS_FOR_INSTABILITY,
     NUM_COMPARATIVE_TERMS,
-    T_CRIT_95,
 )
 from app.search.errors import NoLocalNearestTermsError
 from app.search.schemas.semantic_drift import (
@@ -157,20 +156,6 @@ def get_comparative_terms(
     return [make_term_stats(iloc) for iloc in np.union1d(mean_ranked, variance_ranked)]
 
 
-def t_crit_95(df: int) -> float:
-    """Two-tailed 95% critical value for `df` degrees of freedom."""
-    return T_CRIT_95[df] if df < len(T_CRIT_95) else 1.96
-
-
-def standard_error_half_width(observations: np.ndarray) -> float:
-    """Half-width of the 95% interval on the mean of `observations`."""
-    n = len(observations)
-    if n < 2:
-        return 0.0
-    sd = float(np.std(observations, ddof=1))
-    return t_crit_95(n - 1) * sd / np.sqrt(n)
-
-
 def get_mean_local_similarity_per_book(
     book_id: BookIndex,
     local_similarities_per_peer: list[np.ndarray],
@@ -185,29 +170,17 @@ def get_mean_local_similarity_per_book(
     mean_local_similarities_per_seed = np.mean(truncated, axis=0)
     mean_local_similarity = float(np.mean(mean_local_similarities_per_seed))
 
-    per_peer_means = np.array([similarity.mean() for similarity in truncated])
-    if against_corpus and len(per_peer_means) > 1:
-        ci_half = standard_error_half_width(per_peer_means)
-    else:
-        ci_half = standard_error_half_width(mean_local_similarities_per_seed)
-
-    ci = (mean_local_similarity - ci_half, mean_local_similarity + ci_half)
-
     if against_corpus:
         return DefinitionalAgreementToCorpus(
             book_id=book_id.source_id,
             mean_local_similarity=mean_local_similarity,
-            ci=ci,
             occurrences=occurrences,
-            n_seeds=n_seeds,
             n_books=len(local_similarities_per_peer),
         )
     return DefinitionalAgreement(
         book_id=book_id.source_id,
         mean_local_similarity=mean_local_similarity,
-        ci=ci,
         occurrences=occurrences,
-        n_seeds=n_seeds,
     )
 
 

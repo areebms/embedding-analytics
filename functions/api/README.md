@@ -165,40 +165,7 @@ expression wouldn't benefit the same way. Floats also drift by about 1e-7
 between the batched and unbatched paths, which is why the tests compare with a
 numeric tolerance instead of exact equality.
 
-## Confidence intervals
-
-Computed per query, not during alignment. Both intervals are
-`mean ± t_crit(df) · (std / √n)`; what differs is **what gets averaged**, and the
-two are not comparable in width because they estimate different things.
-
-**Against a nominated book** (`DefinitionalAgreement`) the unit is the seed.
-There is one peer, so there is no between-book variation to estimate:
-
-1. Compute the local similarity in each aligned seed model independently
-2. Take mean and standard deviation across those seeds
-3. `df = n_seeds - 1`
-
-**Against the corpus** (`DefinitionalAgreementToCorpus`) the unit is the peer.
-The claim is about books, not seeds, and the spread across peers already
-contains the seed noise inside each one:
-
-1. Reduce each peer to its own mean across seeds
-2. Take the standard deviation across those per-peer means
-3. `df = n_books - 1`
-
-With a single peer the corpus case falls back to the seed formula, since one
-book gives nothing to estimate spread from.
-
-Neither `std` is returned; both exist only to size the half-width. The **pinned**
-interval remains a lower bound on true uncertainty: it varies the training seed
-only, not the choice of source documents, and Antoniak & Mimno (TACL 2018) find
-bootstrapping over documents gives a substantially wider one. The **corpus**
-interval moves toward that by varying the peer, though it still samples only the
-books the caller asked for rather than the population they are drawn from.
-
-Expect corpus intervals to be wide at small `n_books` — three peers means
-`df = 2` and `t_crit = 4.303`. That is the estimator being honest about how
-little three books say, not a defect.
+## Response shape
 
 Which shape comes back follows from the request. With a `source_book_id`, the
 score is against that one book, and there is no `n_books` — it could only ever
@@ -208,9 +175,7 @@ say `1`:
 {
   "book_id": 3300,
   "mean_local_similarity": 0.354,
-  "ci": [0.312, 0.396],
-  "occurrences": 1284,
-  "n_seeds": 5
+  "occurrences": 1284
 }
 ```
 
@@ -222,32 +187,14 @@ would be a different quantity — and `n_books` reports how many peers backed it
 {
   "book_id": 3300,
   "mean_local_similarity": 0.21,
-  "ci": [0.18, 0.24],
   "occurrences": 1284,
-  "n_seeds": 4,
   "n_books": 4
 }
 ```
 
 `occurrences` is how often the query's terms appear in that book, summed across
 a compound expression's leaf terms, so `labour + (productive - unproductive)`
-reports the total for all three. `n_seeds` is how many aligned models the
-comparison had in common — the minimum across peers, so one thinly-trained book
-lowers it for the whole row.
-
-Reading a `ci` depends on which one it is. Against a nominated book, tight means
-the relationship was stable across training runs and wide means it was sensitive
-to model randomness. Against the corpus, tight means the peers placed the term
-alike and wide means they disagreed — a claim about the books, not the training.
-
-**Why this matters for vector expressions.** Contrast directions like
-`productive - unproductive` produce small raw difference vectors when the two
-terms are semantically close, and per-operation normalization in the evaluator
-amplifies whatever signal or noise remains. If the amplified direction varies
-across seeds, the seed-based interval widens — making the `ci` on
-`DefinitionalAgreement` a direct quality signal for contrast queries. The corpus
-interval will not show this as reliably, since it varies the peer rather than the
-seed.
+reports the total for all three.
 
 ## The describe pipeline
 

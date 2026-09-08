@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from app.core.dependencies import get_books_metadata_cache
 from app.core.services import BooksMetadataCache
+from app.core.tables import get_book_term_table
 from app.search.constants import (
     MAX_RANK_FOR_STABLE_TERM,
     MAX_RANK_FOR_UNSTABLE_TERM,
@@ -15,7 +16,6 @@ from app.search.constants import (
 )
 from app.search.dependencies import get_books_term_cache
 from app.search.services.semantic_drift import BooksTermCache
-from shared.tables.book_terms import get_book_term_table
 
 os.environ.pop("REDIS_URL", None)
 

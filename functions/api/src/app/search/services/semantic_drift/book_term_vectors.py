@@ -7,10 +7,11 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 
 from app.core.logging import request_log
+from app.core.tables import BookTermTable
 from app.search.schemas.semantic_drift import OpNode, TermNode
 from app.search.services.semantic_drift.utils import normalize_vectors
 from shared.commons import BookIndex
-from shared.tables.book_terms import ADVERB_TAGS, BookTermTable
+from shared.tables.book_terms import ADVERB_TAGS
 
 
 class BookTermVectors:

@@ -6,6 +6,7 @@ import pytest
 from botocore.exceptions import ClientError
 
 import app
+import create_embeddings as create_embeddings_module
 from create_embeddings import (
     EmbeddingData,
     create_embeddings,
@@ -295,3 +296,46 @@ def test_upload_embedding_data_writes_the_terms_vectors_and_counts(
     assert uploaded["terms"].tolist() == data.terms
     assert np.array_equal(uploaded["vectors"], data.vectors)
     assert np.array_equal(uploaded["attr_count"], data.term_counts)
+
+
+def test_the_books_that_reached_embeddings_created_are_announced(
+    tokenized_book, events_client
+):
+    tokenized_book(INDEX, SYNTHETIC_PASSAGES)
+    tokenized_book(INDEX_2, SYNTHETIC_PASSAGES)
+
+    app.handler({"book_ids": [str(INDEX), str(INDEX_2)]}, None)
+
+    (entry,) = events_client.put_events.call_args.kwargs["Entries"]
+
+    assert entry["Source"] == create_embeddings_module.ANNOUNCE_SOURCE
+    assert entry["DetailType"] == create_embeddings_module.ANNOUNCE_DETAIL_TYPE
+
+    detail = json.loads(entry["Detail"])
+
+    assert sorted(detail["book_ids"]) == sorted([str(INDEX), str(INDEX_2)])
+    assert detail["embedded"] == 2
+
+
+def test_a_run_that_embedded_nothing_announces_nothing(seed, events_client):
+    seed(EntryStatus.EMBEDDINGS_CREATED)
+
+    status = app.handler({"book_ids": [str(INDEX)]}, None)
+
+    assert status == {"found": 0, "embedded": 0}
+    events_client.put_events.assert_not_called()
+
+
+def test_an_announcement_the_bus_rejects_ends_the_run(
+    tokenized_book, events_client, entries
+):
+    index = tokenized_book(passages=SYNTHETIC_PASSAGES)
+    events_client.put_events.return_value = {
+        "FailedEntryCount": 1,
+        "Entries": [{"ErrorCode": "ThrottlingException"}],
+    }
+
+    with pytest.raises(RuntimeError, match="rejected"):
+        app.handler({"book_ids": [str(index)]}, None)
+
+    assert status_of(entries, index) == EntryStatus.EMBEDDINGS_CREATED

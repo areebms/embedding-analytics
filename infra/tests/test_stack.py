@@ -35,13 +35,13 @@ def announced_events(stage: str) -> set[tuple[str, str]]:
 
 
 def test_stack_holds_exactly_these_resources(resources):
-    """The eight of docs/operations.md: three Lambdas, two machines, two rules and one
-    permission -- and nothing else. A stray construct shows up here."""
+    """Five Lambdas, two machines, four rules and three permissions -- and nothing else.
+    A stray construct shows up here."""
     assert Counter(r["Type"] for r in resources.values()) == {
-        FUNCTION: 4,
+        FUNCTION: 5,
         MACHINE: 2,
-        RULE: 3,
-        PERMISSION: 2,
+        RULE: 4,
+        PERMISSION: 3,
     }
 
 
@@ -179,4 +179,5 @@ def test_the_lambda_target_carries_its_invoke_permission(resources):
             f"{config.PREFIX}-create-embeddings",
             f"{config.PREFIX}-create-embeddings-trigger",
         ),
+        (f"{config.PREFIX}-publish", f"{config.PREFIX}-publish-trigger"),
     }

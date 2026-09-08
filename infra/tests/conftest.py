@@ -9,6 +9,8 @@ os.environ.update(
     PUT_EVENT_ROLE_ARN="arn:aws:iam::000000000000:role/test-events",
     S3_BUCKET="test-bucket",
     PIPELINE_TABLE="pipeline-test",
+    BOOK_TERM_TABLE="book-terms-test",
+    TERM_CORPUS_TABLE="corpus-terms-test",
     ANTHROPIC_API_KEY="test-key",
     CDK_DEFAULT_ACCOUNT="000000000000",
     CDK_DEFAULT_REGION="us-east-1",

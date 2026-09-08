@@ -5,10 +5,13 @@ what runs it. They live in different files and can be added or removed independe
 and one of those directions never fails on its own -- it just deploys having run nothing.
 """
 
+import os
+
 import pytest
 
 import app
 import config
+import deploy
 from deploy import GateError, validate_dockerfile
 
 
@@ -96,3 +99,46 @@ def test_a_stage_that_only_looks_like_test_does_not_arm_the_gate(
 
     with pytest.raises(GateError, match=r"no `test` stage"):
         validate_dockerfile("svc")
+
+
+def stub_run_cmd(monkeypatch, codes):
+    calls = []
+
+    def run_cmd(cmd, *, cwd):
+        calls.append(cmd)
+        return codes.pop(0)
+
+    monkeypatch.setattr(deploy, "run_cmd", run_cmd)
+    monkeypatch.setattr(deploy, "validate_dockerfile", lambda service: None)
+    return calls
+
+
+def ran_the_container(calls):
+    return any(cmd[:2] == ["docker", "run"] for cmd in calls)
+
+
+def test_a_test_image_that_does_not_build_is_not_reported_as_a_test_failure(
+    monkeypatch, capsys
+):
+    calls = stub_run_cmd(monkeypatch, [0, 125])
+
+    code = deploy.run_test_gate(["scrape"])
+
+    assert code == os.EX_UNAVAILABLE
+    assert not ran_the_container(calls)
+    assert "not a test failure" in capsys.readouterr().err
+
+
+def test_a_suite_that_runs_and_fails_is_reported_as_a_test_failure(monkeypatch):
+    calls = stub_run_cmd(monkeypatch, [0, 0, 1])
+
+    code = deploy.run_test_gate(["scrape"])
+
+    assert code == os.EX_SOFTWARE
+    assert ran_the_container(calls)
+
+
+def test_a_service_that_builds_and_passes_clears_the_gate(monkeypatch):
+    stub_run_cmd(monkeypatch, [0, 0, 0])
+
+    assert deploy.run_test_gate(["scrape"]) == os.EX_OK

@@ -1,3 +1,4 @@
+import json
 import logging
 import tempfile
 from typing import NamedTuple
@@ -7,6 +8,7 @@ from botocore.exceptions import ClientError
 
 from shared.commons import BookIndex
 from shared.s3 import load_csv, upload_file
+from shared.session import get_session
 from shared.tables.pipeline_entries import (
     EntryStatus,
     PipelineEntry,
@@ -25,6 +27,8 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 PENDING = (EntryStatus.TOKENIZED,)
+ANNOUNCE_SOURCE = "embedding-analytics.create-embeddings"
+ANNOUNCE_DETAIL_TYPE = "Books Embedded"
 
 
 class EmbeddingData(NamedTuple):
@@ -137,8 +141,32 @@ def get_entries(book_ids: list[str]) -> list[PipelineEntry]:
     return pending
 
 
+def announce_embeddings_creation(book_ids: list[str]) -> None:
+    response = (
+        get_session()
+        .client("events")
+        .put_events(
+            Entries=[
+                {
+                    "Source": ANNOUNCE_SOURCE,
+                    "DetailType": ANNOUNCE_DETAIL_TYPE,
+                    "Detail": json.dumps(
+                        {"book_ids": book_ids, "embedded": len(book_ids)}
+                    ),
+                }
+            ]
+        )
+    )
+
+    if response["FailedEntryCount"]:
+        raise RuntimeError(
+            f"the bus rejected '{ANNOUNCE_DETAIL_TYPE}' for {book_ids}: "
+            f"{response['Entries']}"
+        )
+
+
 def create_embeddings(entries: list[PipelineEntry]) -> dict:
-    embedded = 0
+    embedded = []
 
     for entry in entries:
         passages = load_passages(entry)
@@ -157,10 +185,13 @@ def create_embeddings(entries: list[PipelineEntry]) -> dict:
         upload_embedding_data(entry, embedding_data)
         set_status(entry.book_id, EntryStatus.EMBEDDINGS_CREATED)
 
-        embedded += 1
+        embedded.append(str(entry.book_id))
 
-    logger.info("%d of %d book(s) embedded.", embedded, len(entries))
-    return {"found": len(entries), "embedded": embedded}
+    if embedded:
+        announce_embeddings_creation(embedded)
+
+    logger.info("%d of %d book(s) embedded.", len(embedded), len(entries))
+    return {"found": len(entries), "embedded": len(embedded)}
 
 
 if __name__ == "__main__":  # pragma: no cover

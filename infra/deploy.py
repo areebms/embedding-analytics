@@ -23,7 +23,7 @@ TEST_STAGE = re.compile(r"^\s*FROM\s.*\sAS\s+test\s*$", re.IGNORECASE | re.MULTI
 
 
 class GateError(Exception):
-    """A service the gate cannot run, so the deploy must not proceed. """
+    """A service the gate cannot run, so the deploy must not proceed."""
 
 
 def run_cmd(cmd: list[str], *, cwd: Path) -> int:
@@ -50,7 +50,7 @@ def validate_dockerfile(service: str) -> None:
         )
 
 
-def run_test_container(service: str) -> int:
+def run_test_container(service: str) -> tuple[str, int]:
     tag = f"{service}:test"
     build = run_cmd(
         [
@@ -71,8 +71,8 @@ def run_test_container(service: str) -> int:
         cwd=config.REPO_ROOT,
     )
     if build != 0:
-        return build
-    return run_cmd(["docker", "run", "--rm", tag], cwd=config.REPO_ROOT)
+        return "build", build
+    return "test", run_cmd(["docker", "run", "--rm", tag], cwd=config.REPO_ROOT)
 
 
 def run_test_gate(services: list[str]) -> int:
@@ -94,7 +94,15 @@ def run_test_gate(services: list[str]) -> int:
     for service in services:
         print(f"\n=== Testing {service} ===")
 
-        code = run_test_container(service)
+        phase, code = run_test_container(service)
+        if phase == "build" and code != 0:
+            print(
+                f"\ndeploy.py: {service}: the test image did not build (exit {code}), "
+                f"so the suite never ran -- not a test failure. "
+                f"nothing built or pushed.",
+                file=sys.stderr,
+            )
+            return os.EX_UNAVAILABLE
         if code != 0:
             print(
                 f"\ndeploy.py: {service} failed. nothing built or pushed.",

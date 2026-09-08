@@ -26,6 +26,7 @@ services:
   publish:
     memory: 512
     timeout: 300
+    env: [S3_BUCKET, PIPELINE_TABLE, BOOK_TERM_TABLE, TERM_CORPUS_TABLE]
 
   api:
     memory: 1024

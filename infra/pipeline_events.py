@@ -28,3 +28,9 @@ BOOKS_TOKENIZED = PipelineEvent(
     detail_type="Books Tokenized",
     detail_keys=frozenset({"book_ids", "tokenized"}),
 )
+
+BOOKS_EMBEDDINGS_CREATED = PipelineEvent(
+    source="embedding-analytics.create-embeddings",
+    detail_type="Books Embedded",
+    detail_keys=frozenset({"book_ids", "embedded"}),
+)

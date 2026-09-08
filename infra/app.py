@@ -6,6 +6,7 @@ from resources import (
     build_create_embeddings_trigger,
     build_function_from_container,
     get_role,
+    build_publish_trigger,
     build_standardize_trigger,
     build_state_machine,
     build_tokenize_trigger,
@@ -13,7 +14,7 @@ from resources import (
 
 # The services CloudFormation owns. Adding one here is what deploys it; deploy.py then
 # picks it up off the synthesized assembly and gates its suite.
-DEPLOYED = ["scrape", "standardize-html", "tokenize", "create-embeddings"]
+DEPLOYED = ["scrape", "standardize-html", "tokenize", "create-embeddings", "publish"]
 
 
 def build(outdir: str | None = None) -> cdk.App:
@@ -42,6 +43,7 @@ def build(outdir: str | None = None) -> cdk.App:
     build_create_embeddings_trigger(
         stack, create_embeddings=functions["create-embeddings"]
     )
+    build_publish_trigger(stack, publish=functions["publish"])
 
     return app
 

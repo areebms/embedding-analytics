@@ -13,6 +13,7 @@ from constructs import Construct
 
 import config
 from pipeline_events import (
+    BOOKS_EMBEDDINGS_CREATED,
     BOOKS_STANDARDIZED,
     BOOKS_TOKENIZED,
     SUBJECT_BOOKS_SCRAPED,
@@ -155,6 +156,21 @@ def build_create_embeddings_trigger(
         description="Turns a 'Books Tokenized' event into a create-embeddings invocation.",
         target=targets.LambdaFunction(
             create_embeddings,
+            event=events.RuleTargetInput.from_event_path("$.detail"),
+        ),
+    )
+
+
+def build_publish_trigger(
+    scope: Construct, *, publish: aws_lambda.IFunction
+) -> events.Rule:
+    return build_event_rule(
+        scope,
+        event=BOOKS_EMBEDDINGS_CREATED,
+        consumer="publish",
+        description="Turns a 'Books Embedded' event into a publish invocation.",
+        target=targets.LambdaFunction(
+            publish,
             event=events.RuleTargetInput.from_event_path("$.detail"),
         ),
     )

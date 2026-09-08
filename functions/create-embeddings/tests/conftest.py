@@ -92,6 +92,18 @@ def tokenized_book(seed, token_lemmas):
 
 
 @pytest.fixture
+def events_client(mocker):
+    import create_embeddings
+
+    client = mocker.Mock()
+    client.put_events.return_value = {"FailedEntryCount": 0, "Entries": [{}]}
+    mocker.patch.object(
+        create_embeddings, "get_session"
+    ).return_value.client.return_value = client
+    return client
+
+
+@pytest.fixture
 def uploaded_embeddings(bucket):
     def read(index=INDEX):
         with tempfile.NamedTemporaryFile(suffix=".npz") as file:

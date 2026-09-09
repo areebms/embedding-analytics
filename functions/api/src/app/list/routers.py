@@ -1,9 +1,8 @@
 from fastapi import APIRouter
 
 from app.core.dependencies import BooksMetadataCacheDep, cache
-from app.core.tables import get_book_term_table
 from app.list.schemas import BookResponse, TermResponse
-from shared.tables.book_terms import ADVERB_TAGS
+from shared.tables.book_terms import ADVERB_TAGS, get_book_term_table
 
 router = APIRouter()
 

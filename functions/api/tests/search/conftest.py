@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from app.core.dependencies import get_books_metadata_cache
 from app.core.services import BooksMetadataCache
-from app.core.tables import get_book_term_table
+from shared.tables.book_terms import get_book_term_table
 from app.search.constants import (
     MAX_RANK_FOR_STABLE_TERM,
     MAX_RANK_FOR_UNSTABLE_TERM,
@@ -75,13 +75,13 @@ def set_multi_book_table(term_table, books):
 def set_term_table(term_table, entries_by_term, book_id="gutenberg-1"):
     """Configure get_entry and batch_get_entries for a single-book test."""
 
-    def get_entry(term, platform_data, fields=None):
-        if platform_data == book_id and term in entries_by_term:
+    def get_entry(term, _book_id, fields=None):
+        if _book_id == book_id and term in entries_by_term:
             return entries_by_term[term]
         return None
 
-    def batch_get_entries(terms, platform_data, fields=None):
-        if platform_data != book_id:
+    def batch_get_entries(terms, _book_id, fields=None):
+        if _book_id != book_id:
             return []
         return [entries_by_term[t] for t in terms if t in entries_by_term]
 

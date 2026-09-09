@@ -41,7 +41,7 @@ def make_fixed_term_entry(term, vector, count=100, tags=None):
         "term": term,
         "count_": count,
         "tags": tags if tags is not None else {"N"},
-        "vectors": [bytes(arr16.tobytes())],
+        "vector": bytes(arr16.tobytes()),
     }
 
 
@@ -142,15 +142,15 @@ def assert_response_shape(
     for term_data in nearest_term_data(body):
         assert set(term_data) == {
             "term",
-            "stability",
-            "instability",
+            "relative_similarity_mean",
+            "relative_similarity_variance",
             "n_books_in",
             "n_books_as_top50",
             "n_books_as_top100",
             "books",
         }
         assert term_data["n_books_in"] >= MIN_BOOKS_WITH_TERM
-        assert term_data["instability"] >= 0.0
+        assert term_data["relative_similarity_variance"] >= 0.0
         # Membership is bounded by vocabulary: a book cannot place a term it
         # does not have, and the floor is what admitted the term at all.
         assert (
@@ -316,7 +316,8 @@ def test_semantic_drift_returns_a_term_its_spread_alone_selected(
     nearer = [
         term_data
         for term_data in ranked
-        if term_data["stability"] > by_term["swinging"]["stability"]
+        if term_data["relative_similarity_mean"]
+        > by_term["swinging"]["relative_similarity_mean"]
     ]
     assert len(nearer) >= NUM_COMPARATIVE_TERMS
 
@@ -330,10 +331,10 @@ def test_semantic_drift_nearest_terms_carry_their_statistics(
     # The sample variance of exactly the positions the corpus was built to hold.
     expected = local_positions(ranking_similarities_by_book())
     for term in ("swinging", "trending", "flat"):
-        assert by_term[term]["instability"] == pytest.approx(
+        assert by_term[term]["relative_similarity_variance"] == pytest.approx(
             np.var(expected[term], ddof=1), abs=1e-4
         )
-        assert by_term[term]["stability"] == pytest.approx(
+        assert by_term[term]["relative_similarity_mean"] == pytest.approx(
             np.mean(expected[term]), abs=1e-3
         )
         assert by_term[term]["n_books_in"] == len(BOOK_IDS)
@@ -341,8 +342,11 @@ def test_semantic_drift_nearest_terms_carry_their_statistics(
     # `flat` sits at a constant 0.8 in every book and still spreads: holding one
     # distance while the terms around it move *is* the books disagreeing
     # about where the term sits. It spreads least of the three all the same.
-    assert by_term["flat"]["instability"] > 0.0
-    assert by_term["flat"]["instability"] < by_term["trending"]["instability"]
+    assert by_term["flat"]["relative_similarity_variance"] > 0.0
+    assert (
+        by_term["flat"]["relative_similarity_variance"]
+        < by_term["trending"]["relative_similarity_variance"]
+    )
 
 
 def membership_books(book_ids=BOOK_IDS):
@@ -429,7 +433,7 @@ def test_semantic_drift_returns_the_term_the_books_hold_nearest(
 
     assert len(ranked) > NUM_COMPARATIVE_TERMS
 
-    nearest = max(ranked, key=lambda term_data: term_data["stability"])
+    nearest = max(ranked, key=lambda term_data: term_data["relative_similarity_mean"])
     assert nearest["term"] == "flat"
 
 
@@ -481,7 +485,7 @@ def test_semantic_drift_statistics_read_position_not_distance(
     # own. Three orders of magnitude down, and what is left is float16 rounding.
     negligible = min(raw_spreads) / 1000
     for term_data in nearest_term_data(body):
-        assert term_data["instability"] < negligible, term_data["term"]
+        assert term_data["relative_similarity_variance"] < negligible, term_data["term"]
 
 
 def test_center_locally_leaves_a_book_with_nothing_to_centre_alone():

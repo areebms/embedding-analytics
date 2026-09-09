@@ -7,11 +7,10 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 
 from app.core.logging import request_log
-from app.core.tables import BookTermTable
 from app.search.schemas.semantic_drift import OpNode, TermNode
 from app.search.services.semantic_drift.utils import normalize_vectors
 from shared.commons import BookIndex
-from shared.tables.book_terms import ADVERB_TAGS
+from shared.tables.book_terms import ADVERB_TAGS, BookTermTable
 
 
 class BookTermVectors:
@@ -116,17 +115,17 @@ class BooksTermCache:
 
         terms, term_buffers, term_counts = [], [], []
         for entry in self.table.get_entries(
-            book_id, fields=["term", "tags", "vectors", "count_"]
+            book_id, fields=["term", "tags", "vector", "count_"]
         ):
             if entry.get("tags") == ADVERB_TAGS:
                 continue
 
-            if "vectors" not in entry:
+            if "vector" not in entry:
                 continue
 
             terms.append(entry["term"])
             term_counts.append(int(entry.get("count_", 0)))  # stored as a Decimal
-            term_buffers.append(entry["vectors"][0])
+            term_buffers.append(entry["vector"])
 
         self.books_term_vectors[book_id] = BookTermVectors(
             terms, self.decode_vectors(term_buffers), term_counts

@@ -112,6 +112,19 @@ def test_load_book_skips_adverbs_and_rows_without_vectors():
     }
 
 
+def test_load_book_skips_adjective_only_terms():
+    books = _term_cache(
+        [
+            make_term_entry("labour"),
+            make_term_entry("quick", tags={"J"}),
+            make_term_entry("value", tags={"N", "J"}),
+        ]
+    )
+    book_term_vectors = books.load_book(BookIndex(1))
+
+    assert list(book_term_vectors.terms) == ["labour", "value"]
+
+
 def test_load_book_of_a_book_whose_every_row_is_filtered_is_empty_not_an_error():
     # Same shape as a book_id the table knows nothing about: no vocabulary, no
     # exception -- the missing-terms path reports it from there.

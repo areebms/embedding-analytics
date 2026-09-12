@@ -10,6 +10,7 @@ from pydantic import (
 )
 
 MAX_TREE_DEPTH = 5
+MIN_BOOK_IDS = 20
 
 
 def check_tree_depth(tree):
@@ -50,7 +51,7 @@ ExprTree = Annotated[TermNode | OpNode, AfterValidator(check_tree_depth)]
 class SemanticDriftRequestBody(BaseModel):
 
     tree: ExprTree
-    book_ids: list[int] = Field(min_length=1, max_length=16)
+    book_ids: list[int] = Field(min_length=MIN_BOOK_IDS, max_length=50)
 
     @field_validator("book_ids")
     @classmethod
@@ -90,20 +91,20 @@ class BookSummary(BaseModel):
     missing_terms: list[str] = Field(default_factory=list)
 
 
-class DefinitionalAgreement(BaseModel):
+class SecondOrderSimilarity(BaseModel):
     """One book read against the nominated source book."""
 
     model_config = ConfigDict(extra="forbid")
 
     book_id: int
-    mean_local_similarity: float
+    similarity: float
     occurrences: int
 
 
-class DefinitionalAgreementToCorpus(BaseModel):
+class MeanSecondOrderSimilarity(BaseModel):
     """One book read against every other requested book.
 
-    `mean_local_similarity` is the mean of the pairwise local similarities
+    `mean_similarity` is the mean of the pairwise local similarities
     against each peer in turn -- not a comparison against one aggregate corpus
     profile, which would be a different quantity.
     """
@@ -111,39 +112,38 @@ class DefinitionalAgreementToCorpus(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     book_id: int
-    mean_local_similarity: float
+    mean_similarity: float
     occurrences: int
     n_books: int
 
 
-class TermStats(BaseModel):
+class RelativeTermSimilarity(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
     term: str
-    stability: float
-    instability: float
+    similarity_mean: float
+    similarity_variance: float
     n_books_in: int
-    n_books_as_top50: int
-    n_books_as_top100: int
+    n_books_local_in: int
 
 
-class TermData(TermStats):
+class TermSimilarityData(RelativeTermSimilarity):
 
-    books: list[DefinitionalAgreement] | list[DefinitionalAgreementToCorpus]
+    book_similarities: list[SecondOrderSimilarity] | list[MeanSecondOrderSimilarity]
 
 
-class ExprData(BaseModel):
+class ExprSimilarityData(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
     expr: str
     terms: list[str]
-    books: list[DefinitionalAgreement] | list[DefinitionalAgreementToCorpus]
+    book_similarities: list[SecondOrderSimilarity] | list[MeanSecondOrderSimilarity]
 
 
 class SemanticDriftResponse(BaseModel):
 
-    expr: ExprData
-    comparative_terms: list[TermData]
-    books: list[BookSummary]
+    expr: ExprSimilarityData
+    comparative_terms: list[TermSimilarityData]
+    book_stats: list[BookSummary]

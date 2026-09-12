@@ -6,6 +6,7 @@ import pytest
 from app.core.dependencies import get_books_metadata_cache
 from app.core.services import BooksMetadataCache
 from shared.commons import BookIndex
+from shared.tables.pipeline_entries import EntryStatus
 
 
 def make_table(*entries):
@@ -19,17 +20,22 @@ def table():
     # published_year arrives from DynamoDB as a Decimal, not an int.
     return make_table(
         {
-            "platform_data": "gutenberg-1",
-            "author": "Smith, Adam",
-            "title": "Wealth of Nations",
-            "published_year": Decimal("1776"),
-            "s3_prefix_models": "models/1",
+            "book_id": "gutenberg-1",
+            "status": EntryStatus.EMBEDDINGS_CREATED,
+            "metadata": {
+                "author": "Smith, Adam",
+                "title": "Wealth of Nations",
+                "published_year": Decimal("1776"),
+            },
         },
         {
-            "platform_data": "gutenberg-9",
-            "author": "Say, J-B",
-            "title": "Treatise",
-            "published_year": Decimal("1803"),
+            "book_id": "gutenberg-9",
+            "status": EntryStatus.TOKENIZED,
+            "metadata": {
+                "author": "Say, J-B",
+                "title": "Treatise",
+                "published_year": Decimal("1803"),
+            },
         },
     )
 
@@ -49,10 +55,12 @@ def test_cache_leaves_a_missing_year_none(table):
     cache = BooksMetadataCache(
         make_table(
             {
-                "platform_data": "gutenberg-1",
-                "author": "Smith, Adam",
-                "title": "Wealth of Nations",
-                "s3_prefix_models": "models/1",
+                "book_id": "gutenberg-1",
+                "status": EntryStatus.EMBEDDINGS_CREATED,
+                "metadata": {
+                    "author": "Smith, Adam",
+                    "title": "Wealth of Nations",
+                },
             }
         )
     )

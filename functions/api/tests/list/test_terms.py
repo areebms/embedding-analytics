@@ -54,6 +54,25 @@ def test_terms_excludes_pos_tag_r(client, patch_tables):
     assert "removed" not in terms
 
 
+def test_terms_excludes_pos_tag_j(client, patch_tables):
+    _, term_table = patch_tables
+    _set_term_entries(term_table, {
+        "gutenberg-1": [
+            {"term": "labour", "tags": {"N"}},
+            {"term": "removed", "tags": {"J"}},
+        ],
+        "gutenberg-2": [
+            {"term": "labour", "tags": {"N"}},
+            {"term": "removed", "tags": {"J"}},
+        ],
+    })
+
+    terms = {item["term"] for item in client.get("/terms").json()}
+
+    assert "labour" in terms
+    assert "removed" not in terms
+
+
 def test_terms_response_validates_against_schema(client, patch_tables):
     _, term_table = patch_tables
     _set_term_entries(term_table, {

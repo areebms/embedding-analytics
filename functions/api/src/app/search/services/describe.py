@@ -13,7 +13,7 @@ from app.search.constants import PARSE_SYSTEM_PROMPT, FALLBACK_PROMPT
 from app.search.schemas.semantic_drift import OpNode, TermNode
 from app.search.errors import TermResolutionError
 from shared.commons import BookIndex
-from shared.tables.book_terms import ADVERB_TAGS
+from shared.tables.book_terms import EXCLUDED_POS_TAGS
 
 
 def get_openai_client():
@@ -32,7 +32,8 @@ def get_vocabulary(book_ids: tuple[BookIndex, ...]) -> tuple[set[str], list[str]
     term_table = get_book_term_table()
     for book_id in book_ids:
         for item in term_table.get_entries(book_id, fields=["term", "tags"]):
-            if item.get("tags") == ADVERB_TAGS:
+            tags = item.get("tags")
+            if tags and tags <= EXCLUDED_POS_TAGS:
                 continue
             terms.add(item["term"])
 

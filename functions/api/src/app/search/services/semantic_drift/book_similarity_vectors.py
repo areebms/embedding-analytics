@@ -4,7 +4,7 @@ from collections.abc import Iterable, Sequence
 
 import numpy as np
 
-from app.search.constants import NUM_NEAREST_TERMS_FOR_LOCAL_COSINE_SIMILARITY
+from app.search.constants import NUM_LOCAL_NEAREST_TERMS
 from app.search.errors import MissingTermsError, NoLocalNearestTermsError
 from app.search.services.semantic_drift.book_term_vectors import BooksTermCache
 from app.search.services.semantic_drift.utils import SearchExpr, center_vectors
@@ -46,7 +46,7 @@ class BookSimilarityVectors:
         shared_indexes = self.masked_iloc[indexes[local_indexes]]
         shared_peer_indexes = peer.masked_iloc[peer_indexes[local_indexes]]
 
-        if len(shared_indexes) < NUM_NEAREST_TERMS_FOR_LOCAL_COSINE_SIMILARITY:
+        if len(shared_indexes) < NUM_LOCAL_NEAREST_TERMS:
             raise NoLocalNearestTermsError(
                 self.book_id, peer.book_id, len(shared_indexes)
             )
@@ -54,7 +54,7 @@ class BookSimilarityVectors:
         # vectors of terms closest to the expression.
         shared_similarity_vectors = self.similarity_vectors[shared_indexes]
         sorted_iloc = np.argsort(-shared_similarity_vectors)[
-            :NUM_NEAREST_TERMS_FOR_LOCAL_COSINE_SIMILARITY
+            :NUM_LOCAL_NEAREST_TERMS
         ]
 
         # Similarity vectors for terms shared between books.
@@ -62,10 +62,10 @@ class BookSimilarityVectors:
         shared_peer_vectors = peer.similarity_vectors[
             shared_peer_indexes[sorted_iloc]
         ]
-        return self.correlate_vectors(shared_book_vectors, shared_peer_vectors)
+        return self.get_normalized_dot_product(shared_book_vectors, shared_peer_vectors)
 
     @staticmethod
-    def correlate_vectors(a_vectors: np.ndarray, b_vectors: np.ndarray) -> np.ndarray:
+    def get_normalized_dot_product(a_vectors: np.ndarray, b_vectors: np.ndarray) -> np.ndarray:
         a_centered = center_vectors(a_vectors)
         b_centered = center_vectors(b_vectors)
         a_dot_b = np.einsum("...i,...i->...", a_centered, b_centered)
@@ -112,7 +112,7 @@ class BooksSimilarityCache:
 
         return [
             self.load_book(book_id, expr)
-            for book_id in self.books_term_cache.get_books_with_search_query(
+            for book_id in self.books_term_cache.get_books_with_expr(
                 book_ids, expr
             )
         ]

@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from app.core.dependencies import BooksMetadataCacheDep
 from app.core.logging import add_to_log
 from app.core.routing import post_route
-from app.search.constants import MIN_BOOKS_WITH_TERM
+from app.search.constants import BOOKS_WITH_EXPR
 from app.search.dependencies import BooksSimilarityCacheDep, BooksTermCacheDep
 from app.search.errors import ExpressionAbsentError, QueryInTooFewBooksError
 from app.search.schemas.describe import (
@@ -22,11 +22,11 @@ from app.search.schemas.errors import (
 )
 from app.search.schemas.semantic_drift import (
     BookSummary,
-    ExprData,
+    ExprSimilarityData,
     SemanticDriftRequest,
     SemanticDriftRequestBody,
     SemanticDriftResponse,
-    TermData,
+    TermSimilarityData,
 )
 from app.search.services.describe import process_describe_query
 from app.search.services.semantic_drift import (
@@ -76,7 +76,7 @@ def parse_describe(
     response_model=SemanticDriftResponse,
     responses={
         404: QueryInTooFewBooksResponse,
-        422: {"description": "Malformed request -- e.g. a repeated book_id."},
+        422: {"description": "Malformed request"},
     },
 )
 def semantic_drift(
@@ -150,14 +150,15 @@ def get_semantic_drift(
     books_term_cache.warm_cache(book_ids)
     warmed_at = time.perf_counter()
 
-    valid_book_ids = books_term_cache.get_books_with_search_query(book_ids, search_expr)
+    book_ids_with_expr = books_term_cache.get_books_with_expr(book_ids, search_expr)
 
-    if len(valid_book_ids) < MIN_BOOKS_WITH_TERM:
-        raise QueryInTooFewBooksError(len(valid_book_ids), selected_book_id)
+    min_books_with_expr = int(BOOKS_WITH_EXPR * len(book_ids))
+    if len(book_ids_with_expr) < min_books_with_expr:
+        raise QueryInTooFewBooksError(len(book_ids_with_expr), selected_book_id)
 
     comparative_terms = get_comparative_terms(
         books_similarity_cache,
-        valid_book_ids,
+        book_ids_with_expr,
         search_expr,
         selected_book_id=selected_book_id,
     )
@@ -191,12 +192,14 @@ def get_semantic_drift(
         scored_terms=len(exprs),
     )
 
-    expr_data = ExprData(
-        expr=search_expr.serialized, terms=search_expr.terms, books=expr_book_data[0]
+    expr_data = ExprSimilarityData(
+        expr=search_expr.serialized,
+        terms=search_expr.terms,
+        book_similarities=expr_book_data[0],
     )
 
     nearest_term_data = [
-        TermData(**comparative_term.model_dump(), books=book_data)
+        TermSimilarityData(**comparative_term.model_dump(), book_similarities=book_data)
         for comparative_term, book_data in zip(comparative_terms, expr_book_data[1:])
     ]
 
@@ -205,7 +208,7 @@ def get_semantic_drift(
             id=book_id.source_id,
             n_shared_terms=books_term_cache.get_n_shared_terms(
                 book_id,
-                valid_book_ids if selected_book_id is None else [selected_book_id],
+                book_ids_with_expr if selected_book_id is None else [selected_book_id],
             ),
             missing_terms=sorted(missing_terms_by_book[book_id]),
         )
@@ -213,5 +216,5 @@ def get_semantic_drift(
     ]
 
     return SemanticDriftResponse(
-        expr=expr_data, comparative_terms=nearest_term_data, books=book_summaries
+        expr=expr_data, comparative_terms=nearest_term_data, book_stats=book_summaries
     )

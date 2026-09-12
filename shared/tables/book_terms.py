@@ -7,7 +7,7 @@ from shared.tables.base import BaseTable
 
 BOOK_TERM_TABLE = os.getenv("BOOK_TERM_TABLE")
 
-ADVERB_TAGS = {"R"}
+EXCLUDED_POS_TAGS = {"R", "J", "W"}
 
 
 _book_term_table = None

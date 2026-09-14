@@ -33,8 +33,8 @@ from app.search.services.semantic_drift import (
     BooksSimilarityCache,
     BooksTermCache,
     SearchExpr,
+    get_book_similarities,
     get_comparative_terms,
-    get_mean_local_similarities,
 )
 from shared.commons import BookIndex
 
@@ -165,42 +165,35 @@ def get_semantic_drift(
 
     ranked_at = time.perf_counter()
 
-    missing_terms_by_book = books_term_cache.get_missing_terms_by_book(
-        book_ids,
-        set(search_expr.terms) | {comparative_term.term for comparative_term in comparative_terms},
+    terms = [comparative_term.term for comparative_term in comparative_terms]
+    expr_book_data, term_book_data = get_book_similarities(
+        books_similarity_cache, search_expr, terms, book_ids, selected_book_id
     )
-
-    exprs = [
-        search_expr,
-        *(SearchExpr.from_query(comparative_term.term) for comparative_term in comparative_terms),
-    ]
-    books_similarity_cache.warm_cache(
-        book_ids if selected_book_id is None else [*book_ids, selected_book_id],
-        exprs,
-    )
-    expr_book_data = [
-        get_mean_local_similarities(
-            books_similarity_cache, expr, book_ids, selected_book_id
-        )
-        for expr in exprs
-    ]
 
     add_to_log(
         warm_ms=round((warmed_at - started) * 1000, 1),
         nearest_terms_ms=round((ranked_at - warmed_at) * 1000, 1),
         similarities_ms=round((time.perf_counter() - ranked_at) * 1000, 1),
-        scored_terms=len(exprs),
+        scored_terms=len(terms),
+    )
+
+    expr_source_ids = {book_data.book_id for book_data in expr_book_data}
+    expr_book_ids = [
+        book_id for book_id in book_ids if book_id.source_id in expr_source_ids
+    ]
+    missing_terms_by_book = books_term_cache.get_missing_terms_by_book(
+        expr_book_ids, {*search_expr.terms, *terms}
     )
 
     expr_data = ExprSimilarityData(
         expr=search_expr.serialized,
         terms=search_expr.terms,
-        book_similarities=expr_book_data[0],
+        book_similarities=expr_book_data,
     )
 
     nearest_term_data = [
         TermSimilarityData(**comparative_term.model_dump(), book_similarities=book_data)
-        for comparative_term, book_data in zip(comparative_terms, expr_book_data[1:])
+        for comparative_term, book_data in zip(comparative_terms, term_book_data)
     ]
 
     book_summaries = [
@@ -212,7 +205,7 @@ def get_semantic_drift(
             ),
             missing_terms=sorted(missing_terms_by_book[book_id]),
         )
-        for book_id in book_ids
+        for book_id in expr_book_ids
     ]
 
     return SemanticDriftResponse(

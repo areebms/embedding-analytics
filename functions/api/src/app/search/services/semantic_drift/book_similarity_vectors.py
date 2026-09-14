@@ -1,14 +1,44 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 
 import numpy as np
 
-from app.search.constants import NUM_LOCAL_NEAREST_TERMS
-from app.search.errors import MissingTermsError, NoLocalNearestTermsError
+from app.search.constants import MAX_RANK_FOR_TERM_SELECTION, NUM_LOCAL_NEAREST_TERMS
+from app.search.errors import MissingTermsError
 from app.search.services.semantic_drift.book_term_vectors import BooksTermCache
-from app.search.services.semantic_drift.utils import SearchExpr, center_vectors
+from app.search.services.semantic_drift.utils import SearchExpr
 from shared.commons import BookIndex
+
+
+def get_n_highest_similarities(similarities: np.ndarray, n: int) -> np.ndarray:
+
+    if not len(similarities):
+        return similarities
+
+    n = min(n, len(similarities))
+
+    return np.partition(similarities, -n)[-n:]
+
+
+def get_local_mean_similarity(similarities: np.ndarray, n: int) -> float:
+
+    highest_similarities = get_n_highest_similarities(similarities, n)
+
+    if not len(highest_similarities):
+        return 0.0
+
+    return float(highest_similarities.mean())
+
+
+def get_is_local(similarities: np.ndarray, n: int) -> np.ndarray:
+
+    highest_similarities = get_n_highest_similarities(similarities, n)
+
+    if not len(highest_similarities):
+        return np.zeros(0, dtype=bool)
+
+    return similarities >= highest_similarities.min()
 
 
 class BookSimilarityVectors:
@@ -27,51 +57,41 @@ class BookSimilarityVectors:
 
         book_terms = books_term_cache[book_id].terms
         self.is_valid = ~np.isin(book_terms, query.terms)
-        self.masked_iloc = np.cumsum(self.is_valid) - 1
 
         self.terms = book_terms[self.is_valid]
+
         self.similarity_vectors = similarity_vectors[self.is_valid]
+        self.local_mean_similarity = get_local_mean_similarity(
+            self.similarity_vectors, NUM_LOCAL_NEAREST_TERMS
+        )
+        self.centered_similarity_vectors = (
+            self.similarity_vectors - self.local_mean_similarity
+        )
+        self.is_local = get_is_local(
+            self.similarity_vectors, MAX_RANK_FOR_TERM_SELECTION
+        )
 
     @staticmethod
     def get_similarity_vectors(query_vector: np.ndarray, term_vectors: np.ndarray):
         # return has shape (n_terms,)
         return term_vectors @ query_vector
 
-    def get_local_similarity(self, peer: BookSimilarityVectors):
+    def is_comparable(self, peer: BookSimilarityVectors) -> bool:
 
         indexes, peer_indexes = self.books_term_cache.get_shared_term_indexes(
             self.book_id, peer.book_id
         )
-        local_indexes = self.is_valid[indexes] & peer.is_valid[peer_indexes]
-        shared_indexes = self.masked_iloc[indexes[local_indexes]]
-        shared_peer_indexes = peer.masked_iloc[peer_indexes[local_indexes]]
+        n_shared = np.count_nonzero(
+            self.is_valid[indexes] & peer.is_valid[peer_indexes]
+        )
+        return n_shared >= NUM_LOCAL_NEAREST_TERMS
 
-        if len(shared_indexes) < NUM_LOCAL_NEAREST_TERMS:
-            raise NoLocalNearestTermsError(
-                self.book_id, peer.book_id, len(shared_indexes)
-            )
+    def get_centered_similarity(self, term: str) -> float | None:
 
-        # vectors of terms closest to the expression.
-        shared_similarity_vectors = self.similarity_vectors[shared_indexes]
-        sorted_iloc = np.argsort(-shared_similarity_vectors)[
-            :NUM_LOCAL_NEAREST_TERMS
-        ]
-
-        # Similarity vectors for terms shared between books.
-        shared_book_vectors = self.similarity_vectors[shared_indexes[sorted_iloc]]
-        shared_peer_vectors = peer.similarity_vectors[
-            shared_peer_indexes[sorted_iloc]
-        ]
-        return self.get_normalized_dot_product(shared_book_vectors, shared_peer_vectors)
-
-    @staticmethod
-    def get_normalized_dot_product(a_vectors: np.ndarray, b_vectors: np.ndarray) -> np.ndarray:
-        a_centered = center_vectors(a_vectors)
-        b_centered = center_vectors(b_vectors)
-        a_dot_b = np.einsum("...i,...i->...", a_centered, b_centered)
-        a_dot_a = np.einsum("...i,...i->...", a_centered, a_centered)
-        b_dot_b = np.einsum("...i,...i->...", b_centered, b_centered)
-        return a_dot_b / np.maximum(np.sqrt(a_dot_a * b_dot_b), 1e-12)
+        term_iloc = np.searchsorted(self.terms, term)
+        if term_iloc == len(self.terms) or self.terms[term_iloc] != term:
+            return None
+        return float(self.centered_similarity_vectors[term_iloc])
 
 
 class BooksSimilarityCache:
@@ -81,9 +101,6 @@ class BooksSimilarityCache:
         self.book_similarity_vectors: dict[
             tuple[BookIndex, str], BookSimilarityVectors
         ] = {}
-
-    def __getitem__(self, key: tuple[BookIndex, str]) -> BookSimilarityVectors:
-        return self.book_similarity_vectors[key]
 
     def load_book(self, book_id: BookIndex, expr: SearchExpr) -> BookSimilarityVectors:
 
@@ -96,7 +113,7 @@ class BooksSimilarityCache:
         if missing:
             raise MissingTermsError(missing, book_id)
 
-        return self._store(
+        return self.save(
             book_id,
             expr,
             BookSimilarityVectors.get_similarity_vectors(
@@ -117,7 +134,7 @@ class BooksSimilarityCache:
             )
         ]
 
-    def _store(
+    def save(
         self, book_id: BookIndex, expr: SearchExpr, similarity_vectors: np.ndarray
     ) -> BookSimilarityVectors:
         key = (book_id, expr.serialized)
@@ -125,27 +142,3 @@ class BooksSimilarityCache:
             self.books_term_cache, book_id, expr, similarity_vectors
         )
         return self.book_similarity_vectors[key]
-
-    def warm_cache(self, book_ids: Iterable[BookIndex], exprs: Sequence[SearchExpr]):
-        """One matmul per book across every expression, instead of one each."""
-
-        for book_id in book_ids:
-            book_term_vectors = self.books_term_cache[book_id]
-            book_exprs = [
-                expr
-                for expr in exprs
-                if (book_id, expr.serialized) not in self.book_similarity_vectors
-                and not book_term_vectors.missing_terms(expr.terms)
-            ]
-            if not book_exprs:
-                continue
-
-            book_expr_vectors = np.stack(
-                [book_term_vectors.get_expr_vector(expr.tree) for expr in book_exprs],
-                axis=-1,
-            )
-            # (n_terms, dim) @ (dim, n_exprs)
-            book_expr_similarities = book_term_vectors.term_vectors @ book_expr_vectors
-
-            for index, expr in enumerate(book_exprs):
-                self._store(book_id, expr, book_expr_similarities[:, index])

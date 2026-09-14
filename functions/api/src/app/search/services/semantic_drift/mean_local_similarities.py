@@ -7,52 +7,15 @@ import numpy as np
 from app.search.constants import (
     BOOKS_WITH_TERM,
     BOOKS_WITH_TERM_IN_NEAREST_TERMS,
-    MAX_RANK_FOR_TERM_SELECTION,
     MIN_BOOKS_WITH_TERM_IN_NEAREST_TERMS,
-    NUM_LOCAL_NEAREST_TERMS,
     NUM_COMPARATIVE_TERMS,
 )
-from app.search.errors import NoLocalNearestTermsError
-from app.search.schemas.semantic_drift import (
-    SecondOrderSimilarity,
-    MeanSecondOrderSimilarity,
-    RelativeTermSimilarity,
-)
+from app.search.schemas.semantic_drift import BookSimilarity, RelativeTermSimilarity
 from app.search.services.semantic_drift.book_similarity_vectors import (
     BooksSimilarityCache,
 )
 from app.search.services.semantic_drift.utils import SearchExpr
 from shared.commons import BookIndex
-
-
-def get_n_highest_similarities(similarities: np.ndarray, n: int) -> np.ndarray:
-
-    if not len(similarities):
-        return similarities
-
-    n = min(n, len(similarities))
-
-    return np.partition(similarities, -n)[-n:]
-
-
-def center_locally(similarities: np.ndarray, n: int) -> np.ndarray:
-
-    highest_similarities = get_n_highest_similarities(similarities, n)
-
-    if not len(highest_similarities):
-        return similarities
-
-    return similarities - highest_similarities.mean()
-
-
-def get_is_local(similarities: np.ndarray, n: int) -> np.ndarray:
-
-    highest_similarities = get_n_highest_similarities(similarities, n)
-
-    if not len(highest_similarities):
-        return np.zeros(0, dtype=bool)
-
-    return similarities >= highest_similarities.min()
 
 
 def get_unique_terms(all_terms):
@@ -76,22 +39,17 @@ def get_comparative_terms(
     selected_book_id: BookIndex | None = None,
 ) -> list[RelativeTermSimilarity]:
 
-    book_similarities_list = []
     book_terms_list = []
     book_similarities_centered_list = []
     book_terms_is_local_list = []
 
     for book_id in book_ids:
         book_similarity_vectors = books_similarity_cache.load_book(book_id, query)
-        book_similarities = book_similarity_vectors.similarity_vectors
-        book_similarities_list.append(book_similarities)
         book_terms_list.append(book_similarity_vectors.terms)
         book_similarities_centered_list.append(
-            center_locally(book_similarities, NUM_LOCAL_NEAREST_TERMS)
+            book_similarity_vectors.centered_similarity_vectors
         )
-        book_terms_is_local_list.append(
-            get_is_local(book_similarities, MAX_RANK_FOR_TERM_SELECTION)
-        )
+        book_terms_is_local_list.append(book_similarity_vectors.is_local)
 
     terms, term_iloc = get_unique_terms(np.concat(book_terms_list))
     n_books_in = np.bincount(term_iloc)  # Terms are unique within a book
@@ -122,9 +80,9 @@ def get_comparative_terms(
         is_relevant_to_corpus & (n_books_local >= min_books_in_nearest_terms)
     )
 
-    mean_ranked = local_iloc[
-        np.argsort(-similarity_mean[local_iloc], kind="stable")
-    ][:NUM_COMPARATIVE_TERMS]
+    mean_ranked = local_iloc[np.argsort(-similarity_mean[local_iloc], kind="stable")][
+        :NUM_COMPARATIVE_TERMS
+    ]
     variance_ranked = local_iloc[
         np.argsort(-similarity_variance[local_iloc], kind="stable")
     ][:NUM_COMPARATIVE_TERMS]
@@ -141,36 +99,13 @@ def get_comparative_terms(
     ]
 
 
-def get_mean_local_similarity_per_book(
-    book_id: BookIndex,
-    local_similarities_per_peer: list[np.ndarray],
-    occurrences: int,
-    *,
-    against_corpus: bool,
-):
-
-    mean_local_similarity = float(np.mean(local_similarities_per_peer))
-
-    if against_corpus:
-        return MeanSecondOrderSimilarity(
-            book_id=book_id.source_id,
-            mean_similarity=mean_local_similarity,
-            occurrences=occurrences,
-            n_books=len(local_similarities_per_peer),
-        )
-    return SecondOrderSimilarity(
-        book_id=book_id.source_id,
-        similarity=mean_local_similarity,
-        occurrences=occurrences,
-    )
-
-
-def get_mean_local_similarities(
+def get_book_similarities(
     books_similarity_cache: BooksSimilarityCache,
     expr: SearchExpr,
+    terms: list[str],
     book_ids: list[BookIndex],
     selected_book_id: BookIndex | None = None,
-) -> list[SecondOrderSimilarity] | list[MeanSecondOrderSimilarity]:
+) -> tuple[list[BookSimilarity], list[list[BookSimilarity]]]:
 
     books_similarity_vectors = books_similarity_cache.load_books(book_ids, expr)
 
@@ -179,34 +114,49 @@ def get_mean_local_similarities(
     else:
         peers = [books_similarity_cache.load_book(selected_book_id, expr)]
 
-    books_data = []
-    for book_similarity_vectors in books_similarity_vectors:
-        local_similarities_per_peer = []
-        for peer in peers:
-            if peer.book_id == book_similarity_vectors.book_id:
-                continue
-            try:
-                local_similarity = book_similarity_vectors.get_local_similarity(peer)
-            except NoLocalNearestTermsError:
-                continue
-            local_similarities_per_peer.append(local_similarity)
-
-        if not local_similarities_per_peer:
-            continue
-
-        # For a compound expression, the vocabulary volume behind the line.
-        book_terms = books_similarity_cache.books_term_cache[
-            book_similarity_vectors.book_id
-        ]
-        occurrences = sum(book_terms.get_term_count(term) for term in expr.terms)
-
-        books_data.append(
-            get_mean_local_similarity_per_book(
-                book_similarity_vectors.book_id,
-                local_similarities_per_peer,
-                occurrences,
-                against_corpus=selected_book_id is None,
-            )
+    valid_books_similarity_vectors = [
+        book
+        for book in books_similarity_vectors
+        if any(
+            peer.book_id != book.book_id and book.is_comparable(peer) for peer in peers
         )
+    ]
 
-    return books_data
+    local_mean_similarities = [
+        book.local_mean_similarity for book in valid_books_similarity_vectors
+    ]
+    cross_book_mean_similarity = (
+        float(np.mean(local_mean_similarities)) if local_mean_similarities else 0.0
+    )
+
+    books_term_cache = books_similarity_cache.books_term_cache
+    expr_book_similarities = [
+        BookSimilarity(
+            book_id=book.book_id.source_id,
+            similarity=cross_book_mean_similarity,
+            # For a compound expression, the vocabulary volume behind the line.
+            occurrences=sum(
+                books_term_cache[book.book_id].get_term_count(term)
+                for term in expr.terms
+            ),
+        )
+        for book in valid_books_similarity_vectors
+    ]
+
+    term_book_similarities = []
+    for term in terms:
+        term_similarities = []
+        for book in valid_books_similarity_vectors:
+            similarity = book.get_centered_similarity(term)
+            if similarity is None:
+                continue
+            term_similarities.append(
+                BookSimilarity(
+                    book_id=book.book_id.source_id,
+                    similarity=similarity + cross_book_mean_similarity,
+                    occurrences=books_term_cache[book.book_id].get_term_count(term),
+                )
+            )
+        term_book_similarities.append(term_similarities)
+
+    return expr_book_similarities, term_book_similarities

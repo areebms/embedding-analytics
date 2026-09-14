@@ -91,30 +91,13 @@ class BookSummary(BaseModel):
     missing_terms: list[str] = Field(default_factory=list)
 
 
-class SecondOrderSimilarity(BaseModel):
-    """One book read against the nominated source book."""
+class BookSimilarity(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
     book_id: int
     similarity: float
     occurrences: int
-
-
-class MeanSecondOrderSimilarity(BaseModel):
-    """One book read against every other requested book.
-
-    `mean_similarity` is the mean of the pairwise local similarities
-    against each peer in turn -- not a comparison against one aggregate corpus
-    profile, which would be a different quantity.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    book_id: int
-    mean_similarity: float
-    occurrences: int
-    n_books: int
 
 
 class RelativeTermSimilarity(BaseModel):
@@ -130,7 +113,7 @@ class RelativeTermSimilarity(BaseModel):
 
 class TermSimilarityData(RelativeTermSimilarity):
 
-    book_similarities: list[SecondOrderSimilarity] | list[MeanSecondOrderSimilarity]
+    book_similarities: list[BookSimilarity]
 
 
 class ExprSimilarityData(BaseModel):
@@ -139,7 +122,7 @@ class ExprSimilarityData(BaseModel):
 
     expr: str
     terms: list[str]
-    book_similarities: list[SecondOrderSimilarity] | list[MeanSecondOrderSimilarity]
+    book_similarities: list[BookSimilarity]
 
 
 class SemanticDriftResponse(BaseModel):

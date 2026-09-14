@@ -9,7 +9,6 @@ import pytest
 from conftest import VOCAB, book_rows, make_term_entry, set_multi_book_table
 from app.core.logging import request_log
 from app.search.dependencies import get_books_term_cache
-from app.search.errors import MissingTermsError
 from app.search.schemas.semantic_drift import OpNode, TermNode
 from app.search.services.semantic_drift import (
     BooksSimilarityCache,
@@ -241,49 +240,6 @@ def test_shared_term_indexes_of_an_empty_book_are_empty():
     assert len(book_indexes) == len(peer_indexes) == 0
 
 
-def test_batched_similarity_vectors_match_the_one_expression_at_a_time_result():
-    books = _two_books(VOCAB, VOCAB)
-    exprs = [
-        SearchExpr.from_query(TermNode(term="labour")),
-        SearchExpr.from_query(TermNode(term="value")),
-        SearchExpr.from_query(
-            OpNode(op="-", args=[TermNode(term="wage"), TermNode(term="rent")])
-        ),
-    ]
-
-    batched = BooksSimilarityCache(books)
-    batched.warm_cache([BookIndex(1), BookIndex(2)], exprs)
-
-    unbatched = BooksSimilarityCache(books)
-
-    assert len(batched.book_similarity_vectors) == 2 * len(exprs)
-    for book_id in (BookIndex(1), BookIndex(2)):
-        for expr in exprs:
-            np.testing.assert_allclose(
-                batched[book_id, expr.serialized].similarity_vectors,
-                unbatched.load_book(book_id, expr).similarity_vectors,
-                atol=1e-6,
-            )
-
-
-def test_batched_similarity_vectors_skip_expressions_a_book_lacks():
-    books = _two_books(VOCAB, ["labour", "value"])
-    exprs = [
-        SearchExpr.from_query(TermNode(term="labour")),
-        SearchExpr.from_query(TermNode(term="rent")),
-    ]
-
-    batched = BooksSimilarityCache(books)
-    batched.warm_cache([BookIndex(1), BookIndex(2)], exprs)
-
-    assert (BookIndex(2), "labour") in batched.book_similarity_vectors
-    assert (BookIndex(2), "rent") not in batched.book_similarity_vectors
-    assert (BookIndex(1), "rent") in batched.book_similarity_vectors
-
-    with pytest.raises(MissingTermsError):
-        batched.load_book(BookIndex(2), exprs[1])
-
-
 def test_similarity_vectors_are_computed_once_per_book_and_expression():
     books = _two_books(VOCAB, VOCAB)
     expr = SearchExpr.from_query(TermNode(term="labour"))
@@ -292,7 +248,3 @@ def test_similarity_vectors_are_computed_once_per_book_and_expression():
     first = cache.load_book(BookIndex(1), expr)
 
     assert cache.load_book(BookIndex(1), expr) is first
-    # ...and warming afterwards must not quietly replace it with a batched copy.
-    cache.warm_cache([BookIndex(1), BookIndex(2)], [expr])
-    assert cache[BookIndex(1), expr.serialized] is first
-    assert (BookIndex(2), expr.serialized) in cache.book_similarity_vectors

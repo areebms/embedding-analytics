@@ -6,7 +6,6 @@ from app.search.services.semantic_drift.book_term_vectors import (
     BookTermVectors,
 )
 from app.search.services.semantic_drift.mean_local_similarities import (
-    get_book_similarities,
-    get_comparative_terms,
+    get_related_terms,
 )
 from app.search.services.semantic_drift.utils import SearchExpr

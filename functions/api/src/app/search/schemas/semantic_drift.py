@@ -100,19 +100,14 @@ class BookSimilarity(BaseModel):
     occurrences: int
 
 
-class RelativeTermSimilarity(BaseModel):
+class TermSimilarityData(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
     term: str
     similarity_mean: float
-    similarity_variance: float
+    similarity_std: float
     n_books_in: int
-    n_books_local_in: int
-
-
-class TermSimilarityData(RelativeTermSimilarity):
-
     book_similarities: list[BookSimilarity]
 
 
@@ -128,5 +123,6 @@ class ExprSimilarityData(BaseModel):
 class SemanticDriftResponse(BaseModel):
 
     expr: ExprSimilarityData
-    comparative_terms: list[TermSimilarityData]
     book_stats: list[BookSummary]
+    top_mean: list[TermSimilarityData]
+    top_std: list[TermSimilarityData]

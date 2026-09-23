@@ -4,13 +4,12 @@ import math
 
 import numpy as np
 
-from app.search.constants import (
-    BOOKS_WITH_TERM,
-    BOOKS_WITH_TERM_IN_NEAREST_TERMS,
-    MIN_BOOKS_WITH_TERM_IN_NEAREST_TERMS,
-    NUM_COMPARATIVE_TERMS,
+from app.search.constants import BOOKS_WITH_TERM_ABOVE_EXPR, NUM_COMPARATIVE_TERMS
+from app.search.schemas.semantic_drift import (
+    BookSimilarity,
+    ExprSimilarityData,
+    TermSimilarityData,
 )
-from app.search.schemas.semantic_drift import BookSimilarity, RelativeTermSimilarity
 from app.search.services.semantic_drift.book_similarity_vectors import (
     BooksSimilarityCache,
 )
@@ -31,88 +30,22 @@ def get_unique_terms(all_terms):
     return terms, term_iloc
 
 
-def get_comparative_terms(
+def get_related_terms(
     books_similarity_cache: BooksSimilarityCache,
     book_ids: list[BookIndex],
     query: SearchExpr,
     *,
     selected_book_id: BookIndex | None = None,
-) -> list[RelativeTermSimilarity]:
+) -> tuple[
+    ExprSimilarityData, list[TermSimilarityData], list[TermSimilarityData]
+]:
 
-    book_terms_list = []
-    book_similarities_centered_list = []
-    book_terms_is_local_list = []
-
-    for book_id in book_ids:
-        book_similarity_vectors = books_similarity_cache.load_book(book_id, query)
-        book_terms_list.append(book_similarity_vectors.terms)
-        book_similarities_centered_list.append(
-            book_similarity_vectors.centered_similarity_vectors
-        )
-        book_terms_is_local_list.append(book_similarity_vectors.is_local)
-
-    terms, term_iloc = get_unique_terms(np.concat(book_terms_list))
-    n_books_in = np.bincount(term_iloc)  # Terms are unique within a book
-
-    is_relevant_to_corpus = (
-        n_books_in >= math.ceil(BOOKS_WITH_TERM * len(book_ids))
-    ) & ~np.isin(terms, query.terms)
-    if selected_book_id is not None:
-        selected_terms = books_similarity_cache.books_term_cache[selected_book_id].terms
-        position = np.searchsorted(selected_terms, terms)
-        is_relevant_to_corpus &= np.append(selected_terms, "")[position] == terms
-
-    is_local = np.concat(book_terms_is_local_list)
-    n_books_local = np.bincount(term_iloc, weights=is_local).astype(np.intp)
-
-    all_similarities = np.concat(book_similarities_centered_list)
-    similarity_mean = np.bincount(term_iloc, weights=all_similarities) / n_books_in
-
-    similarity_variance = np.bincount(
-        term_iloc, weights=(all_similarities - similarity_mean[term_iloc]) ** 2
-    ) / np.maximum(n_books_in - 1, 1)
-
-    min_books_in_nearest_terms = np.maximum(
-        MIN_BOOKS_WITH_TERM_IN_NEAREST_TERMS,
-        np.ceil(BOOKS_WITH_TERM_IN_NEAREST_TERMS * n_books_in),
-    )
-    local_iloc = np.flatnonzero(
-        is_relevant_to_corpus & (n_books_local >= min_books_in_nearest_terms)
-    )
-
-    mean_ranked = local_iloc[np.argsort(-similarity_mean[local_iloc], kind="stable")][
-        :NUM_COMPARATIVE_TERMS
-    ]
-    variance_ranked = local_iloc[
-        np.argsort(-similarity_variance[local_iloc], kind="stable")
-    ][:NUM_COMPARATIVE_TERMS]
-
-    return [
-        RelativeTermSimilarity(
-            term=str(terms[iloc]),
-            similarity_mean=float(similarity_mean[iloc]),
-            similarity_variance=float(similarity_variance[iloc]),
-            n_books_in=int(n_books_in[iloc]),
-            n_books_local_in=int(n_books_local[iloc]),
-        )
-        for iloc in np.union1d(mean_ranked, variance_ranked)
-    ]
-
-
-def get_book_similarities(
-    books_similarity_cache: BooksSimilarityCache,
-    expr: SearchExpr,
-    terms: list[str],
-    book_ids: list[BookIndex],
-    selected_book_id: BookIndex | None = None,
-) -> tuple[list[BookSimilarity], list[list[BookSimilarity]]]:
-
-    books_similarity_vectors = books_similarity_cache.load_books(book_ids, expr)
+    books_similarity_vectors = books_similarity_cache.load_books(book_ids, query)
 
     if selected_book_id is None:
         peers = books_similarity_vectors
     else:
-        peers = [books_similarity_cache.load_book(selected_book_id, expr)]
+        peers = [books_similarity_cache.load_book(selected_book_id, query)]
 
     valid_books_similarity_vectors = [
         book
@@ -122,33 +55,85 @@ def get_book_similarities(
         )
     ]
 
-    local_mean_similarities = [
-        book.local_mean_similarity for book in valid_books_similarity_vectors
-    ]
-    cross_book_mean_similarity = (
-        float(np.mean(local_mean_similarities)) if local_mean_similarities else 0.0
+    if not valid_books_similarity_vectors:
+        return (
+            ExprSimilarityData(
+                expr=query.serialized, terms=query.terms, book_similarities=[]
+            ),
+            [],
+            [],
+        )
+
+    cross_book_mean_similarity = float(
+        np.mean([book.local_mean_similarity for book in valid_books_similarity_vectors])
     )
 
-    books_term_cache = books_similarity_cache.books_term_cache
-    expr_book_similarities = [
-        BookSimilarity(
-            book_id=book.book_id.source_id,
-            similarity=cross_book_mean_similarity,
-            # For a compound expression, the vocabulary volume behind the line.
-            occurrences=sum(
-                books_term_cache[book.book_id].get_term_count(term)
-                for term in expr.terms
-            ),
+    all_similarities = (
+        np.concat(
+            [book.centered_similarity_vectors for book in books_similarity_vectors]
         )
-        for book in valid_books_similarity_vectors
+        + cross_book_mean_similarity
+    )
+
+    terms, term_iloc = get_unique_terms(
+        np.concat([book.terms for book in books_similarity_vectors])
+    )
+
+    n_books_above_expr = np.bincount(
+        term_iloc, weights=all_similarities > cross_book_mean_similarity
+    ).astype(np.intp)
+    is_relevant_to_corpus = n_books_above_expr >= math.ceil(
+        BOOKS_WITH_TERM_ABOVE_EXPR * len(books_similarity_vectors)
+    )
+    if selected_book_id is not None:
+        selected_terms = books_similarity_cache.books_term_cache[selected_book_id].terms
+        position = np.searchsorted(selected_terms, terms)
+        is_relevant_to_corpus &= np.append(selected_terms, "")[position] == terms
+
+    n_books_in = np.bincount(term_iloc)  # Terms are unique within a book
+    similarity_mean = np.bincount(term_iloc, weights=all_similarities) / n_books_in
+
+    similarity_std = np.sqrt(
+        np.bincount(
+            term_iloc, weights=(all_similarities - similarity_mean[term_iloc]) ** 2
+        )
+        / np.maximum(n_books_in - 1, 1)
+    )
+
+    local_iloc = np.flatnonzero(is_relevant_to_corpus)
+    mean_ranked = local_iloc[np.argsort(-similarity_mean[local_iloc], kind="stable")][
+        :NUM_COMPARATIVE_TERMS
+    ]
+    std_iloc = np.setdiff1d(local_iloc, mean_ranked)
+    std_ranked = std_iloc[np.argsort(-similarity_std[std_iloc], kind="stable")][
+        :NUM_COMPARATIVE_TERMS
     ]
 
-    term_book_similarities = []
-    for term in terms:
+    books_term_cache = books_similarity_cache.books_term_cache
+    expr_data = ExprSimilarityData(
+        expr=query.serialized,
+        terms=query.terms,
+        book_similarities=[
+            BookSimilarity(
+                book_id=book.book_id.source_id,
+                similarity=cross_book_mean_similarity,
+                # For a compound expression, the vocabulary volume behind the line.
+                occurrences=sum(
+                    books_term_cache[book.book_id].get_term_count(term)
+                    for term in query.terms
+                ),
+            )
+            for book in valid_books_similarity_vectors
+        ],
+    )
+
+    def get_term_data(iloc):
+        term = str(terms[iloc])
         term_similarities = []
         for book in valid_books_similarity_vectors:
-            similarity = book.get_centered_similarity(term)
-            if similarity is None:
+            try:
+                similarity = book.get_centered_similarity(term)
+            except KeyError:
                 continue
             term_similarities.append(
                 BookSimilarity(
@@ -157,6 +142,15 @@ def get_book_similarities(
                     occurrences=books_term_cache[book.book_id].get_term_count(term),
                 )
             )
-        term_book_similarities.append(term_similarities)
+        return TermSimilarityData(
+            term=term,
+            similarity_mean=float(similarity_mean[iloc]),
+            similarity_std=float(similarity_std[iloc]),
+            n_books_in=int(n_books_in[iloc]),
+            book_similarities=term_similarities,
+        )
 
-    return expr_book_similarities, term_book_similarities
+    top_mean = [get_term_data(iloc) for iloc in mean_ranked]
+    top_std = [get_term_data(iloc) for iloc in std_ranked]
+
+    return expr_data, top_mean, top_std

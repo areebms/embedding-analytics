@@ -8,17 +8,14 @@ from fastapi.testclient import TestClient
 from app.core.dependencies import get_books_metadata_cache
 from app.core.services import BooksMetadataCache
 from shared.tables.book_terms import get_book_term_table
-from app.search.constants import (
-    MAX_RANK_FOR_TERM_SELECTION,
-    NUM_LOCAL_NEAREST_TERMS,
-)
+from app.search.constants import NUM_LOCAL_NEAREST_TERMS
 from app.search.dependencies import get_books_term_cache
 from app.search.services.semantic_drift import BooksTermCache
 from shared.tables.pipeline_entries import EntryStatus
 
 os.environ.pop("REDIS_URL", None)
 
-LOCAL_VOCAB_FLOOR = 2 * max(NUM_LOCAL_NEAREST_TERMS, MAX_RANK_FOR_TERM_SELECTION)
+LOCAL_VOCAB_FLOOR = 2 * NUM_LOCAL_NEAREST_TERMS
 
 NAMED_VOCAB = ["labour", "value", "wage", "rent", "stock", "price", "profit", "capital"]
 FILLER_VOCAB = [f"filler{n:03d}" for n in range(LOCAL_VOCAB_FLOOR)]

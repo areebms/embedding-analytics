@@ -4,7 +4,7 @@ from collections.abc import Iterable
 
 import numpy as np
 
-from app.search.constants import MAX_RANK_FOR_TERM_SELECTION, NUM_LOCAL_NEAREST_TERMS
+from app.search.constants import NUM_LOCAL_NEAREST_TERMS
 from app.search.errors import MissingTermsError
 from app.search.services.semantic_drift.book_term_vectors import BooksTermCache
 from app.search.services.semantic_drift.utils import SearchExpr
@@ -29,16 +29,6 @@ def get_local_mean_similarity(similarities: np.ndarray, n: int) -> float:
         return 0.0
 
     return float(highest_similarities.mean())
-
-
-def get_is_local(similarities: np.ndarray, n: int) -> np.ndarray:
-
-    highest_similarities = get_n_highest_similarities(similarities, n)
-
-    if not len(highest_similarities):
-        return np.zeros(0, dtype=bool)
-
-    return similarities >= highest_similarities.min()
 
 
 class BookSimilarityVectors:
@@ -67,9 +57,7 @@ class BookSimilarityVectors:
         self.centered_similarity_vectors = (
             self.similarity_vectors - self.local_mean_similarity
         )
-        self.is_local = get_is_local(
-            self.similarity_vectors, MAX_RANK_FOR_TERM_SELECTION
-        )
+        self.term_iloc = {str(term): i for i, term in enumerate(self.terms)}
 
     @staticmethod
     def get_similarity_vectors(query_vector: np.ndarray, term_vectors: np.ndarray):
@@ -87,11 +75,7 @@ class BookSimilarityVectors:
         return n_shared >= NUM_LOCAL_NEAREST_TERMS
 
     def get_centered_similarity(self, term: str) -> float | None:
-
-        term_iloc = np.searchsorted(self.terms, term)
-        if term_iloc == len(self.terms) or self.terms[term_iloc] != term:
-            return None
-        return float(self.centered_similarity_vectors[term_iloc])
+        return float(self.centered_similarity_vectors[self.term_iloc[term]])
 
 
 class BooksSimilarityCache:
@@ -129,9 +113,7 @@ class BooksSimilarityCache:
 
         return [
             self.load_book(book_id, expr)
-            for book_id in self.books_term_cache.get_books_with_expr(
-                book_ids, expr
-            )
+            for book_id in self.books_term_cache.get_books_with_expr(book_ids, expr)
         ]
 
     def save(

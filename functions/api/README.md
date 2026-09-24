@@ -1,9 +1,10 @@
 # api
 
-*Stage 5 of 5. [Pipeline overview](../../docs/internals.md) · [Project README](../../README.md)*
+*Stage 6 of 6. [Pipeline overview](../../docs/pipeline.md) · [Project README](../../README.md)*
 **Libraries:** FastAPI, Mangum, Pydantic, fastapi-cache, Redis, OpenAI
 
-Mangum runs FastAPI inside a Lambda Function URL. Redis caching is optional — the
+Mangum runs FastAPI inside Lambda, behind an API Gateway REST API at
+`api.embedding-analytics.com`. Redis caching is optional — the
 API runs without it when `REDIS_URL` is unset. Cached responses have no expiry,
 so flush Redis after reprocessing a book.
 
@@ -15,72 +16,97 @@ shared across concurrent requests the way `--reload` implies. A slowdown under
 concurrent load in local dev is an artifact of that single worker, not a signal
 about production behavior.
 
+## What it reads
+
+One DynamoDB row per (book, term), written by [publish](../publish/README.md): the
+vector, the whole-book count, and the POS tags. `BookTermVectors` loads a whole book at
+once, sorts the rows by term, and L2-normalizes the matrix — the sort is load-bearing,
+because cross-book term pairing is elementwise and unsorted rows would silently pair the
+wrong terms.
+
+The column is `vector`, one per term.
+
+The pipeline row is read the same way `publish` writes it: `book_id`, `status`, and a
+nested `metadata` map. `/books` answers from the books carrying that map, so it lists
+what has been published rather than what has been embedded, and a book with no
+`published_year` is left out of the dropdown it feeds.
+
+**What is left is the deploy — the image and the environment together.** The deployed
+function still runs the release-4.0 image and still names `PipelineStatus` and `BookTerms`
+— the pre-migration tables — so the live site serves the old code over the old corpus.
+Neither half works without the other: this code reads `vector`, the old tables carry
+`vectors`.
+
+It is CDK-owned now, and its `services.yaml` entry lists every variable it reads — CDK
+declares the whole environment map rather than merging into the deployed one.
+
 ## What the score measures
 
-Within-book GPA aligns the *seeds* of one book. It does **not** put two different
-books in a shared frame, and the API never assumes it does.
+Each book is embedded on its own, in its own frame. Nothing puts two books into a
+shared frame, and the API never assumes anything does.
 
 ### Why the comparison is rotation-invariant by construction
 
-Procrustes recovers a shared frame when two point sets genuinely share geometry —
-the case for seeds of the same book, not for two books trained on different
-texts. At 200 dimensions the per-term cross-book rotation is underdetermined, so
-a cosine between two books' vectors would not be a quantity the system could
-stand behind. The query-time path avoids cross-book vectors entirely.
+An SVD frame is arbitrary up to rotation and sign: the axes of one book's
+`VECTOR_SIZE` (100) dimensions have no counterpart in another's, and the two were
+solved over different vocabularies from different texts. A cosine taken between two
+books' vectors would therefore not be a quantity the system could stand behind —
+cross-book alignment was tried and abandoned on measurement. The query-time path
+avoids cross-book vectors entirely: every cosine is taken inside one book, and what
+crosses between books is only a per-book baseline subtracted from it.
 
-### Mean local similarity
+### Adjusted cosine
 
-Four names sit on top of one another here, and keeping them apart is what makes
-the rest of this document readable. Each layer is the one below it, reduced:
+Five names sit on top of one another here. Each layer is built from the one above
+it:
 
 | Layer | Name | Shape |
 |---|---|---|
 | The query's cosine to every term in one book | similarity vectors | `(n_terms,)` |
-| Two books compared over the query's 75-term neighbourhood | `local_similarity` | scalar, per pair |
-| Its mean across peers | `mean_local_similarity` | scalar |
-| What that scalar is taken to mean | `DefinitionalAgreement` / `…ToCorpus` | model |
+| The mean of the query's top 75 of those | baseline, `local_mean_similarity`, `r_b` | scalar, per book |
+| The mean of `r_b` across the books on the line | average baseline, `cross_book_mean_similarity`, `R` | scalar, per request |
+| A term's cosine, less its book's `r_b`, plus `R` | adjusted similarity, `similarity` | field |
+| The model carrying it | `BookSimilarity` | model |
 
-**Local** is doing work: the comparison runs over the 75 terms nearest the query
-*in the measuring book*, not over the whole shared vocabulary. **Mean** is the
-reduction, not part of the scope — it is the mean *of* the local similarity.
-And the model is an interpretation of the value rather than a rename of it:
-`mean_local_similarity` is what was measured, definitional agreement is what it
-is read as.
+```text
+similarity_b(t) = cos_b(q, t) − r_b(q) + R
+r_b(q)          = mean of the query's NUM_LOCAL_NEAREST_TERMS (75) highest cosines in book b
+R               = mean of r_b(q) over the books on the query line
+```
 
-Implemented as `BookSimilarityVectors.get_local_similarity`. Each book
-describes the query by its **second-order embedding** — the query's cosine to
-every term that book uses, computed inside that book's own frame, where
-alignment *is* valid. Comparing two books means comparing two such profiles:
+The query's own leaf terms are dropped before anything is ranked — a term is
+trivially its own nearest term.
 
-1. Take the terms both books share, dropping the expression's own leaf terms — a
-   term is trivially its own nearest term, and leaving them in would inflate
-   every pair identically.
-2. Keep the `NUM_NEAREST_TERMS_FOR_LOCAL_COSINE_SIMILARITY` (75) scoring highest against the query **in
-   the measuring book** — the query's *local neighbourhood*. Below 75 shared
-   terms the pair raises `NoLocalNearestTermsError` rather than reporting a thin
-   comparison.
-3. Read both books' similarity-to-query over those 75 anchors, center each,
-   L2-normalize each, and take the dot product.
+**The query line is `R`, flat.** Every book on it reports the same value, so it
+carries no per-book information; it is the level a term line is read against. A term
+drawn above the query line in some book is closer to the query there than that book's
+average top-75 term, and one below it is further.
 
-The centering is what makes step 3 informative. The 75 anchors are by
-construction the terms closest to the query in the measuring book, so their
-cosines are uniformly high and sit within a narrow band of one another. Two raw
-profiles would agree mostly on that shared height, and every pair of books would
-score near the maximum whatever the authors had done. Removing each profile's own
-level leaves only the deviations, so what the dot product compares is the *shape*
-of the neighbourhood: whether the two books place the same terms nearer and
-further within the query's vicinity, not whether the vicinity as a whole sits at
-the same absolute distance. Absolute distances are frame-dependent; the shape is
-not.
+**Why `r_b` is subtracted.** Each book's model runs at its own cosine level, so a raw
+cosine in one book is not on the same scale as a raw cosine in another. `r_b` measures
+that level among the query's nearest terms, where the comparative terms live, and
+subtracting it turns each value into a contrast inside one model, where the
+model's scale cancels. Before the subtraction, `r_b` tracked book vocabulary size at
++0.78 to +0.86 and the term lines moved with it; after it, the term lines' median
+correlation with book size is −0.14, a slight overcorrection (live corpus, 2026-09-13). The formula is the
+query half of CSLS (Conneau et al., ICLR 2018).
 
-| Score | Reading |
-|---|---|
-| 1.0 | The expression sits in the same relational position in both books |
-| ~0 | The two neighbourhood profiles are unrelated |
-| Negative | One book inverts the other's ordering — a real result, not an error |
+**Why `R` is added back.** Only so the axis still reads as a cosine. It is one constant
+for the whole response, so it changes no comparison within it — but it does move with
+the roster, so levels are not comparable between two responses over different books;
+gaps are. Nothing is comparable between two queries: `R` and every value under it
+measure closeness to one query.
 
-Negative scores are why the chart's y-axis is bounded to `[-1.05, 1.05]` and not
-clamped at zero.
+**What the baseline cannot do.** It cannot tell model scale from real tightness: a book
+that uses the query in a narrower sense really does place its nearest terms closer,
+`r_b` rises, and that difference is subtracted as though it were scale. Only the query
+side is corrected — a term close to everything in one book (a hub) reads as a strong
+associate there.
+
+Implemented in `BookSimilarityVectors` and `get_related_terms`. A book is on the
+lines only if it carries every leaf of the query and shares at least 75 non-leaf terms
+with another requested book — with a selection, with the selected book. A term's point
+is dropped from a book that lacks the term.
 
 ## Request-path performance
 
@@ -112,10 +138,18 @@ vector buffer during the DynamoDB scan and decodes the whole book in one
 NumPy calls instead of thousands of short ones, the threads stop thrashing and
 go back to overlapping I/O the way the paragraph above assumes.
 
-**The tradeoff.** Memory. Holding every requested book's matrices at once is why
-the API Lambda is provisioned at 1024 MB rather than the 256 MB default, and it
-is the reason corpus growth is bounded by the per-request working set rather
-than by storage.
+**Re-measured since, and the "~99%" now holds.** That finding was made when each
+term stored five seed vectors. With one vector per term, profiling 24 books against
+the real tables (2026-09-15, from a dev box) puts the load at 99.8% DynamoDB fetch,
+and a per-term decode is within noise of the bulk one under the pool (1.10s against
+1.20s). The bulk decode stays, but it no longer buys anything measurable. The pool
+does: 5.84s serial against 1.20s with 8 workers. The cache does more: a warm request
+is 8.7ms against 1.27s cold.
+
+**The tradeoff.** Memory, though not the binding limit yet: 24 books peak at 131 MB.
+The API Lambda is provisioned at 1024 MB rather than the 256 MB default for CPU,
+which Lambda allocates in proportion to memory. Corpus growth is still bounded by
+the per-request working set rather than by storage.
 
 ---
 
@@ -129,72 +163,33 @@ response.
 
 ---
 
-### Similarity scoring is batched per request, not cached across requests
+### One matmul per book, cached only for the request
 
-**The situation.** A `/semantic-drift` request scores up to eleven
-expressions — the query plus its five to ten comparative terms — against
-every requested book. Scored naively, that is one matmul per (book, expression)
-pair, and each pair's shared anchor terms are found by intersecting two term
-lists from scratch, repeated for every expression even though the same two
-books recur across all of them.
+**The situation.** A `/semantic-drift` request draws the query and its five to ten
+comparative terms in every requested book. When each line was its own second-order
+comparison, that was one expression per line — up to eleven matmuls per book, which
+`BooksSimilarityCache.warm_cache` stacked into one.
 
-**The decision.** `BooksSimilarityCache.warm_cache` stacks every expression's
-query vectors for a book into one matmul — `(n_terms, dim) @ (dim, n_exprs)` —
-instead of calling it once per expression. `get_shared_term_indexes`
-finds shared terms via a sorted-array merge join (`np.searchsorted`) rather
-than a set intersection, and caches the result per book pair, since the same
-pair is shared by every expression in the request. Measured ~4x reduction in
-per-request compute.
+**The decision.** Every line is now read off the query's own similarity vector: a
+comparative term's point in a book is one entry of the vector already computed for
+the query, less that book's `r_b`, plus `R`. Each book therefore costs one
+`(n_terms, dim) @ (dim,)` matmul whatever the number of comparative terms, and
+`BooksSimilarityCache.warm_cache` is deleted along with the measure that needed it —
+`BooksTermCache.warm_cache`, the concurrent book load above, is a different method and
+still runs on every request. The query's leaf terms
+are masked out of the vector after the matmul.
 
-Batching only works because every expression scored against a book produces
-the same shape, so an expression's own leaf terms are dropped by masking the
-similarity vector *after* the matmul rather than shrinking the term matrix
-before it — trimming the input first would give each expression a differently
-shaped matrix and break the stack.
+`get_shared_term_indexes` finds shared terms via a sorted-array merge join
+(`np.searchsorted`) rather than a set intersection, and caches the result per book
+pair on the process-wide term cache. It now serves only the 75-term comparability
+check and `n_shared_terms`.
 
 **Why the cache itself is rebuilt every request, unlike the term cache.** The
 term-vector cache ([A request costs the slowest book, not the
 sum](#a-request-costs-the-slowest-book-not-the-sum)) is process-wide because a
 book's vocabulary is the same for every request that touches it. `BooksSimilarityCache` is keyed by
-*this request's own query expressions* — there is nothing in it worth keeping
+*this request's own query* — there is nothing in it worth keeping
 once the response is sent, so it is built fresh and discarded.
-
-**The tradeoff.** Batching pays off because these particular expressions share
-one book's term matrix; a request that scored many books against a single
-expression wouldn't benefit the same way. Floats also drift by about 1e-7
-between the batched and unbatched paths, which is why the tests compare with a
-numeric tolerance instead of exact equality.
-
-## Response shape
-
-Which shape comes back follows from the request. With a `source_book_id`, the
-score is against that one book, and there is no `n_books` — it could only ever
-say `1`:
-
-```json
-{
-  "book_id": 3300,
-  "mean_local_similarity": 0.354,
-  "occurrences": 1284
-}
-```
-
-Without one, it is the mean of the pairwise local similarities against each peer
-in turn — **not** a comparison against a single aggregate corpus profile, which
-would be a different quantity — and `n_books` reports how many peers backed it:
-
-```json
-{
-  "book_id": 3300,
-  "mean_local_similarity": 0.21,
-  "occurrences": 1284,
-  "n_books": 4
-}
-```
-
-`occurrences` is how often the query's terms appear in that book, summed across
-a compound expression's leaf terms, so `labour + (productive - unproductive)`
-reports the total for all three.
 
 ## The describe pipeline
 
@@ -244,9 +239,9 @@ The evaluator normalizes after each sub-expression, not once at the end. For
 3. Normalize the contrast direction to unit length
 4. Add it to the `labour` vector
 5. Normalize the final query vector
-6. Take the query's cosine to every term each book uses — the second-order
-   embedding
-7. Compare books over their top 75 shared terms
+6. Take the query's cosine to every term each book uses
+7. Subtract each book's top-75 mean and add back the mean of those across books —
+   the [adjusted cosine](#adjusted-cosine)
 
 Per-operation normalization prevents high-frequency or high-norm terms from
 dominating combined expressions, and makes a contrast a *direction* that tilts
@@ -289,70 +284,75 @@ Returns `list[TermResponse]`:
 | `books` | int[] | The ids of the books carrying the term, joinable directly against `GET /books`' `id` |
 
 Only terms appearing in at least two books are returned, and a term tagged
-adverb-only across every occurrence (`tags == {"R"}`) is excluded.
+modifier-only across every occurrence (`tags <= {"J", "R", "W"}`) is excluded.
 
 ### `POST /semantic-drift`
 
 | Field | Type | Notes |
 |---|---|---|
 | `tree` | object | Recursive `TermNode`/`OpNode`, max depth 5 |
-| `book_ids` | int[] | 1–16 entries, unique, must not contain `source_book_id` |
+| `book_ids` | int[] | 20–50 entries, unique, must not contain `source_book_id` |
 
-With a `source_book_id` that book is **selected**: every score is read relative to
-it. Without one, each book is scored against the mean of its peers. The selected
-book must not appear in `book_ids` — its agreement with itself is a constant 1.0,
-which carries no information and would compress the real variation into half the
-range.
-
-A selection also narrows the candidate pool: a comparative term must be in the
-selected book's vocabulary as well as clearing the corpus-wide count, since every
-line is drawn against that book and a word it never uses has nothing to be drawn
-against. So the same query can return a different set of comparative terms
-selected and unselected.
+With a `source_book_id` that book is **selected**. It is on no line itself, and it
+does not enter any value: every book is adjusted by its own baseline either way. It
+decides which books are on the lines — each must share 75 non-leaf terms with the
+selected book rather than with any requested peer — and it narrows the candidate
+pool: a comparative term must be in the selected book's vocabulary as well as
+clearing the corpus-wide count. So the same query can return a different set of
+comparative terms, and a different `R`, selected and unselected.
 
 The response is grouped by term: the query's own under `expr`, one per
-comparative term under `comparative_terms`, each carrying a `books` list of
-scores. `books` at the top level is the roster — one row per requested book, in
-request order.
+comparative term under `top_mean` or `top_std`, each carrying a `book_similarities`
+list of scores. `book_stats` at the top level is the roster — one row per book on
+the query line, in request order. A requested book on no line has no row.
 
-Each comparative term's statistics are aggregates of its **position** in each
-book's own nearest-term neighbourhood, not of its raw cosine to the query —
-since a mean or spread of distances measured in frames that share no scale would
-be reading each book's scale as much as the term. Every book's similarity profile
-is centred on its own top-`NUM_NEAREST_TERMS_FOR_SIMILARITY_CENTERING` (100) before anything is
-aggregated, so a position is a signed offset from that centre, on a cosine
-scale: above zero is nearer the query than that book's neighbourhood generally
-is, and **not** confined to 0–1.
+```json
+{
+  "book_id": 3300,
+  "similarity": 0.354,
+  "occurrences": 1284
+}
+```
 
-On that footing a term carries `stability` — its average position across the
-books that carry it — and `instability`, the sample variance of those same
-positions. Three counts sit beside them: `n_books_in`, the books carrying the
-word at all, and `n_books_as_top50` / `n_books_as_top100`, the subsets that
-placed it inside their own top 50 or top 100 nearest terms respectively
-(`n_books_as_top50 <= n_books_as_top100 <= n_books_in`, always). The counts are
-the sounder pair to read absence from — a position far below a book's
-neighbourhood is read against a centre taken above it, but whether the book put
-the term there at all still holds either way.
+On the query line `similarity` is `R` and `occurrences` is how often the query's
+terms appear in that book, summed across a compound expression's leaf terms, so
+`labour + (productive - unproductive)` reports the total for all three. On a
+comparative term's line `occurrences` is that term's own count.
 
-`comparative_terms` is the union of two selections of up to five terms each: the
-highest `stability` among terms with `n_books_as_top50 >= 2`, and the highest
-`instability` among terms with `n_books_as_top100 >= 2` **and**
-`n_books_as_top50 >= 1` that also rank among the 100 highest by `stability`.
-Every field is returned for every term regardless of which selection
-put it there — nothing about a term's statistics is conditional on how it
-qualified. There was once a `sort` request field choosing one ranked list; it is
-gone, both selections always run, and the union comes back in ascending
-alphabetical order rather than ranked by either statistic — sort client-side on
-`stability` or `instability` for a ranked view.
+Each comparative term's statistics are aggregates of its **adjusted similarity**
+`similarity_b(t)`, the value its line draws, not of its raw cosine to the query —
+since a mean or spread of cosines measured in frames that share no scale would
+be reading each book's scale as much as the term. The statistics are taken over
+every requested book that carries the query, including any left off the lines for
+thin overlap.
 
-The centring window (100) is a single shared constant now, not one per
-selection, so `stability` and `instability` mean the same thing wherever a term
-appears in the response — there is no longer a caveat about comparing two
-responses that used different sorts, because there is only one response shape.
+On that footing a term carries `similarity_mean` — its mean adjusted similarity
+across the books that carry it, above `R` where it sits on average nearer the query
+than a book's baseline, and **not** confined to 0–1 — and `similarity_std`, the
+sample standard deviation of the same values. `R` is one constant per response, so
+it moves `similarity_mean` by exactly `R` and leaves `similarity_std` untouched.
+Beside them sits `n_books_in`, the books carrying the word at all, which is the
+field to read absence from.
+
+`top_mean` and `top_std` are two disjoint selections of up to `NUM_COMPARATIVE_TERMS` (6)
+terms each — the *consistent* and the *contested* terms of the product README,
+under the field names that carry them here. `top_mean` holds the highest
+`similarity_mean`; `top_std` holds the highest `similarity_std` among the
+terms left over, so a term that tops both lists is returned once, in `top_mean`,
+and the next contested term takes its slot in `top_std`. Both draw from one pool of *relevant* terms, and a term
+enters it by sitting above the query line — nearer the query than that book's
+baseline `r_b` — in at least `ceil(BOOKS_WITH_TERM_ABOVE_EXPR * n)` (0.2) books,
+where `n` is the number of requested books carrying the query. The query's own
+leaf terms never enter it, because a term is trivially nearest to itself. A
+selection adds a second condition, the selected book's vocabulary. Every field is
+returned for every term regardless of which selection put it there — nothing
+about a term's statistics is conditional on how it qualified. Both selections
+always run, and each list comes back ranked by its own statistic, highest first:
+`top_mean` by `similarity_mean`, `top_std` by `similarity_std`.
 
 One consequence is worth stating plainly: a term that holds the *same* cosine in
-every book does not report `0.0`. If the neighbourhood around it moved and it did
-not, its position moved, and the books genuinely disagree about where it sits.
+every book does not report a `similarity_std` of `0.0`. If the query's nearest terms
+moved and it did not, its adjusted similarity moved, and the books genuinely disagree about where it sits.
 Drift here is always relative to the company a term keeps.
 
 ### Reading absence
@@ -365,17 +365,19 @@ on a line only if that line measured it.
 line's `book_id` against the top-level roster's `id` — two different key names
 for the same book — never on position.
 
-A book absent from *every* term's `books` could not be compared at all; a book
-absent from *one* could not be measured for that term. The roster row says which:
+Absence is decided at two levels:
 
-- **Vocabulary gap** — the term is in that book's `missing_terms` (or, for the
-  query line, any of `expr.terms` is).
-- **Thin overlap** — `missing_terms` is empty and `n_shared_terms` is under 75,
-  so even its best comparison could not clear the anchor floor.
+- **Off every line** — a requested book with no roster row. It lacks a leaf of the
+  query, or it shares fewer than 75 non-leaf terms with every other requested book
+  (with a selection, with the selected book). Thin overlap is decided once per book,
+  for all its lines together.
+- **Off one term's line** — a roster book that lacks that term, which is then in its
+  `missing_terms`. This is the only reason a roster book is missing from a line.
 
-`n_shared_terms` is an upper bound on the anchors, not a count of them: the floor
-applies *after* the expression's leaves are dropped, so clearing 75 is no promise
-that any particular comparison did.
+`missing_terms` therefore never lists a query leaf. `n_shared_terms` is the most terms
+the book shares with any one peer carrying the query (with a selection, with the
+selected book), counted before the query's leaves are dropped — an upper bound on the
+75-term check, not the count it ran on.
 
 ### `POST /parse-describe`
 
@@ -398,17 +400,57 @@ a term gets substituted.
 | Status | `reason` | Raised when |
 |---|---|---|
 | 404 | `expression_absent` | The selected book lacks a leaf of the expression. Carries `book_id`, `terms` |
-| 404 | `query_in_too_few_books` | Fewer than `MIN_BOOKS_WITH_TERM` (4) requested books carry the query. Carries `book_id`, null when none selected |
+| 404 | `query_in_too_few_books` | Fewer than `int(BOOKS_WITH_EXPR * len(book_ids))` — a quarter of the requested books, rounded down — carry the query. Carries `book_id`, null when none selected |
 | 404 | `term_resolution` | A describe term could not be matched. Carries `message`, `term`, `candidates` |
 | 400 | — | LLM output could not be parsed |
-| 422 | — | Repeated `book_id`, selected book among its own targets, or tree deeper than 5 |
+| 422 | — | Fewer than 20 or more than 50 `book_ids`, a repeated `book_id`, selected book among its own targets, or tree deeper than 5 |
 
 The three 404s carry a `reason` discriminator so a client can branch without
 inspecting the message.
 
 The `query_in_too_few_books` 404 is a **vocabulary shortage only**. Books that all
-carry the expression but share too few local nearest terms are a 200 whose every
-term has an empty `books`— nothing was missing, there was simply nothing to
-measure across.
+carry the expression but none of which shares 75 non-leaf terms with another are a
+200 with empty `book_similarities` on every line and an empty `book_stats` — nothing
+was missing, there was simply nothing to measure across.
+
+**At the API** (implemented client-side, in the frontend), retry exactly once, after
+2s, on a network error or a 5xx — which absorbs a cold start without adding load where
+load is the problem. Every 4xx (`expression_absent`, `query_in_too_few_books`, a 422)
+is a deterministic answer about the expression and is never retried.
 
 ---
+
+## Observability
+
+One JSON line per request, emitted by `RequestLoggingMiddleware` in `api`. Nothing else
+writes application logs directly; code that wants a field on the line calls
+`add_to_log(**fields)`, which mutates a per-request dict held in a `ContextVar`. The
+mutation is load-bearing: FastAPI runs sync `def` handlers on a worker thread with a
+copied context, so a rebind (`.set()`) would not reach the middleware, while a mutation
+of the same dict does.
+
+The line always carries `method`, `path`, `status`, `dur_ms`, `endpoint` and any path
+params; handlers add fields such as `query`, `warm_ms`, `nearest_terms_ms`,
+`similarities_ms`, `scored_terms`, `vocab_terms` and `error`. An unhandled exception is
+caught, recorded as `status=500` with its type and message, re-raised, and only then
+emitted, so a 500 always leaves a line.
+
+---
+
+## Running it
+
+```bash
+docker compose up lambda-api    # --> http://localhost:8000
+```
+
+The `local` target runs `uvicorn --reload` against a bind-mounted `src/` and `shared/`, so an edit
+reloads without a rebuild. It answers against whatever `.env` points at: the API is a
+reader, so there is no fixture corpus and an empty set of tables answers every query with
+an empty vocabulary rather than an error.
+
+Its suite runs inside the image, with `REDIS_URL` unset by the suite itself so the
+cache decorator is a no-op ([infra § Deploying](../../infra/README.md#deploying)):
+
+```bash
+docker build -f functions/api/Dockerfile --target test -t api-test . && docker run --rm api-test
+```

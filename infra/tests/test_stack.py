@@ -1,7 +1,4 @@
-"""What the synthesized stack must look like.
-
-Each of these is an invariant docs/operations.md states in prose and nothing checked.
-"""
+"""What the synthesized stack must look like."""
 
 import ast
 import json
@@ -87,8 +84,7 @@ def test_machines_are_named_for_their_stage(resources):
 
 def test_machines_resolve_their_function_by_reference(resources):
     """FUNCTION_ARN is a GetAtt on the real construct, not an ARN rebuilt from region,
-    account and prefix -- the six-stack hazard docs/operations.md describes, where
-    nothing verified that the ARN resolved and delivery failed silently."""
+    account and prefix."""
     functions = of_type(resources, FUNCTION)
 
     for name, machine in by_name(resources, MACHINE, "StateMachineName").items():

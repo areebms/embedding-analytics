@@ -5,8 +5,8 @@ import pytest
 from moto import mock_aws
 
 
-# Set, not setdefault: the deploy gate runs this suite inside the image with
-# `docker run --env-file .env` (infra/deploy_lambdas.sh), so the real deployment
+# Set, not setdefault: docker-compose runs these containers with
+# `env_file: .env`, so the real deployment
 # config is on the environment. Inheriting it pointed the suite at the production
 # bucket and table names, and at us-west-2 -- where moto's create_bucket fails with
 # IllegalLocationConstraintException, because a bucket outside us-east-1 needs an

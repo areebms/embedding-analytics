@@ -1,34 +1,28 @@
 # scrape
 
-*Stage 1 of 5. [Pipeline overview](../../docs/internals.md) · [Project README](../../README.md)*
+*Stage 1 of 6. [Pipeline overview](../../docs/pipeline.md) · [Project README](../../README.md)*
 **Libraries:** BeautifulSoup, Requests
 
-Fetches a Project Gutenberg book by ID and writes it to S3 exactly as fetched, in two
-steps that advance `status`, plus a third that seeds the books to run them on:
+Fetches Project Gutenberg books and writes them to S3 exactly as fetched. It is the only
+stage that touches the network, and it derives nothing — turning the HTML into text is
+[standardize-html](../standardize-html/)'s job, so re-rendering never needs a refetch.
 
-1. `scrape_subject_book_list` — every book ID in a Gutenberg subject, seeded at
-   `LISTED`. The other two stages refuse to run on a book this has not created.
-2. `scrape_book_metadata` — the bibrec table. Non-English books are marked
-   `SCRAPED_SKIPPED_NON_ENGLISH` and go no further.
-3. `scrape_book_content` — the book HTML, stored **raw**, license boilerplate and all.
+| Stage | Function | Does |
+|---|---|---|
+| `SUBJECT` | `scrape_subject_book_list` | Seeds every book in a subject at `LISTED` |
+| `METADATA` | `scrape_book_metadata` | Fetches the bibrec; non-English books stop at `SCRAPED_SKIPPED_NON_ENGLISH` |
+| `CONTENT` | `scrape_book_content` | Fetches the book HTML, raw, license boilerplate and all |
 
-Every step is idempotent — the per-book pair on `status`, the seeding on a
-conditional create — so a re-run skips work already done.
-
-This is the only stage that fetches the corpus over the network, and it derives
-nothing. Turning that HTML into readable text is
-[standardize-html](../standardize-html/)'s job — its `SEND` and `RETRIEVE`
-stages — so changing how an artifact is rendered costs a re-run over `html/` rather
-than a refetch.
+Every stage is idempotent, so a re-run skips work already done.
 
 | S3 artifact | Contents |
 |---|---|
 | `metadata/{index}.json` | Title, author, publication metadata |
 | `html/{index}.html` | Raw HTML, exactly as fetched |
 
-## One Lambda, one stage per invocation
+## Invoking
 
-The handler runs **one** stage per call, chosen by the event:
+One stage per call:
 
 ```json
 { "index": "gutenberg-3300", "stage": "METADATA" }
@@ -36,33 +30,23 @@ The handler runs **one** stage per call, chosen by the event:
 { "subject": "12345",        "stage": "SUBJECT" }
 ```
 
-`stage` is validated first, then whatever that stage needs — `METADATA` and `CONTENT`
-take an `index`, `SUBJECT` takes a `subject`. An event missing its argument is rejected
-rather than half-run, and any stage name outside the three is rejected rather than run.
-
-The two per-book stages reply with the status the book ended at, which is what lets a
-state machine branch:
+An unknown stage, or one missing its argument, is rejected. The per-book stages reply with
+the book's resulting status:
 
 ```json
 { "stage": "METADATA", "book_id": "gutenberg-3300", "status": "SCRAPED_METADATA" }
 ```
 
-The per-book state machine therefore invokes this function twice, with a `Choice`
-between the two calls that ends the execution for a book marked
-`SCRAPED_SKIPPED_*` instead of sending it on to `tokenize`.
+The subject machine (`${ENV_PREFIX}-scrape`) runs `SUBJECT` once, then `METADATA` and
+`CONTENT` per book in a `Map` at `MaxConcurrency: 1`, with a 3s pace before every request —
+gutenberg.org is a single volunteer-run host. A failed book `Catch`es to a `Succeed`, keeps
+its status for the next run, and doesn't fail the subject; `SCRAPED_SKIPPED_*` books are
+filtered out of the `Map`'s output (by substring, since statuses carry rank prefixes). See
+[infra § Orchestration](../../infra/README.md#orchestration).
 
-The subject machine (`${ENV_PREFIX}-scrape`, deployed by the
-`${ENV_PREFIX}-scrape-pipeline` stack) invokes it once for the subject,
-then twice per book inside a `Map` running at `MaxConcurrency: 1`. The `SUBJECT` stage can
-also be driven on its own by the `aws lambda invoke` below, or by the CLI. See
-[Operations § Orchestration](../../docs/operations.md#orchestration).
+## Seeding
 
-## Seeding is a stage, not a prerequisite step
-
-Both per-book stages read the book's current `status` and refuse to guess: a
-book with no pipeline entry raises rather than creating one. Seeding is the `SUBJECT`
-stage's job — and the first thing the subject machine
-(`infra/scrape-pipeline.step-function.template.json`) runs:
+The per-book stages raise on a book with no pipeline entry, so `SUBJECT` must run first:
 
 ```bash
 aws lambda invoke --function-name $ENV_PREFIX-scrape \
@@ -70,36 +54,21 @@ aws lambda invoke --function-name $ENV_PREFIX-scrape \
 ```
 
 ```json
-{
-  "subject": "12345",
-  "found": 100,
-  "created": 87,
-  "indexes": ["gutenberg-3300", "gutenberg-846", "..."]
-}
+{ "subject": "12345", "found": 100, "created": 87, "indexes": ["gutenberg-3300", "..."] }
 ```
 
-`found` is what the walk returned, so it is capped at 100 however large the subject is.
-`indexes` is **every** book in that set, not only the newly created ones. Because the
-per-book stages are idempotent on `status`, re-running over an already-scraped
-book costs one status read — which is exactly what lets a re-run resume a subject that
-only got part of the way through.
+- `found` — books listed, capped at `MAX_BOOKS_PER_SUBJECT` (100, the most downloaded).
+- `created` — newly seeded entries.
+- `indexes` — every book in the set, not just new ones, so a re-run resumes a partial subject.
 
-The listing stage is idempotent too, at the cap. A subject that already holds
-`MAX_BOOKS_PER_SUBJECT` books is served from the pipeline table and never listed again:
-the cap is the ceiling on what it contributes, so re-walking could only re-rank the same
-books, never add one. On that path `found` is what the table holds, `created` is `0` —
-meaning the listing was never walked, not that it was walked and yielded nothing — and
-`indexes` is a superset of every earlier run's work list. That last part matters: the
-listing is ranked by downloads, so re-walking it used to drop a book that had drifted
-past rank 100, stranding it at `SCRAPED_HTML` where no later stage would pick it up.
+A subject already holding 100 books is served from the pipeline table instead of re-listed:
+`created` is `0` and `indexes` covers every earlier run. Re-walking a download-ranked
+listing could drop a book that slipped past rank 100 and strand it at `SCRAPED_HTML`.
 
-> **Subject size cap.** `get_book_ids` walks the subject sorted by download count and
-> stops at `MAX_BOOKS_PER_SUBJECT` (100), so a large subject contributes its 100 most
-> read books rather than all of them. At 1s per 25-book page that is four pages, well
-> inside the 120s default timeout; a cap raised past roughly 800 books would outlast the
-> invocation, and should be seeded with the CLI instead.
+The listing takes ~1s per 25-book page, well inside the 120s timeout; a cap raised past
+~800 books should be seeded with the CLI.
 
-`scrape.py` runs standalone for seeding and bulk backfills:
+## Running it
 
 ```bash
 python scrape.py SUBJECT --subject 12345   # seed pipeline entries from a subject
@@ -107,15 +76,26 @@ python scrape.py METADATA                  # LISTED -> SCRAPED_METADATA
 python scrape.py CONTENT                   # SCRAPED_METADATA -> SCRAPED_HTML
 ```
 
-The `METADATA` and `CONTENT` subcommands sweep every book sitting at the status that
-stage consumes, pausing between books; one book failing does not stop the rest.
+`METADATA` and `CONTENT` sweep every book at their input status; one failure doesn't stop
+the rest.
 
-The `lambda-scrape` compose service builds the deployed image, so its entrypoint is the
-Lambda runtime and a bare `python …` argument would be read as a handler name. Override
-the entrypoint to reach the CLI:
+The `lambda-scrape` compose image's entrypoint is the Lambda runtime, so override it to
+reach the CLI. `src/` and `shared/` are bind-mounted, so edits need no rebuild:
 
 ```bash
 docker compose run --rm --entrypoint python lambda-scrape scrape.py SUBJECT --subject 12345
 ```
 
-`src/` and `shared/` are bind-mounted into the image, so edits apply without a rebuild.
+The same image serves the runtime interface emulator on port 9010:
+
+```bash
+docker compose up -d lambda-scrape
+curl -X POST http://localhost:9010/2015-03-31/functions/function/invocations \
+    -d '{"stage":"SUBJECT","subject":"12345"}'
+```
+
+Tests run inside the image ([infra § Deploying](../../infra/README.md#deploying)):
+
+```bash
+docker build -f functions/scrape/Dockerfile --target test -t scrape-test . && docker run --rm scrape-test
+```

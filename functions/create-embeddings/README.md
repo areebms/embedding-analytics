@@ -1,40 +1,45 @@
 # create-embeddings
 
-*Stage 3 of 5. [Pipeline overview](../../docs/internals.md) · [Project README](../../README.md)*
+*Stage 4 of 6. [Pipeline overview](../../docs/pipeline.md) · [Project README](../../README.md)*
 **Libraries:** NumPy, SciPy (`scipy.sparse`, `svds`)
 
 Turns one tokenized book into one vector per term: count how often terms occur near each
-other, weight those counts with PPMI, and take a truncated SVD of the result. Takes a book
-at `TOKENIZED` and leaves it at `EMBEDDED`, with a single `.npz` in S3 in between.
+other, weight those counts with PPMI, and take a truncated SVD of the result. Takes books
+at `TOKENIZED` and leaves each at `EMBEDDINGS_CREATED`, with a single `.npz` in S3 in
+between.
 
 There is no training loop and no seed. The embedding is a deterministic function of the
 book's lemma CSV and `src/constants.py` — the same input gives the same vectors, on any
 machine, which is what lets a re-run be a no-op rather than a new set of numbers.
 
-## One book per invocation
+## What it skips
 
-```json
-{ "index": "gutenberg-3300" }
-```
+Payload and reply are the [standard batch contract](../../infra/README.md#how-a-stage-is-invoked);
+`${ENV_PREFIX}-create-embeddings-trigger` supplies the `book_ids` form, carrying the ids
+`tokenize` just announced.
 
-`extract_index` reads `index` off the event or out of a JSON `body`, so the same payload
-works from a state machine task and from an HTTP-shaped source. An event without one
-raises `ValueError` rather than being read as "every tokenized book".
+Books that reached `EMBEDDINGS_CREATED` are announced as `Books Embedded` before the
+reply is returned, which is what invokes `publish`. The announcement is emitted only if
+at least one book made it, and a bus that rejects it raises — a run whose work nothing
+downstream hears about is a failure, not a quiet success.
 
-The reply is `{"book_id": "gutenberg-3300"}` when a book was embedded, and the same field
-plus `"skipped": true` when it was not. Four things skip, all of them logged, none of them
-an error:
+Three things take a book out of the run, all of them logged, none of them ending it:
 
-| Skipped when | Because |
-|---|---|
-| the book has no pipeline entry | this stage never creates a row; `scrape` seeds them |
-| its status is not `TOKENIZED` | including a book already at `EMBEDDED` — that is the idempotent path, and it costs one status read |
-| `token_lemmas/{index}.csv` is missing | the row says tokenized and the artifact disagrees. Only `NoSuchKey` is read this way; any other `ClientError` is re-raised, so a permissions problem does not present as an untokenized book |
-| the vocabulary is not larger than `VECTOR_SIZE` | `svds` needs `k` below the matrix dimension, so a book too small for 100 dimensions is skipped rather than embedded in fewer |
+| Skipped when | Because | Left at |
+|---|---|---|
+| the book has no pipeline entry, or its status is not `TOKENIZED` | this stage never creates a row; `scrape` seeds them. A book already at `EMBEDDINGS_CREATED` is the idempotent path, and it costs one status read | unchanged |
+| `token_lemmas/{index}.csv` is missing | the row says tokenized and the artifact disagrees. Only `NoSuchKey` is read this way; any other `ClientError` is re-raised, so a permissions problem does not present as an untokenized book | `TOKENIZED` |
+| the vocabulary is not larger than `VECTOR_SIZE` | `svds` needs `k` below the matrix dimension, so a book too small for 100 dimensions is not embedded in fewer | `EMBEDDINGS_CREATION_FAILED` |
 
-The status write is conditional and forward-only (`build_status_guard`), so a book that is
-already `EMBEDDED` turns the write down. That returns `False`, which is logged and not
-raised — a re-run that finds its own earlier output is normal, not a failure.
+Only the last of those moves a status, and it moves it to a terminal one: a book too
+small for 100 dimensions will be too small on every re-run, so it is marked rather than
+retried forever.
+
+The status write is conditional and forward-only (`build_status_guard`), so a book that
+is already `EMBEDDINGS_CREATED` turns the write down. That returns `False`, which is
+logged as a warning and not raised — a re-run that finds its own earlier output is
+normal, not a failure. It is also what makes a forced re-embedding awkward. Forcing a
+re-embed means writing the earlier status by hand, outside `set_status`.
 
 ## From passages to vectors
 
@@ -69,17 +74,18 @@ Vectors ship unnormalized; the API L2-normalizes on load.
 
 | S3 artifact | Contents |
 |---|---|
-| `embeddings/{index}.npz` | A `KVectors` archive: `terms`, a `float32` matrix of one `VECTOR_SIZE` row per term in the same order, and an `attr_count` column of whole-book occurrences after the step 1 filter |
+| `embeddings/{index}.npz` | Three arrays: `terms`, `vectors` — a `float32` matrix of one `VECTOR_SIZE` row per term in the same order — and `attr_count`, whole-book occurrences after the step 1 filter |
 
 ## Hyperparameters
 
-All of `src/constants.py`, all read at import:
+`src/constants.py`, read at import. `MAX_BOOKS_PER_SUBJECT` shares the file and is not
+one of these — it bounds a subject re-run, not the embedding:
 
 | | | |
 |---|---:|---|
 | `WINDOW` | 10 | context terms on each side, never across a passage |
 | `MIN_COUNT` | 10 | vocabulary threshold, counted over the whole book |
-| `MIN_TOKEN_SIZE` | 4 | shorter tokens are dropped before counting |
+| `MIN_TOKEN_SIZE` | 3 | shorter tokens are dropped before counting |
 | `VECTOR_SIZE` | 100 | SVD dimensionality, and the floor a book's vocabulary must clear |
 | `GAMMA` | 0.5 | eigenvalue weighting, `w = U * S**gamma` |
 | `ALPHA` | 0.0 | PMI shift subtracted before clipping |
@@ -87,44 +93,24 @@ All of `src/constants.py`, all read at import:
 | `SOLVER` | `arpack` | `propack` is roughly twice as fast and less accurate |
 | `V0_SEED` | 0 | Lanczos start vector |
 
-Changing any of them changes every book's vectors, so a change is a re-run of the whole
-corpus through this stage and `publish`, not of one book.
-
-## What still points at the old layout
-
-This stage used to write a centroid model and a stack of replicates under
-`embeddings/{index}/`, and three call sites have not caught up with the single flat file:
-
-- `publish` loads `embeddings/{index}/centroid.npz` and every other `.npz` under that
-  prefix as per-seed models, and reads `variance`, `disparity` and `r_squared` attributes
-  off the centroid (`functions/publish/src/publish_utils.py`). None of those exist now, so
-  `publish` raises on a book this stage embedded — it needs to read
-  `embeddings/{index}.npz` and stop expecting an alignment-quality axis.
-- `PipelineEntry.s3_prefix_models` still returns `embeddings/{index}/` and has no caller.
-- [Pipeline](../../docs/internals.md) still describes the output as "centroid and
-  replicate models", and [Operations](../../docs/operations.md#lambda-resources)
-  justifies the 1536 MB as "PPMI/SVD over sentence-bootstrap replicates".
-
-Nothing invokes this stage automatically either. `infra/app.py` deploys `scrape`,
-`standardize-html` and `tokenize`; there is no per-book state machine and no rule turning
-`tokenize`'s output into an invocation here, so a book reaches this stage only by being
-named in a payload or swept up by the CLI below. `infra/services.yaml` already carries the
-profile it will deploy with — 1536 MB, 600s, `S3_BUCKET` and `PIPELINE_TABLE`.
+Changing any of the hyperparameters changes every book's vectors, so a change is a re-run
+of the whole corpus through this stage and `publish`, not of one book.
 
 ## Running it
 
 `create_embeddings.py` runs standalone and sweeps every book the status index reports at
-`TOKENIZED`, one at a time:
+`TOKENIZED`, one at a time — which needs the `status-index` GSI to exist on the table it
+is pointed at:
 
 ```bash
 docker compose run --rm lambda-create-embeddings python create_embeddings.py
 ```
 
-The `local` target clears the Lambda entrypoint, so no override is needed, and `src/` is
-bind-mounted, so edits apply without a rebuild.
+The `local` target clears the Lambda entrypoint, so no override is needed, and `src/` and
+`shared/` are bind-mounted, so edits apply without a rebuild.
 
-The suite is 43 tests at 100% statement coverage against an 85% floor, run against moto
-rather than AWS:
+Its suite runs inside the image — 43 tests at 100% statement coverage, against moto
+rather than AWS ([infra § Deploying](../../infra/README.md#deploying)):
 
 ```bash
 docker build -f functions/create-embeddings/Dockerfile --target test -t create-embeddings-test . && docker run --rm create-embeddings-test

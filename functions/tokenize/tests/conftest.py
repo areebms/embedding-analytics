@@ -3,8 +3,8 @@ import os
 import pytest
 
 
-# Set, not setdefault: the deploy gate runs this suite inside the image with
-# `docker run --env-file .env` (infra/deploy_lambdas.sh), so the real deployment config
+# Set, not setdefault: docker-compose runs these containers with
+# `env_file: .env`, so the real deployment config
 # is on the environment. Inheriting it points the suite at the production bucket and
 # table, and at a region where create_bucket needs the CreateBucketConfiguration these
 # fixtures deliberately do not pass. These are moto tests; they must not vary with

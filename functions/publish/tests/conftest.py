@@ -1,42 +1,50 @@
-import csv
-import io
 import json
 import os
 import tempfile
 
 import numpy as np
 import pytest
-from gensim.models import KeyedVectors
-from moto import mock_aws
-from unittest.mock import MagicMock
 
 
 # ── Environment ───────────────────────────────────────────────────────
 
-os.environ.setdefault("AWS_REGION", "us-east-1")
-os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
-os.environ.setdefault("S3_BUCKET", "test-bucket")
-os.environ.setdefault("PIPELINE_TABLE", "pipeline-test")
-os.environ.setdefault("BOOK_TERM_TABLE", "term-test")
-os.environ.setdefault("TERM_CORPUS_TABLE", "corpus-term-test")
+os.environ.update(
+    AWS_REGION="us-east-1",
+    AWS_DEFAULT_REGION="us-east-1",
+    AWS_ACCESS_KEY_ID="testing",
+    AWS_SECRET_ACCESS_KEY="testing",
+    AWS_SESSION_TOKEN="testing",
+    S3_BUCKET="test-bucket",
+    PIPELINE_TABLE="pipeline-test",
+    BOOK_TERM_TABLE="term-test",
+    TERM_CORPUS_TABLE="corpus-term-test",
+)
+os.environ.pop("AWS_PROFILE", None)
 
+from shared.commons import BookIndex
+from shared.s3 import upload_csv, upload_file, upload_json
 from shared.tables.book_terms import get_book_term_table
 from shared.tables.corpus_terms import get_corpus_term_table
-from shared.tables.pipeline import get_pipeline_table
-from shared.session import get_session
+from shared.tables.pipeline_entries import (
+    BookMetadata,
+    EntryStatus,
+    PipelineEntry,
+    get_pipeline_entries,
+)
+from shared.tests_utils import aws, bucket, entries  # noqa: F401
 
 
 # ── Test data constants ───────────────────────────────────────────────
 
-BOOK_SMITH = "gutenberg-3300"
-BOOK_RICARDO = "gutenberg-33310"
+BOOK_SMITH = BookIndex(3300)
+BOOK_RICARDO = BookIndex(33310)
+SUBJECT = BookIndex(42)
 VECTOR_DIM = 10
-NUM_SEEDS = 2
 
-SMITH_TERM_ATTRS = {
-    "labour": {"count": 42, "variance": 0.1, "disparity": 0.05, "r_squared": 0.95},
-    "value": {"count": 30, "variance": 0.15, "disparity": 0.08, "r_squared": 0.90},
-    "rent": {"count": 10, "variance": 0.2, "disparity": 0.1, "r_squared": 0.85},
+SMITH_TERM_COUNTS = {
+    "labour": 42,
+    "value": 30,
+    "rent": 10,
 }
 
 SMITH_TERMS = [
@@ -57,47 +65,42 @@ SMITH_METADATA = {
 
 SMITH_PUBLISHED_YEAR = 1776
 
+SMITH_STALE_METADATA = BookMetadata(
+    author="Anon", title="Untitled", published_year=SMITH_PUBLISHED_YEAR
+)
+
+SMITH_TOKEN_LEMMAS = [
+    ["labour", "value", "rent"],
+    ["labour", "value"],
+]
+
+SMITH_TOKEN_TAGS = [
+    ["NN", "NN", "NN"],
+    ["VB", "NN"],
+]
+
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
 
-def _create_keyed_vectors(terms_attrs, vector_dim, rng):
-    """Build a gensim KeyedVectors with deterministic random vectors
-    and the given term attributes (count, variance, disparity, r_squared)."""
-    kv = KeyedVectors(vector_size=vector_dim)
-    terms = list(terms_attrs.keys())
-    vectors = rng.randn(len(terms), vector_dim).astype(np.float32)
-    kv.add_vectors(terms, vectors)
-    for term, attrs in terms_attrs.items():
-        for attr_name, attr_value in attrs.items():
-            kv.set_vecattr(term, attr_name, attr_value)
-    return kv
+def _upload_embeddings(book_id, term_counts, rng):
+    terms = list(term_counts)
+    with tempfile.NamedTemporaryFile(suffix=".npz") as file:
+        np.savez(
+            file,
+            terms=np.asarray(terms, dtype=np.str_),
+            vectors=rng.randn(len(terms), VECTOR_DIM).astype(np.float32),
+            attr_count=np.asarray(
+                [term_counts[term] for term in terms], dtype=np.int64
+            ),
+        )
+        file.flush()
+        upload_file(f"embeddings/{book_id}.npz", file.name)
 
 
-def _save_keyed_vectors_to_s3(s3_resource, bucket, s3_key, kv):
-    """Save a KeyedVectors to a temp file, upload to moto S3."""
-    with tempfile.NamedTemporaryFile(suffix=".model", delete=False) as tmp:
-        kv.save(tmp.name)
-        tmp_path = tmp.name
-    try:
-        s3_resource.Object(bucket, s3_key).upload_file(tmp_path)
-    finally:
-        os.unlink(tmp_path)
-
-
-def _upload_csv_to_s3(s3_resource, bucket, s3_key, rows):
-    """Write a list of lists as CSV and upload to moto S3."""
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    writer.writerows(rows)
-    body = buf.getvalue().encode("utf-8")
-    s3_resource.Object(bucket, s3_key).put(Body=body)
-
-
-def _upload_json_to_s3(s3_resource, bucket, s3_key, data):
-    """Upload a JSON object to moto S3."""
-    body = json.dumps(data).encode("utf-8")
-    s3_resource.Object(bucket, s3_key).put(Body=body)
+def _upload_pos_data(entry, token_lemmas, token_tags):
+    upload_csv(entry.s3_token_lemmas_key, token_lemmas)
+    upload_csv(entry.s3_token_tags_key, token_tags)
 
 
 def _seed_book(term_table, corpus_term_table, book_id, terms):
@@ -115,36 +118,23 @@ def _seed_book(term_table, corpus_term_table, book_id, terms):
 # ── Table creation ────────────────────────────────────────────────────
 
 
-def _create_pipeline_table(dynamodb):
-    dynamodb.create_table(
-        TableName=os.environ["PIPELINE_TABLE"],
-        BillingMode="PAY_PER_REQUEST",
-        AttributeDefinitions=[
-            {"AttributeName": "platform_data", "AttributeType": "S"},
-        ],
-        KeySchema=[
-            {"AttributeName": "platform_data", "KeyType": "HASH"},
-        ],
-    )
-
-
 def _create_term_table(dynamodb):
     dynamodb.create_table(
         TableName=os.environ["BOOK_TERM_TABLE"],
         BillingMode="PAY_PER_REQUEST",
         AttributeDefinitions=[
             {"AttributeName": "term", "AttributeType": "S"},
-            {"AttributeName": "platform_data", "AttributeType": "S"},
+            {"AttributeName": "book_id", "AttributeType": "S"},
         ],
         KeySchema=[
             {"AttributeName": "term", "KeyType": "HASH"},
-            {"AttributeName": "platform_data", "KeyType": "RANGE"},
+            {"AttributeName": "book_id", "KeyType": "RANGE"},
         ],
         GlobalSecondaryIndexes=[
             {
-                "IndexName": "platform_data-index",
+                "IndexName": "book_id-index",
                 "KeySchema": [
-                    {"AttributeName": "platform_data", "KeyType": "HASH"},
+                    {"AttributeName": "book_id", "KeyType": "HASH"},
                     {"AttributeName": "term", "KeyType": "RANGE"},
                 ],
                 "Projection": {"ProjectionType": "ALL"},
@@ -172,26 +162,18 @@ def _create_corpus_term_table(dynamodb):
 
 
 @pytest.fixture
-def moto_dynamo():
-    """Spin up moto AWS (DynamoDB + S3) with all tables and a bucket.
-    Resets module-level singletons each run."""
+def moto_dynamo(aws):
+    import shared.tables.book_terms as book_terms_module
+    import shared.tables.corpus_terms as corpus_terms_module
 
-    with mock_aws():
-        session = get_session()
-        dynamodb = session.resource("dynamodb")
-        s3 = session.resource("s3")
+    book_terms_module._book_term_table = None
+    corpus_terms_module._corpus_term_table = None
 
-        _create_pipeline_table(dynamodb)
-        _create_term_table(dynamodb)
-        _create_corpus_term_table(dynamodb)
-        s3.create_bucket(
-            Bucket=os.environ["S3_BUCKET"],
-            CreateBucketConfiguration={
-                "LocationConstraint": os.environ["AWS_REGION"],
-            },
-        )
+    dynamodb = aws.resource("dynamodb")
+    _create_term_table(dynamodb)
+    _create_corpus_term_table(dynamodb)
 
-        yield session
+    return aws
 
 
 @pytest.fixture
@@ -205,16 +187,8 @@ def corpus_term_table(moto_dynamo):
 
 
 @pytest.fixture
-def pipeline_table(moto_dynamo):
-    return get_pipeline_table()
-
-
-@pytest.fixture
-def pinecone_table():
-    mock = MagicMock()
-    mock.delete_book = MagicMock()
-    mock.batch_upsert = MagicMock()
-    return mock
+def pipeline_entries(moto_dynamo):
+    return get_pipeline_entries()
 
 
 # ── Fixtures: seeded data ─────────────────────────────────────────────
@@ -233,59 +207,32 @@ def seeded_ricardo(term_table, corpus_term_table):
 
 
 @pytest.fixture
-def smith_s3_data(moto_dynamo):
-    """Upload all S3 artifacts needed for publish(BOOK_SMITH):
-    centroid model, seed models, POS CSVs, and metadata JSON.
-    Also populates the PipelineTable entry."""
-    s3 = moto_dynamo.resource("s3")
-    bucket = os.environ["S3_BUCKET"]
-    rng = np.random.RandomState(42)
+def book_s3_data(moto_dynamo):
 
-    # Centroid model (aligned, mean across seeds).
-    centroid_kv = _create_keyed_vectors(SMITH_TERM_ATTRS, VECTOR_DIM, rng)
-    _save_keyed_vectors_to_s3(
-        s3, bucket, f"kvectors/{BOOK_SMITH}/aligned/centroid.model", centroid_kv
-    )
+    def _book_s3_data(book_id=BOOK_SMITH, term_counts=SMITH_TERM_COUNTS):
+        _upload_embeddings(book_id, term_counts, np.random.RandomState(42))
 
-    # Per-seed models (each seed has the same terms, different vectors).
-    for seed_idx in range(NUM_SEEDS):
-        seed_kv = _create_keyed_vectors(SMITH_TERM_ATTRS, VECTOR_DIM, rng)
-        _save_keyed_vectors_to_s3(
-            s3,
-            bucket,
-            f"kvectors/{BOOK_SMITH}/aligned/{seed_idx}-seed.model",
-            seed_kv,
+        # POS data: token lemmas and tags as CSVs.
+        # Sentences are rows. Each term appears with a noun tag (NN),
+        # "labour" also appears as a verb (VB) to match SMITH_TERMS tags.
+        entry = PipelineEntry(
+            book_id=book_id,
+            subject_ids={SUBJECT},
+            status=EntryStatus.EMBEDDINGS_CREATED,
+            metadata=SMITH_STALE_METADATA,
         )
+        _upload_pos_data(entry, SMITH_TOKEN_LEMMAS, SMITH_TOKEN_TAGS)
 
-    # POS data: token lemmas and tags as CSVs.
-    # Sentences are rows. Each term appears with a noun tag (NN),
-    # "labour" also appears as a verb (VB) to match SMITH_TERMS tags.
-    token_lemmas = [
-        ["labour", "value", "rent"],
-        ["labour", "value"],
-    ]
-    token_tags = [
-        ["NN", "NN", "NN"],
-        ["VB", "NN"],
-    ]
-    lemmas_key = f"tokens/{BOOK_SMITH}/lemmas.csv"
-    tags_key = f"tokens/{BOOK_SMITH}/tags.csv"
-    _upload_csv_to_s3(s3, bucket, lemmas_key, token_lemmas)
-    _upload_csv_to_s3(s3, bucket, tags_key, token_tags)
+        # Metadata JSON.
+        upload_json(entry.s3_metadata_key, json.dumps(SMITH_METADATA))
 
-    # Metadata JSON.
-    metadata_key = f"metadata/{BOOK_SMITH}/metadata.json"
-    _upload_json_to_s3(s3, bucket, metadata_key, SMITH_METADATA)
+        get_pipeline_entries().put_entry(entry)
 
-    # PipelineTable entry with S3 keys.
+        return entry
 
-    pt = get_pipeline_table()
-    pt.table.put_item(
-        Item={
-            "platform_data": BOOK_SMITH,
-            "s3_metadata_key": metadata_key,
-            "s3_token_lemmas_key": lemmas_key,
-            "s3_token_tags_key": tags_key,
-            "published_year": SMITH_PUBLISHED_YEAR,
-        }
-    )
+    return _book_s3_data
+
+
+@pytest.fixture
+def smith_s3_data(book_s3_data):
+    return book_s3_data()

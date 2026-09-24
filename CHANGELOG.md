@@ -1,5 +1,53 @@
 # Changelog
 
+## 5.0
+
+### Pipeline
+
+- **PPMI + truncated SVD replaces the Word2Vec ensemble.** `create-embeddings` weights
+  in-passage co-occurrence counts with smoothed PPMI and takes a 100-dimension SVD. No
+  seeds, no ensemble: the same book always gives the same vectors, independent of
+  passage order.
+- **`standardize-html` classifies headings through the Anthropic Batch API** (submit and
+  collect are separate invocations). The text passed to `tokenize` leaves out paratext
+  such as indexes.
+- **Infrastructure moved to CDK.** `infra/deploy.py` replaces `deploy_lambdas.sh` and
+  refuses to deploy a service without a passing Docker `test` stage. Every service,
+  `api` included, is CloudFormation-owned.
+- **`train-kvector` and `align-kvectors` are deleted.** With one deterministic embedding
+  per book there is nothing to align, so the seed fan-out goes too.
+- **`MIN_TOKEN_SIZE` drops from 4 to 3** and the corpus was re-embedded, so words like
+  `tax`, `use`, `pay` and `law` exist now. 
+- **`tokenize` batches through `nlp.pipe`** (1.8x throughput, identical output) at
+  1769 MB, one full vCPU.
+- **`publish` reads the flat `.npz`**, writes one `vector` column per term, and removes
+  terms that disappear on a re-embed.
+- **Pinecone is retired.**
+
+### API
+
+- **Confidence intervals are removed** from the API and the frontend; every score is a
+  single value. See [docs/method-notes.md](docs/method-notes.md#no-confidence-intervals).
+- **Scores are comparable across books.** Each book's scores are shifted so that the
+  query sits at the same level in every book. Previously, bigger books scored higher
+  across the board.
+- **Comparative terms are simpler to select.** A term qualifies if it scores above the
+  query in at least a fifth of the books that contain the query. The response returns
+  two separate lists of up to 6 terms each: the terms closest to the query on average
+  (`top_mean`) and the terms whose closeness varies most between books (`top_std`).
+  Breaking.
+- **Response fields are renamed** to say what they measure; for example, `stability`
+  and `instability` become `similarity_mean` and `similarity_std`. Some count fields are
+  gone. Breaking.
+- **A request takes 20 to 50 books** (up to 16 before). It fails if fewer than a
+  quarter of the requested books contain the query (a fixed 4 before).
+- **Adjectives are excluded** along with adverbs.
+- **The API reads the same tables the pipeline writes**, instead of its own copy.
+- **The docs call the two term lists *consistent* and *contested*** (they were
+  *persistent* and *transient*). The API field names are unchanged.
+
+---
+
 ## 4.0
 
 Two items on `main`'s old roadmap shipped this release — and one of them got walked back after being measured.

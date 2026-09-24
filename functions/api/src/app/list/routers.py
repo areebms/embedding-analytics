@@ -2,7 +2,7 @@ from fastapi import APIRouter
 
 from app.core.dependencies import BooksMetadataCacheDep, cache
 from app.list.schemas import BookResponse, TermResponse
-from shared.tables.book_terms import ADVERB_TAGS, get_book_term_table
+from shared.tables.book_terms import EXCLUDED_POS_TAGS, get_book_term_table
 
 router = APIRouter()
 
@@ -25,7 +25,8 @@ def terms(books_metadata_cache: BooksMetadataCacheDep):
     term_table = get_book_term_table()
     for book_index in books_metadata_cache.book_ids:
         for item in term_table.get_entries(book_index, fields=["term", "tags"]):
-            if item.get("tags") == ADVERB_TAGS:
+            tags = item.get("tags")
+            if tags and tags <= EXCLUDED_POS_TAGS:
                 continue
 
             if item["term"] not in term_books:

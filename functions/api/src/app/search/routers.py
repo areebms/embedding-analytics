@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from app.core.dependencies import BooksMetadataCacheDep
 from app.core.logging import add_to_log
 from app.core.routing import post_route
-from app.search.constants import MIN_BOOKS_WITH_TERM
+from app.search.constants import BOOKS_WITH_EXPR
 from app.search.dependencies import BooksSimilarityCacheDep, BooksTermCacheDep
 from app.search.errors import ExpressionAbsentError, QueryInTooFewBooksError
 from app.search.schemas.describe import (
@@ -22,19 +22,16 @@ from app.search.schemas.errors import (
 )
 from app.search.schemas.semantic_drift import (
     BookSummary,
-    ExprData,
     SemanticDriftRequest,
     SemanticDriftRequestBody,
     SemanticDriftResponse,
-    TermData,
 )
 from app.search.services.describe import process_describe_query
 from app.search.services.semantic_drift import (
     BooksSimilarityCache,
     BooksTermCache,
     SearchExpr,
-    get_comparative_terms,
-    get_mean_local_similarities,
+    get_related_terms,
 )
 from shared.commons import BookIndex
 
@@ -76,7 +73,7 @@ def parse_describe(
     response_model=SemanticDriftResponse,
     responses={
         404: QueryInTooFewBooksResponse,
-        422: {"description": "Malformed request -- e.g. a repeated book_id."},
+        422: {"description": "Malformed request"},
     },
 )
 def semantic_drift(
@@ -150,68 +147,55 @@ def get_semantic_drift(
     books_term_cache.warm_cache(book_ids)
     warmed_at = time.perf_counter()
 
-    valid_book_ids = books_term_cache.get_books_with_search_query(book_ids, search_expr)
+    book_ids_with_expr = books_term_cache.get_books_with_expr(book_ids, search_expr)
 
-    if len(valid_book_ids) < MIN_BOOKS_WITH_TERM:
-        raise QueryInTooFewBooksError(len(valid_book_ids), selected_book_id)
+    min_books_with_expr = int(BOOKS_WITH_EXPR * len(book_ids))
+    if len(book_ids_with_expr) < min_books_with_expr:
+        raise QueryInTooFewBooksError(len(book_ids_with_expr), selected_book_id)
 
-    comparative_terms = get_comparative_terms(
+    ranked_at = time.perf_counter()
+
+    expr_data, top_mean, top_std = get_related_terms(
         books_similarity_cache,
-        valid_book_ids,
+        book_ids_with_expr,
         search_expr,
         selected_book_id=selected_book_id,
     )
 
-    ranked_at = time.perf_counter()
-
-    missing_terms_by_book = books_term_cache.get_missing_terms_by_book(
-        book_ids,
-        set(search_expr.terms) | {comparative_term.term for comparative_term in comparative_terms},
-    )
-
-    exprs = [
-        search_expr,
-        *(SearchExpr.from_query(comparative_term.term) for comparative_term in comparative_terms),
-    ]
-    books_similarity_cache.warm_cache(
-        book_ids if selected_book_id is None else [*book_ids, selected_book_id],
-        exprs,
-    )
-    expr_book_data = [
-        get_mean_local_similarities(
-            books_similarity_cache, expr, book_ids, selected_book_id
-        )
-        for expr in exprs
-    ]
+    terms = [term_data.term for term_data in (*top_mean, *top_std)]
 
     add_to_log(
         warm_ms=round((warmed_at - started) * 1000, 1),
         nearest_terms_ms=round((ranked_at - warmed_at) * 1000, 1),
         similarities_ms=round((time.perf_counter() - ranked_at) * 1000, 1),
-        scored_terms=len(exprs),
+        scored_terms=len(terms),
     )
 
-    expr_data = ExprData(
-        expr=search_expr.serialized, terms=search_expr.terms, books=expr_book_data[0]
-    )
-
-    nearest_term_data = [
-        TermData(**comparative_term.model_dump(), books=book_data)
-        for comparative_term, book_data in zip(comparative_terms, expr_book_data[1:])
+    expr_source_ids = {
+        book_data.book_id for book_data in expr_data.book_similarities
+    }
+    expr_book_ids = [
+        book_id for book_id in book_ids if book_id.source_id in expr_source_ids
     ]
+    missing_terms_by_book = books_term_cache.get_missing_terms_by_book(
+        expr_book_ids, {*search_expr.terms, *terms}
+    )
 
     book_summaries = [
         BookSummary(
             id=book_id.source_id,
             n_shared_terms=books_term_cache.get_n_shared_terms(
                 book_id,
-                valid_book_ids if selected_book_id is None else [selected_book_id],
+                book_ids_with_expr if selected_book_id is None else [selected_book_id],
             ),
             missing_terms=sorted(missing_terms_by_book[book_id]),
         )
-        for book_id in book_ids
+        for book_id in expr_book_ids
     ]
 
     return SemanticDriftResponse(
-        expr=expr_data, comparative_terms=nearest_term_data, books=book_summaries
+        expr=expr_data,
+        book_stats=book_summaries,
+        top_mean=top_mean,
+        top_std=top_std,
     )

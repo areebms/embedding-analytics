@@ -1,22 +1,26 @@
 import logging
+from typing import Any
 
-from main import tokenize
-from shared.lambda_event import extract_index
-
+from main import get_entries, resolve_subject, tokenize_entries
+from shared.lambda_event import extract_field
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
-def handler(event, context):
+def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     logger.info("Tokenize request received", extra={"event": event})
-    index = extract_index(event)
-    if not index:
-        logger.warning("Tokenize request missing index")
-        raise ValueError("index is required")
 
-    logger.info("Starting tokenize", extra={"index": index})
-    tokenize(index)
-    logger.info("Tokenize completed", extra={"index": index})
+    book_ids = extract_field(event, "book_ids")
+    subject_id = extract_field(event, "subject_id")
 
-    return {"index": index}
+    if sum([bool(book_ids), bool(subject_id)]) != 1:
+        raise ValueError("Exactly one of 'book_ids' or 'subject_id' must be provided")
+
+    if subject_id:
+        book_ids = resolve_subject(subject_id)
+
+    status = tokenize_entries(get_entries(book_ids))
+
+    logger.info("Tokenize completed", extra=status)
+    return status

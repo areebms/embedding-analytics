@@ -1,7 +1,7 @@
 from typing import NamedTuple
 
 from shared.commons import BookIndex
-from shared.tables.pipeline import PipelineTable
+from shared.tables.pipeline_entries import EntryStatus, PipelineEntries, PipelineEntry
 
 
 class BookMetadata(NamedTuple):
@@ -15,9 +15,9 @@ class BookMetadata(NamedTuple):
 class BooksMetadataCache:
     """Every aligned book's pipeline metadata, scanned once per warm container."""
 
-    FIELDS = ["platform_data", "author", "title", "published_year", "s3_prefix_models"]
+    FIELDS = ["book_id", "status", "metadata"]
 
-    def __init__(self, table: PipelineTable):
+    def __init__(self, table: PipelineEntries):
         self.table = table
         self._books_metadata: dict[BookIndex, BookMetadata] | None = None
 
@@ -41,18 +41,18 @@ class BooksMetadataCache:
         return self._books_metadata
 
     @staticmethod
-    def _parse_entry(entry: dict) -> BookMetadata | None:
+    def _parse_entry(item: dict) -> BookMetadata | None:
 
-        # A book with no models built is not one the app can say anything about.
-        if "s3_prefix_models" not in entry:
+        entry = PipelineEntry.model_validate(item)
+
+        if entry.status != EntryStatus.EMBEDDINGS_CREATED or entry.metadata is None:
             return None
 
-        published_year = entry.get("published_year")
         return BookMetadata(
-            book_id=BookIndex.parse(entry["platform_data"]),
-            author=entry.get("author", ""),
-            title=entry.get("title", ""),
-            published_year=None if published_year is None else int(published_year),
+            book_id=entry.book_id,
+            author=entry.metadata.author,
+            title=entry.metadata.title,
+            published_year=entry.metadata.published_year,
         )
 
     @property

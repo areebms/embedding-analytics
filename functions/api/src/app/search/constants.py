@@ -1,39 +1,5 @@
 import re
 
-T_CRIT_95 = [
-    0,
-    12.706,
-    4.303,
-    3.182,
-    2.776,
-    2.571,
-    2.447,
-    2.365,
-    2.306,
-    2.262,
-    2.228,
-    2.201,
-    2.179,
-    2.160,
-    2.145,
-    2.131,
-    2.120,
-    2.110,
-    2.101,
-    2.093,
-    2.086,
-    2.080,
-    2.074,
-    2.069,
-    2.064,
-    2.060,
-    2.056,
-    2.052,
-    2.048,
-    2.045,
-    2.042,
-]
-
 PARSE_SYSTEM_PROMPT = (
     "Convert natural language into a vector arithmetic expression for querying "
     "word embeddings from classical economics texts (Adam Smith, David Ricardo, "
@@ -76,12 +42,7 @@ FALLBACK_PROMPT = (
 )
 
 BARE_TERM_PATTERN = re.compile(r"[^\s()+-]+")
-MIN_BOOKS_WITH_TERM = 4
-MIN_BOOKS_WITH_TERM_IN_NEAREST_TERMS = 2
-MIN_BOOKS_WITH_UNSTABLE_TERM_AS_TOP_50 = 1
-NUM_NEAREST_TERMS_FOR_LOCAL_COSINE_SIMILARITY = 75
-NUM_NEAREST_TERMS_FOR_SIMILARITY_CENTERING = 100
-MAX_RANK_FOR_STABLE_TERM = 50
-MAX_RANK_FOR_UNSTABLE_TERM = 100
-NUM_COMPARATIVE_TERMS = 5
-NUM_RELEVANT_TERMS_FOR_INSTABILITY = 100
+BOOKS_WITH_EXPR = 0.25
+BOOKS_WITH_TERM_ABOVE_EXPR = 0.2
+NUM_LOCAL_NEAREST_TERMS = 75
+NUM_COMPARATIVE_TERMS = 6

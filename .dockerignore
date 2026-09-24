@@ -1,0 +1,27 @@
+# Version control
+.git
+.gitignore
+
+# Bytecode and test caches. These reach the *production* image through
+# `COPY ./shared shared` and `COPY functions/<fn>/src/ .`.
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.coverage
+**/htmlcov
+
+.env
+.env.example
+
+**/cdk.out
+
+.venv
+.vscode
+.devcontainer
+.claude
+docs
+infra
+docker-compose.yml
+**/*.md
+LICENSE
+**/.DS_Store

@@ -1,90 +1,85 @@
 # Embedding Analytics
 
-A shared word does not guarantee a shared concept. Competing treatises, legal opinions, technical standards, and technical specifications may use the same vocabulary but strongly disagree about the definitions. It traditionally requires a very close and careful reading to identify such changes in meaning.
-
-Embedding Analytics provides an alternative method to capture semantic drift. It allows you to search expressions and find comparative terms that every document within the corpus define similarly or inconstently. Stable comparative terms indicate aspects of meaning that the all authors keeps consistent, whereas unstable comparative terms indicate aspects of the meaning that change between authors. Embedding Analytics allows you to query what "labour" meant to Adam Smith versus John Stuart Mill, in vector arithmetic as `labour + (productive - unproductive)` or in plain English.
-
-![The query "value" scored across five books, 1767 to 1850. The thick line follows the query itself with its 95% confidence band; the lighter points are neighbouring terms, each carrying its own interval.](docs/assets/demo.png)
-
-Behind it: six containerized Lambdas that train a Word2Vec ensemble per book, align them with Generalized Procrustes Analysis, and report every score with a 95% confidence interval rather than a single number. Natural-language queries become validated expression trees through an LLM pipeline with deterministic guardrails.
-
-**Live demo:** https://www.embedding-analytics.com
+**Live demo:** https://www.embedding-analytics.com  
 **Frontend repo:** https://github.com/areebms/embedding-analytics-frontend
 
----
+Two documents can use the same words to mean very different things. Treatises, legal opinions and technical specifications routinely have to be read several times before those shifts in meaning surface at all, and a close reading is the only conventional way to find them.
 
-## What the product does
+Embedding Analytics lets you query and quantify changes in definitions across a collection of documents. For each document, the tool uses PPMI + SVD to create semantic embeddings. Your query is used to find the most similar terms within each document. To compare these similarities across documents, we compute the query's mean similarity to its 75 closest terms in each document, then rescale the similarities so the mean cosine similarity is the same across documents. The adjustment is adapted from cross-domain similarity local scaling (Conneau et al., 2018). Adjusted similarities from different queries cannot be compared.
 
-A standard Word2Vec interface returns the nearest terms for a single term. This system takes compositional queries built with vector arithmetic. Addition narrows context. `capital + profit` pulls "capital" toward its economic sense and away from the geographical one. Subtraction creates a contrast direction. `labour + (productive - unproductive)` finds terms close to productive labour and far from unproductive labour.
+Since there can be too many shared terms across a collection of documents, Embedding Analytics identifies relevant terms that can be compared across the collection. A term is relevant if its adjusted similarity is above the baseline in at least 20% of the documents that carry the query. There are two types of relevant terms identified.
 
-A query returns five comparative terms. Each carries a stability score, the mean position the books give it near the query, and an instability score, the variance of those positions. Each book's own score against a term arrives with a 95% confidence interval. The two scores answer different questions. Querying `value` returns the following stable and unstable terms:
+- **Consistent terms** have the highest mean similarity to the query. They are closely tied to it across the collection: the core of its definition, the part the authors hold in common.
+- **Contested terms** have the highest standard deviation. They are close to the query in some documents and not in others. They are where the definition moves.
 
-| Neighbour | Stability | Instability |
-|---|---:|---:|
-| silver | +0.128 | 0.009 |
-| gold | +0.115 | 0.006 |
-| metal | +0.107 | 0.010 |
-| commodity | +0.101 | 0.010 |
-| money | +0.100 | 0.009 |
+## Sample results
 
-Every author places value among the things value is measured in.
+Querying `value` across 24 books, where the average baseline is 0.321, returns the following.
 
-| Neighbour | Stability | Instability |
-|---|---:|---:|
-| utility | −0.072 | 0.058 |
-| labour | −0.046 | 0.037 |
-| coin | +0.035 | 0.037 |
-| medium | −0.099 | 0.037 |
-| found | −0.160 | 0.033 |
+*utility*, the basis of value in the marginalist theory that displaced the classical labour theory, leads the contested list.
 
-The two rival theories of value, utility and labour, rank 1 and 2.
+![Consistent and contested related terms to 'value'](docs/assets/Consistent%20vs%20contested%20terms.png)
+
+*commodity* is the most closely associated term with value within the collection.
+
+![The query "value" scored across the corpus. The thick line follows the query itself; the lighter points are its consistent and contested terms, each scored in every book that carries it.](docs/assets/Adjusted%20mean%20similarity%20by%20text.png)
+
+The highlighted line is *utility*. It peaks in Bastiat's *Harmonies* (0.68) and is high in Clark (0.47), who both tie value to utility. It falls below zero in Steuart, Smith and Fetter; Fetter uses the word for public utilities such as gas and railways.
 
 ---
 
 ## Architecture
 
 ```mermaid
-graph TD
-    subgraph Orchestration
-        SF[Step Functions]
+flowchart LR
+    OP([Operator<br/>start-execution]) --> SCR
+    GUT[Project Gutenberg] --> SCR
+
+    subgraph Pipeline
+        SCR["scrape<br/><i>Step Functions + Lambda</i>"]
+        STD["standardize-html<br/><i>Step Functions + Lambda</i>"]
+        TOK["tokenize<br/><i>Lambda</i>"]
+        EMB["create-embeddings<br/><i>Lambda</i>"]
+        PUB["publish<br/><i>Lambda</i>"]
+        SCR -. Subject Books Scraped .-> STD
+        STD -. Books Standardized .-> TOK
+        TOK -. Books Tokenized .-> EMB
+        EMB -. Books Embedded .-> PUB
     end
 
-    subgraph API
-        direction LR
-        UI[React Frontend] <--> FAPI[FastAPI + Mangum]
-    end
+    STD <--> ANT[Anthropic Batch API]
 
     subgraph Storage
-        direction LR
-        DDB[(DynamoDB)]
-        PC[(Pinecone)]
-        RED[(Redis Cache)]
-        S3[(S3 Artifacts)]
+        S3[(S3<br/>per-book artifacts)]
+        PE[(DynamoDB<br/>pipeline entries)]
+        BT[(DynamoDB<br/>book terms)]
+        CT[(DynamoDB<br/>corpus terms)]
     end
 
-    subgraph Pipeline [Per-Book Pipeline]
-        direction LR
-        SCR[Scrape] --> TOK[Tokenize] --> TRN["Train Word2Vec x N seeds"] --> ALN[Align Models] --> PUB[Publish Vectors]
-    end
+    Pipeline <--> S3
+    Pipeline <--> PE
+    PUB --> BT
+    PUB --> CT
 
-    SF --> Pipeline
-    Pipeline --> S3
-    PUB --> DDB
-    PUB --> PC
-    FAPI <--> DDB
-    FAPI -. optional .-> RED
+    BT --> API
+    PE --> API
+    UI[React frontend] --> GW[API Gateway] --> API["api<br/><i>FastAPI + Mangum · Lambda</i>"]
+    API -. optional .-> RED[(Redis)]
+    API -. /parse-describe .-> OAI[OpenAI API]
 ```
 
 | Area | Tools |
 |---|---|
 | API | Python 3.13, FastAPI, Mangum, Pydantic |
-| AI/ML | Gensim Word2Vec, NumPy, SciPy, OpenAI API |
-| Cloud | AWS Lambda, Step Functions, S3, DynamoDB, ECR |
+| AI/ML | NumPy, SciPy (`scipy.sparse`, `svds`), OpenAI API, Anthropic Batch API |
+| Cloud | AWS Lambda, API Gateway, Step Functions, EventBridge, S3, DynamoDB, ECR |
 | NLP/Data | spaCy, NLTK, WordNet, BeautifulSoup |
 | Testing | pytest, coverage gating, Docker test stages |
-| Infrastructure | Docker, Docker Compose, Bash |
+| Infrastructure | AWS CDK (Python), Docker, Docker Compose |
 
-Six independent containerized Lambda stages for scraping, tokenization, model training, vector alignment, publishing, and API serving. A Step Functions Map state trains N seeded models in parallel and converges into a single alignment stage. S3 holds intermediate artifacts; a publish stage fans results out to DynamoDB and Pinecone. Fully serverless, no always-on infrastructure. Per-service pytest suites run inside a dedicated Docker test stage before any image is pushed, and the API suite enforces an 85% coverage floor.
+Six independent containerized Lambda functions — scraping, heading classification, tokenization, embedding, publishing, and API serving. S3 holds intermediate artifacts; the publish stage flattens one vector per term into DynamoDB for sub-second API reads. Fully serverless, no always-on infrastructure. Per-service pytest suites run inside a dedicated Docker test stage before any image is pushed, and every suite enforces an 85% coverage floor.
+
+Each stage but `publish` announces on the EventBridge default bus when it finishes — the two state machines from their definitions, `tokenize` and `create-embeddings` from inside the function — and a rule per consumer turns each announcement into the next invocation, so a stage can be redeployed, re-run or replaced without any other stage naming it. `standardize-html` is the one that leaves the account: it classifies every heading in a book through the Anthropic Batch API, submitting once, then called back by its state machine every five minutes to collect until the batch settles, because a batch is asynchronous. [Pipeline](docs/pipeline.md) has the map.
 
 ---
 
@@ -92,9 +87,11 @@ Six independent containerized Lambda stages for scraping, tokenization, model tr
 
 | Document | What's in it |
 |---|---|
-| [Pipeline](docs/internals.md) | The six stages and what each one produces, with a link to each stage's own docs |
+| [Pipeline](docs/pipeline.md) | How a book becomes queryable, in six steps, with a link to each step's own docs |
+| [Infra](infra/README.md) | Orchestration, recovery, and deployment |
 | [API](functions/api/README.md) | The request path, what the score measures, and the API contract |
-| [Operations](docs/operations.md) | Orchestration, observability, configuration, and deployment |
+| [Shared code](shared/README.md) | The three DynamoDB tables, the book id, and the S3 key derivation every service agrees on |
+| [Method notes](docs/method-notes.md) | Scope of the claims, why there are no confidence intervals, and what the between-book variation is |
 | [Changelog](CHANGELOG.md) | Release history |
 
 ---
@@ -109,23 +106,24 @@ docker compose build
 docker compose up lambda-api    # --> http://localhost:8000
 ```
 
-`.env` needs real values first. The image names in `docker-compose.yml` interpolate `AWS_ACCOUNT_ID`
-and `AWS_REGION`, and the API reads the DynamoDB tables that `publish` writes, so a clone with an
-empty `.env` will build and start but answer every query against an empty vocabulary. There is no
-bundled fixture corpus yet — running the system on your own texts means running the pipeline first.
-To see it working on the five-book corpus without any of that, use the
-[live demo](https://www.embedding-analytics.com).
+`.env` needs real values first. The API reads the DynamoDB tables that `publish` writes, so a clone with an empty `.env` will build and start but answer every query against an empty vocabulary. There is no bundled fixture corpus yet — running the system on your own texts means running the pipeline first. To see it working without any of that, use the [live demo](https://www.embedding-analytics.com).
 
-Processing a book, and deployment, are covered in [Operations](docs/operations.md).
+Every suite runs inside its own service's image, against the production dependency set:
+
+```bash
+docker build -f functions/api/Dockerfile --target test -t api-test . && docker run --rm api-test
+```
+
+Each stage's README has that line for the stage it documents. `python3.13 infra/deploy.py` runs the infra suite, then each service's, before it deploys.
+
+Processing a book is covered in [Pipeline](docs/pipeline.md), and deployment in [infra](infra/README.md#deploying).
 
 ---
 
 ## What's next
 
-- [ ] Integrate LLMs within the Scrape lambda.
-- [ ] Update `publish` to remove Pinecone used by previous API version.
-- [ ] Increase number of books in corpus
-
+- [ ] Add a concordance.
+- [ ] Allow texts to be excluded from analysis.
 
 ---
 
@@ -135,4 +133,4 @@ Apache-2.0
 
 ---
 
-**Areeb Siddiqi** · [LinkedIn](https://www.linkedin.com/in/areeb-siddiqi/) · [GitHub](https://github.com/areebms)
+**Areeb Siddiqi** · [LinkedIn](https://www.linkedin.com/in/areeb-siddiqi/)

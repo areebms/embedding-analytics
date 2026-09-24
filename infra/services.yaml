@@ -1,37 +1,31 @@
 # infra/services.yaml
-project: embedding-analytics
-default:
-  architecture: x86_64
-  memory: 256
-  timeout: 120
 
 services:
+  default:
+    memory: 256
+    timeout: 120
+    env: [S3_BUCKET, PIPELINE_TABLE]
+
   scrape:
-    function_name: scrape
-    image: lambda-scrape
+
+  standardize-html:
+    memory: 1024
+    timeout: 600
+    env: [ANTHROPIC_API_KEY]
 
   tokenize:
-    function_name: tokenize
-    image: lambda-tokenize
-    memory: 512
-
-  train-kvector:
-    function_name: train-kvector
-    image: lambda-train-kvector
+    memory: 1769
+    timeout: 900
+    
+  create-embeddings:
     memory: 1536
     timeout: 600
-  
-  align-kvectors:
-    function_name: align-kvectors
-    image: lambda-align-kvectors
-
+    
   publish:
-    function_name: publish
-    image: lambda-publish
     memory: 512
     timeout: 300
+    env: [BOOK_TERM_TABLE, TERM_CORPUS_TABLE]
 
   api:
-    function_name: api
-    image: lambda-api
     memory: 1024
+    env: [BOOK_TERM_TABLE, PRODUCTION_DOMAIN, OPENAI_API_KEY, REDIS_URL, REDIS_PREFIX]

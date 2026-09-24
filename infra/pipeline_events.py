@@ -1,0 +1,36 @@
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class PipelineEvent:
+
+    source: str
+    detail_type: str
+    detail_keys: frozenset[str]
+
+
+SUBJECT_BOOKS_SCRAPED = PipelineEvent(
+    source="embedding-analytics.scrape",
+    detail_type="Subject Books Scraped",
+    detail_keys=frozenset({"subject", "book_ids", "scrape_execution"}),
+)
+
+BOOKS_STANDARDIZED = PipelineEvent(
+    source="embedding-analytics.standardize",
+    detail_type="Books Standardized",
+    detail_keys=frozenset(
+        {"batch_id", "book_ids", "standardized", "standardize_execution"}
+    ),
+)
+
+BOOKS_TOKENIZED = PipelineEvent(
+    source="embedding-analytics.tokenize",
+    detail_type="Books Tokenized",
+    detail_keys=frozenset({"book_ids", "tokenized"}),
+)
+
+BOOKS_EMBEDDINGS_CREATED = PipelineEvent(
+    source="embedding-analytics.create-embeddings",
+    detail_type="Books Embedded",
+    detail_keys=frozenset({"book_ids", "embedded"}),
+)

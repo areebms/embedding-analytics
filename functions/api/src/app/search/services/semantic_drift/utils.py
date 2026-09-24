@@ -16,10 +16,6 @@ def normalize_vectors(vectors, axis=-1):
     )
 
 
-def center_vectors(vectors, axis=-1):
-    return vectors - vectors.mean(axis=axis, keepdims=True)
-
-
 class SearchExpr(NamedTuple):
 
     tree: TermNode | OpNode

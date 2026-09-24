@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 
 from app.core.dependencies import get_books_metadata_cache
 from app.core.services import BooksMetadataCache
+from shared.tables.pipeline_entries import EntryStatus
 
 os.environ.pop("REDIS_URL", None)
 
@@ -33,13 +34,15 @@ def make_pipeline_entry(
 ) -> dict:
     """Build a fake pipeline-table row."""
     entry = {
-        "platform_data": f"gutenberg-{gutenberg_id}",
-        "author": author,
-        "published_year": year,
-        "title": title,
+        "book_id": f"gutenberg-{gutenberg_id}",
+        "status": EntryStatus.EMBEDDINGS_CREATED,
     }
     if aligned:
-        entry["s3_prefix_models"] = f"models/{gutenberg_id}"
+        entry["metadata"] = {
+            "author": author,
+            "title": title,
+            "published_year": year,
+        }
     return entry
 
 

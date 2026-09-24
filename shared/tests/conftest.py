@@ -5,10 +5,28 @@ import pytest
 from moto import mock_aws
 
 
-os.environ.setdefault("AWS_REGION", "us-east-1")
-os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
-os.environ.setdefault("S3_BUCKET", "test-bucket")
-os.environ.setdefault("TERM_CORPUS_TABLE", "corpus-term-test")
+# Set, not setdefault: docker-compose runs these containers with
+# `env_file: .env`, so the real deployment
+# config is on the environment. Inheriting it pointed the suite at the production
+# bucket and table names, and at us-west-2 -- where moto's create_bucket fails with
+# IllegalLocationConstraintException, because a bucket outside us-east-1 needs an
+# explicit CreateBucketConfiguration. These are moto tests; they must not vary with
+# whatever .env happens to hold.
+os.environ.update(
+    AWS_REGION="us-east-1",
+    AWS_DEFAULT_REGION="us-east-1",
+    AWS_ACCESS_KEY_ID="testing",
+    AWS_SECRET_ACCESS_KEY="testing",
+    AWS_SESSION_TOKEN="testing",
+    S3_BUCKET="test-bucket",
+    PIPELINE_TABLE="pipeline-test",
+    TERM_CORPUS_TABLE="corpus-term-test",
+)
+# shared.session builds Session(profile_name=AWS_PROFILE); a profile named in .env
+# does not exist inside the image.
+os.environ.pop("AWS_PROFILE", None)
+
+from shared.tests_utils import create_pipeline_table
 
 
 def _create_corpus_term_table(dynamodb):
@@ -30,8 +48,10 @@ def _create_corpus_term_table(dynamodb):
 def moto_dynamo():
     import shared.session as session_module
     import shared.tables.corpus_terms as corpus_terms_module
+    import shared.tables.pipeline_entries as pipeline_entries_module
     session_module._session = None
     corpus_terms_module._corpus_term_table = None
+    pipeline_entries_module._pipeline_entries = None
 
     with mock_aws():
         session = boto3.Session(region_name="us-east-1")
@@ -39,6 +59,7 @@ def moto_dynamo():
         s3 = session.resource("s3")
 
         _create_corpus_term_table(dynamodb)
+        create_pipeline_table(dynamodb)
         s3.create_bucket(Bucket=os.environ["S3_BUCKET"])
 
         yield session
@@ -48,3 +69,9 @@ def moto_dynamo():
 def corpus_term_table(moto_dynamo):
     from shared.tables.corpus_terms import get_corpus_term_table
     return get_corpus_term_table()
+
+
+@pytest.fixture
+def pipeline_entries(moto_dynamo):
+    from shared.tables.pipeline_entries import get_pipeline_entries
+    return get_pipeline_entries()

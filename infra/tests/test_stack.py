@@ -1,0 +1,177 @@
+"""What the synthesized stack must look like."""
+
+import ast
+import json
+import os
+from collections import Counter
+
+import pytest
+
+import config
+from conftest import FUNCTION, MACHINE, PERMISSION, RULE, by_name, get_att, of_type
+
+
+def announced_events(stage: str) -> set[tuple[str, str]]:
+    """Every (source, detail-type) a stage's ASL puts on the bus."""
+    definition = json.loads((config.ASL_DIR / f"{stage}.asl.json").read_text())
+    found = set()
+
+    def walk(node):
+        if isinstance(node, dict):
+            if "Source" in node and "DetailType" in node:
+                found.add((node["Source"], node["DetailType"]))
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(definition)
+    return found
+
+
+def test_stack_holds_exactly_these_resources(resources):
+    """Six Lambdas, two machines, four rules and three permissions -- and nothing else.
+    A stray construct shows up here."""
+    assert Counter(r["Type"] for r in resources.values()) == {
+        FUNCTION: 6,
+        MACHINE: 2,
+        RULE: 4,
+        PERMISSION: 3,
+    }
+
+
+def test_one_function_per_deployed_service(resources):
+    assert set(by_name(resources, FUNCTION, "FunctionName")) == {
+        f"{config.PREFIX}-{service}" for service in config.get_services()
+    }
+
+
+@pytest.mark.parametrize("service", config.get_services())
+def test_function_is_sized_from_services_yaml(resources, service):
+    """A `default:` quietly winning over the service's own entry is caught here."""
+    function = by_name(resources, FUNCTION, "FunctionName")[f"{config.PREFIX}-{service}"]
+
+    assert function["Properties"]["MemorySize"] == config.get_service_config(service, "memory")
+    assert function["Properties"]["Timeout"] == config.get_service_config(service, "timeout")
+
+
+@pytest.mark.parametrize("service", config.get_services())
+def test_function_environment_is_exactly_the_declared_names(resources, service):
+    """services.yaml lists the names; nothing else may reach the running function.
+
+    AWS_REGION in particular is reserved -- Lambda injects it and rejects it as a key.
+    """
+    function = by_name(resources, FUNCTION, "FunctionName")[f"{config.PREFIX}-{service}"]
+    variables = function["Properties"].get("Environment", {}).get("Variables", {})
+
+    assert set(variables) == set(config.get_service_config(service, "env"))
+
+
+def test_machines_are_named_for_their_stage(resources):
+    """build_state_machine derives the name and the ASL filename from one argument, so
+    a machine cannot end up named for one stage and defined by another."""
+    machines = by_name(resources, MACHINE, "StateMachineName")
+
+    assert set(machines) == {
+        f"{config.PREFIX}-scrape",
+        f"{config.PREFIX}-standardize-html",
+    }
+    for name in machines:
+        stage = name.removeprefix(f"{config.PREFIX}-")
+        assert (config.ASL_DIR / f"{stage}.asl.json").is_file()
+
+
+def test_machines_resolve_their_function_by_reference(resources):
+    """FUNCTION_ARN is a GetAtt on the real construct, not an ARN rebuilt from region,
+    account and prefix."""
+    functions = of_type(resources, FUNCTION)
+
+    for name, machine in by_name(resources, MACHINE, "StateMachineName").items():
+        stage = name.removeprefix(f"{config.PREFIX}-")
+        substitutions = machine["Properties"]["DefinitionSubstitutions"]
+        target = functions[get_att(substitutions["FUNCTION_ARN"])]
+
+        assert target["Properties"]["FunctionName"] == f"{config.PREFIX}-{stage}"
+
+
+def module_constants(path) -> dict:
+    return {
+        target.id: node.value.value
+        for node in ast.parse(path.read_text()).body
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+
+
+def announced_by_functions() -> set[tuple[str, str]]:
+    found = set()
+    for service in config.get_services():
+        src = config.REPO_ROOT / "functions" / service / "src"
+        for path in sorted(src.glob("*.py")):
+            constants = module_constants(path)
+            if "ANNOUNCE_SOURCE" in constants:
+                found.add(
+                    (constants["ANNOUNCE_SOURCE"], constants["ANNOUNCE_DETAIL_TYPE"])
+                )
+    return found
+
+
+def test_triggers_match_the_events_the_stages_announce(resources):
+    """Every event a machine puts on the bus has a rule listening for it, and no rule
+    listens for an event nothing sends. The ASL and the rule are edited separately, and
+    a mismatch is delivered to nothing."""
+    announced = announced_by_functions()
+    for name in by_name(resources, MACHINE, "StateMachineName"):
+        announced |= announced_events(name.removeprefix(f"{config.PREFIX}-"))
+
+    listened = set()
+    for rule in of_type(resources, RULE).values():
+        pattern = rule["Properties"]["EventPattern"]
+        assert len(pattern["source"]) == 1 and len(pattern["detail-type"]) == 1
+        listened.add((pattern["source"][0], pattern["detail-type"][0]))
+
+    assert listened == announced
+
+
+def test_the_two_triggers_authorise_differently(resources):
+    """A Step Functions target is authorised by the rule's role; a Lambda target is
+    authorised by a resource policy on the function and takes no role."""
+    rules = by_name(resources, RULE, "Name")
+    standardize = rules[f"{config.PREFIX}-standardize-trigger"]
+    tokenize = rules[f"{config.PREFIX}-tokenize-trigger"]
+
+    (to_machine,) = standardize["Properties"]["Targets"]
+    (to_function,) = tokenize["Properties"]["Targets"]
+
+    assert to_machine["RoleArn"] == os.environ["PUT_EVENT_ROLE_ARN"]
+    assert "RoleArn" not in to_function
+
+
+def test_the_lambda_target_carries_its_invoke_permission(resources):
+    """The permission CDK emits only because the rule targets a construct in this stack.
+    Under the six-stack layout the function was imported by ARN, CDK skipped the
+    permission with a warning rather than an error, and every delivery was refused."""
+    functions = of_type(resources, FUNCTION)
+    rules = of_type(resources, RULE)
+    permitted = set()
+
+    for permission in of_type(resources, PERMISSION).values():
+        properties = permission["Properties"]
+        assert properties["Action"] == "lambda:InvokeFunction"
+        assert properties["Principal"] == "events.amazonaws.com"
+        target = functions[get_att(properties["FunctionName"])]
+        rule = rules[get_att(properties["SourceArn"])]
+        permitted.add(
+            (target["Properties"]["FunctionName"], rule["Properties"]["Name"])
+        )
+
+    assert permitted == {
+        (f"{config.PREFIX}-tokenize", f"{config.PREFIX}-tokenize-trigger"),
+        (
+            f"{config.PREFIX}-create-embeddings",
+            f"{config.PREFIX}-create-embeddings-trigger",
+        ),
+        (f"{config.PREFIX}-publish", f"{config.PREFIX}-publish-trigger"),
+    }

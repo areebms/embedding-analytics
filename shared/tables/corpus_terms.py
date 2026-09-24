@@ -88,8 +88,7 @@ class CorpusTermTable(BaseTable):
             for term, term_data in current_term_data.items():
                 term_data["book_ids"].discard(book_id)
                 if term_data["book_ids"]:
-                    term_data["book_ids"] = term_data["book_ids"]
                     term_data["updated_at"] = now
-                    batch.put_item(Item=item)
+                    batch.put_item(Item=term_data)
                 else:
                     batch.delete_item(Key={"partition": self.PARTITION, "term": term})

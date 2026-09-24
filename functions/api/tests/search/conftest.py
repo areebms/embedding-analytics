@@ -7,24 +7,15 @@ from fastapi.testclient import TestClient
 
 from app.core.dependencies import get_books_metadata_cache
 from app.core.services import BooksMetadataCache
-from app.search.constants import (
-    MAX_RANK_FOR_STABLE_TERM,
-    MAX_RANK_FOR_UNSTABLE_TERM,
-    NUM_NEAREST_TERMS_FOR_LOCAL_COSINE_SIMILARITY,
-    NUM_NEAREST_TERMS_FOR_SIMILARITY_CENTERING,
-)
+from shared.tables.book_terms import get_book_term_table
+from app.search.constants import NUM_LOCAL_NEAREST_TERMS
 from app.search.dependencies import get_books_term_cache
 from app.search.services.semantic_drift import BooksTermCache
-from shared.tables.book_terms import get_book_term_table
+from shared.tables.pipeline_entries import EntryStatus
 
 os.environ.pop("REDIS_URL", None)
 
-LOCAL_VOCAB_FLOOR = max(
-    NUM_NEAREST_TERMS_FOR_LOCAL_COSINE_SIMILARITY,
-    NUM_NEAREST_TERMS_FOR_SIMILARITY_CENTERING,
-    MAX_RANK_FOR_STABLE_TERM,
-    MAX_RANK_FOR_UNSTABLE_TERM,
-)
+LOCAL_VOCAB_FLOOR = 2 * NUM_LOCAL_NEAREST_TERMS
 
 NAMED_VOCAB = ["labour", "value", "wage", "rent", "stock", "price", "profit", "capital"]
 FILLER_VOCAB = [f"filler{n:03d}" for n in range(LOCAL_VOCAB_FLOOR)]
@@ -36,7 +27,6 @@ VOCAB = NAMED_VOCAB + FILLER_VOCAB
 
 def make_term_entry(
     term: str,
-    n_seeds: int = 5,
     dim: int = 4,
     count: int = 100,
     tags: set[str] | None = None,
@@ -44,19 +34,18 @@ def make_term_entry(
 ) -> dict:
     """Build a BookTermTable-shaped dict with realistic byte vectors."""
     rng = np.random.default_rng(seed)
-    vectors = rng.normal(size=(n_seeds, dim))
-    arr16 = vectors.astype(np.float16)
+    arr16 = rng.normal(size=dim).astype(np.float16)
     return {
         "term": term,
         "count_": count,
         "tags": tags if tags is not None else {"N"},
-        "vectors": [bytes(arr16[i].tobytes()) for i in range(arr16.shape[0])],
+        "vector": bytes(arr16.tobytes()),
     }
 
 
-def book_rows(book_seed, vocab=VOCAB, n_seeds=5):
+def book_rows(book_seed, vocab=VOCAB):
     return {
-        term: make_term_entry(term, n_seeds=n_seeds, seed=book_seed * 100 + i)
+        term: make_term_entry(term, seed=book_seed * 100 + i)
         for i, term in enumerate(vocab)
     }
 
@@ -77,13 +66,13 @@ def set_multi_book_table(term_table, books):
 def set_term_table(term_table, entries_by_term, book_id="gutenberg-1"):
     """Configure get_entry and batch_get_entries for a single-book test."""
 
-    def get_entry(term, platform_data, fields=None):
-        if platform_data == book_id and term in entries_by_term:
+    def get_entry(term, _book_id, fields=None):
+        if _book_id == book_id and term in entries_by_term:
             return entries_by_term[term]
         return None
 
-    def batch_get_entries(terms, platform_data, fields=None):
-        if platform_data != book_id:
+    def batch_get_entries(terms, _book_id, fields=None):
+        if _book_id != book_id:
             return []
         return [entries_by_term[t] for t in terms if t in entries_by_term]
 
@@ -100,7 +89,11 @@ def mock_pipeline_table():
     """
     table = MagicMock()
     table.get_all_entries.return_value = [
-        {"platform_data": "gutenberg-1", "s3_prefix_models": "models/1"},
+        {
+            "book_id": "gutenberg-1",
+            "status": EntryStatus.EMBEDDINGS_CREATED,
+            "metadata": {"author": "Smith, Adam", "title": "Wealth of Nations"},
+        },
     ]
     return table
 

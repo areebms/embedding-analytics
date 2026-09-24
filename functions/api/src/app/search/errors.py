@@ -23,18 +23,6 @@ class MissingTermsError(ValueError):
         super().__init__(f"Unknown {plural}: {', '.join(self.terms)}")
 
 
-class NoLocalNearestTermsError(ValueError):
-
-    def __init__(self, a_book_id: BookIndex, b_book_id: BookIndex, n: int):
-        self.a_book_id = a_book_id
-        self.b_book_id = b_book_id
-        self.n = n
-        super().__init__(
-            f"too few shared local nearest terms between {a_book_id} and "
-            f"{b_book_id}: {n} shared terms"
-        )
-
-
 class ExpressionAbsentError(ValueError):
 
     def __init__(self, book_id: BookIndex, terms: Iterable[str]):

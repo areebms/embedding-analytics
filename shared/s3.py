@@ -1,76 +1,92 @@
 import csv
 import io
+import json
 import os
 import tempfile
 from contextlib import contextmanager
 
 from shared.session import get_session
 
-
 S3_BUCKET = os.getenv("S3_BUCKET")
 
+JSON_CONTENT_TYPE = "application/json; charset=utf-8"
+HTML_CONTENT_TYPE = "text/html; charset=utf-8"
+TEXT_CONTENT_TYPE = "text/plain; charset=utf-8"
+CSV_CONTENT_TYPE = "text/csv; charset=utf-8"
+BINARY_CONTENT_TYPE = "application/octet-stream"
 
-def upload_object(
-    session, s3_key, file_bytes, content_type="text/plain; charset=utf-8"
-):
-    session.client("s3").upload_fileobj(
-        io.BytesIO(file_bytes.encode("utf-8")),
-        S3_BUCKET,
-        s3_key,
-        ExtraArgs={"ContentType": content_type},
+_s3_resource = None
+
+
+def get_s3_resource():
+    global _s3_resource
+    if _s3_resource is None:
+        _s3_resource = get_session().resource("s3")
+    return _s3_resource
+
+
+def load_text(s3_key):
+    return (
+        get_s3_resource().Object(S3_BUCKET, s3_key).get()["Body"].read().decode("utf-8")
     )
 
 
-def upload_file(session, s3_key, path):
-    session.client("s3").upload_file(
+def load_json(s3_key):
+    return json.loads(load_text(s3_key))
+
+
+def load_csv(s3_key):
+    body = get_s3_resource().Object(S3_BUCKET, s3_key).get()["Body"]
+    yield from csv.reader(io.TextIOWrapper(body, encoding="utf-8"))
+
+
+@contextmanager
+def load_file(s3_key):
+    with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
+        get_s3_resource().Object(S3_BUCKET, s3_key).download_fileobj(tmp_file)
+    try:
+        yield s3_key, tmp_file.name
+    finally:
+        os.unlink(tmp_file.name)
+
+
+def yield_s3_files(s3_prefix, file_extension):
+    bucket = get_s3_resource().Bucket(S3_BUCKET)
+    for obj in bucket.objects.filter(Prefix=s3_prefix):
+        if file_extension not in obj.key:
+            continue
+        with load_file(obj.key) as result:
+            yield result
+
+
+def upload_object(s3_key, text, content_type):
+    get_s3_resource().Object(S3_BUCKET, s3_key).put(
+        Body=text.encode("utf-8"), ContentType=content_type
+    )
+
+
+def upload_json(s3_key, text):
+    upload_object(s3_key, text, JSON_CONTENT_TYPE)
+
+
+def upload_html(s3_key, text):
+    upload_object(s3_key, text, HTML_CONTENT_TYPE)
+
+
+def upload_txt(s3_key, text):
+    upload_object(s3_key, text, TEXT_CONTENT_TYPE)
+
+
+def upload_csv(s3_key, rows):
+    buffer = io.StringIO()
+    csv.writer(buffer).writerows(rows)
+    upload_object(s3_key, buffer.getvalue(), CSV_CONTENT_TYPE)
+
+
+def upload_file(s3_key, path):
+    get_s3_resource().meta.client.upload_file(
         path,
         S3_BUCKET,
         s3_key,
-        ExtraArgs={"ContentType": "application/octet-stream"},
+        ExtraArgs={"ContentType": BINARY_CONTENT_TYPE},
     )
-
-_s3_loader = None
-
-def get_s3_loader():
-    global _s3_loader
-    if _s3_loader is None:
-        _s3_loader = S3Loader(get_session())
-    return _s3_loader
-
-
-class S3Loader:
-
-    def __init__(self, session):
-        self.s3_resource = session.resource("s3")
-
-    @contextmanager
-    def load_file(self, s3_object_key):
-        with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
-            self.s3_resource.Object(S3_BUCKET, s3_object_key).download_fileobj(tmp_file)
-        try:
-            yield s3_object_key, tmp_file.name
-        finally:
-            os.unlink(tmp_file.name)
-
-    def yield_s3_files(self, s3_prefix, file_extension):
-        bucket = self.s3_resource.Bucket(S3_BUCKET)
-        for obj in bucket.objects.filter(Prefix=s3_prefix):
-            if file_extension not in obj.key:
-                continue
-            with self.load_file(obj.key) as result:
-                yield result
-
-
-    def load_text(self, s3_key):
-        return (
-            self.s3_resource
-            .Object(S3_BUCKET, s3_key)
-            .get()["Body"]
-            .read()
-            .decode("utf-8")
-        )
-
-
-def yield_sentences_from_s3(session, s3_key):
-    body = session.resource("s3").Object(S3_BUCKET, s3_key).get()["Body"]
-    yield from csv.reader(io.TextIOWrapper(body, encoding="utf-8"))

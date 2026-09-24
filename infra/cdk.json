@@ -1,0 +1,4 @@
+{
+  "app": "python3.13 app.py",
+  "output": "cdk.out"
+}

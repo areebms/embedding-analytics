@@ -1,0 +1,193 @@
+"""Tests for the two scrape stages and the status transitions they drive."""
+
+import json
+
+import pytest
+
+from conftest import INDEX, s3_body
+from shared.commons import BookIndex
+from shared.tables.pipeline_entries import EntryStatus, PipelineEntry
+
+
+ENGLISH_METADATA = {"language": ["English"], "author": ["Smith, Adam"]}
+FRENCH_METADATA = {"language": ["French"], "author": ["Rousseau, Jean-Jacques"]}
+
+
+def _status(entries, index=INDEX):
+    """What `scrape.get_status` used to answer: the status the row now carries."""
+    return entries.get_entry(index).status
+
+
+# ── metadata stage ────────────────────────────────────────────────────
+
+
+def test_metadata_uploads_json_and_advances_the_status(seed, entries, bucket, mocker):
+    import scrape
+
+    seed(EntryStatus.LISTED)
+    mocker.patch.object(scrape, "get_metadata", return_value=ENGLISH_METADATA)
+
+    status = scrape.scrape_book_metadata(INDEX)
+
+    assert status == EntryStatus.SCRAPED_METADATA
+    assert json.loads(s3_body(bucket, f"metadata/{INDEX}.json")) == ENGLISH_METADATA
+    assert _status(entries) == EntryStatus.SCRAPED_METADATA
+
+
+def test_metadata_marks_a_non_english_book_skipped(seed, entries, bucket, mocker):
+    """The returned status is what the state machine's Choice branches on."""
+    import scrape
+
+    seed(EntryStatus.LISTED)
+    mocker.patch.object(scrape, "get_metadata", return_value=FRENCH_METADATA)
+
+    status = scrape.scrape_book_metadata(INDEX)
+
+    assert status == EntryStatus.SCRAPED_SKIPPED_NON_ENGLISH
+    assert _status(entries) == EntryStatus.SCRAPED_SKIPPED_NON_ENGLISH
+    # The metadata still lands: knowing why a book was skipped is worth the object.
+    assert json.loads(s3_body(bucket, f"metadata/{INDEX}.json")) == FRENCH_METADATA
+
+
+def test_metadata_is_idempotent_and_reports_the_current_status(seed, mocker):
+    import scrape
+
+    seed(EntryStatus.SCRAPED_HTML)
+    get_metadata = mocker.patch.object(scrape, "get_metadata")
+
+    status = scrape.scrape_book_metadata(INDEX)
+
+    assert status == EntryStatus.SCRAPED_HTML
+    get_metadata.assert_not_called()
+
+
+# ── content stage ─────────────────────────────────────────────────────
+
+
+def test_content_uploads_raw_html_and_advances_the_status(seed, entries, bucket, mocker):
+    import scrape
+
+    seed(EntryStatus.SCRAPED_METADATA)
+    mocker.patch.object(scrape, "get_html", return_value="<html>raw</html>")
+
+    status = scrape.scrape_book_content(INDEX)
+
+    assert status == EntryStatus.SCRAPED_HTML
+    assert s3_body(bucket, f"html/{INDEX}.html") == "<html>raw</html>"
+    assert _status(entries) == EntryStatus.SCRAPED_HTML
+
+
+def test_content_will_not_run_before_metadata(seed, mocker):
+    import scrape
+
+    seed(EntryStatus.LISTED)
+    get_html = mocker.patch.object(scrape, "get_html")
+
+    status = scrape.scrape_book_content(INDEX)
+
+    assert status == EntryStatus.LISTED
+    get_html.assert_not_called()
+
+
+def test_content_will_not_run_for_a_skipped_book(seed, mocker):
+    import scrape
+
+    seed(EntryStatus.SCRAPED_SKIPPED_NON_ENGLISH)
+    get_html = mocker.patch.object(scrape, "get_html")
+
+    assert scrape.scrape_book_content(INDEX) == EntryStatus.SCRAPED_SKIPPED_NON_ENGLISH
+    get_html.assert_not_called()
+
+
+# ── seeding is a prerequisite ─────────────────────────────────────────
+
+
+def test_an_unseeded_book_names_itself_and_the_remedy(aws, mocker):
+    import scrape
+
+    get_metadata = mocker.patch.object(scrape, "get_metadata")
+
+    with pytest.raises(LookupError, match="gutenberg-404"):
+        scrape.scrape_book_metadata(BookIndex(404))
+
+    get_metadata.assert_not_called()
+
+
+def test_a_row_with_no_status_reads_as_none_and_stops_the_stage(entries, mocker):
+    """`scrape.get_status` and its "no status" error are gone. A row the SUBJECT stage
+    never gave a status now parses with `status=None`, which is not LISTED, so the
+    metadata stage skips it instead of scraping a book it knows nothing about."""
+    import scrape
+
+    entries.put_entry(PipelineEntry(book_id=INDEX, subject_ids={BookIndex(42)}))
+    get_metadata = mocker.patch.object(scrape, "get_metadata")
+
+    assert entries.get_entry(INDEX).status is None
+    assert scrape.scrape_book_metadata(INDEX) is None
+    get_metadata.assert_not_called()
+
+
+# ── subject listing ───────────────────────────────────────────────────
+
+
+def test_subject_list_seeds_every_book_once(entries, mocker):
+    import scrape
+
+    mocker.patch.object(scrape, "get_book_ids", return_value=["3300", "846"])
+
+    first = scrape.scrape_subject_book_list("subject-42")
+    again = scrape.scrape_subject_book_list("subject-42")  # put_entry is a conditional create
+
+    assert entries.get_indexes(EntryStatus.LISTED) == ["gutenberg-3300", "gutenberg-846"]
+    assert first["created"] == 2
+    assert again["created"] == 0
+
+
+def test_subject_list_returns_every_book_found_not_just_the_new_ones(entries, mocker):
+    """The Map iterates `indexes`, so a re-run has to hand back the whole subject."""
+    import scrape
+
+    mocker.patch.object(scrape, "get_book_ids", return_value=["3300", "846"])
+
+    scrape.scrape_subject_book_list("subject-42")
+    again = scrape.scrape_subject_book_list("subject-42")
+
+    assert again == {
+        "subject": "subject-42",
+        "found": 2,
+        "created": 0,
+        "indexes": ["gutenberg-3300", "gutenberg-846"],
+    }
+
+
+def test_subject_list_survives_one_book_failing_to_seed(entries, mocker):
+    import scrape
+
+    mocker.patch.object(scrape, "get_book_ids", return_value=["3300", "846"])
+    mocker.patch.object(
+        entries, "put_entry", side_effect=[RuntimeError("throttled"), True]
+    )
+
+    result = scrape.scrape_subject_book_list("subject-42")  # must not raise
+
+    assert entries.put_entry.call_count == 2
+    assert result["created"] == 1
+    # The book that failed to seed is still listed: the Map will try it, and the
+    # metadata stage's own LookupError is what reports it as unseeded.
+    assert result["indexes"] == ["gutenberg-3300", "gutenberg-846"]
+
+
+def test_sleepy_map_keeps_going_after_one_book_fails(mocker):
+    import scrape
+
+    mocker.patch.object(scrape, "sleep")
+    seen = []
+
+    def stage(index):
+        seen.append(index)
+        if index == "b":
+            raise RuntimeError("gutenberg said no")
+
+    scrape.sleepy_map(stage, ["a", "b", "c"])
+
+    assert seen == ["a", "b", "c"]

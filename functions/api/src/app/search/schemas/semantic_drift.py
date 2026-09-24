@@ -10,6 +10,7 @@ from pydantic import (
 )
 
 MAX_TREE_DEPTH = 5
+MIN_BOOK_IDS = 20
 
 
 def check_tree_depth(tree):
@@ -50,7 +51,7 @@ ExprTree = Annotated[TermNode | OpNode, AfterValidator(check_tree_depth)]
 class SemanticDriftRequestBody(BaseModel):
 
     tree: ExprTree
-    book_ids: list[int] = Field(min_length=1, max_length=16)
+    book_ids: list[int] = Field(min_length=MIN_BOOK_IDS, max_length=50)
 
     @field_validator("book_ids")
     @classmethod
@@ -90,73 +91,38 @@ class BookSummary(BaseModel):
     missing_terms: list[str] = Field(default_factory=list)
 
 
-class DefinitionalAgreement(BaseModel):
-    """One book read against the nominated source book.
-
-    `mean_local_similarity` is the mean across seeds of a single pairwise local
-    similarity, over the 75 terms nearest the query in the measuring book. With
-    one peer there is no between-book variation to estimate, so `ci` covers seed
-    noise alone.
-    """
+class BookSimilarity(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
     book_id: int
-    mean_local_similarity: float
-    ci: tuple[float, float]
+    similarity: float
     occurrences: int
-    n_seeds: int
 
 
-class DefinitionalAgreementToCorpus(BaseModel):
-    """One book read against every other requested book.
-
-    `mean_local_similarity` is the mean of the pairwise local similarities
-    against each peer in turn -- not a comparison against one aggregate corpus
-    profile, which would be a different quantity. `ci` treats the peers as the
-    unit of replication, so it carries between-book disagreement as well as the
-    seed noise inside each pairwise figure, and is not comparable in width to
-    the interval on `DefinitionalAgreement`.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    book_id: int
-    mean_local_similarity: float
-    ci: tuple[float, float]
-    occurrences: int
-    n_seeds: int
-    n_books: int
-
-
-class TermStats(BaseModel):
+class TermSimilarityData(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
     term: str
-    stability: float
-    instability: float
+    similarity_mean: float
+    similarity_std: float
     n_books_in: int
-    n_books_as_top50: int
-    n_books_as_top100: int
+    book_similarities: list[BookSimilarity]
 
 
-class TermData(TermStats):
-
-    books: list[DefinitionalAgreement] | list[DefinitionalAgreementToCorpus]
-
-
-class ExprData(BaseModel):
+class ExprSimilarityData(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
     expr: str
     terms: list[str]
-    books: list[DefinitionalAgreement] | list[DefinitionalAgreementToCorpus]
+    book_similarities: list[BookSimilarity]
 
 
 class SemanticDriftResponse(BaseModel):
 
-    expr: ExprData
-    comparative_terms: list[TermData]
-    books: list[BookSummary]
+    expr: ExprSimilarityData
+    book_stats: list[BookSummary]
+    top_mean: list[TermSimilarityData]
+    top_std: list[TermSimilarityData]

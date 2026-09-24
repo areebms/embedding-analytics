@@ -1,32 +1,31 @@
 # infra/services.yaml
 
-default:
-  memory: 256
-  timeout: 120
-
 services:
-  scrape:
+  default:
+    memory: 256
+    timeout: 120
     env: [S3_BUCKET, PIPELINE_TABLE]
+
+  scrape:
 
   standardize-html:
     memory: 1024
     timeout: 600
-    env: [S3_BUCKET, PIPELINE_TABLE, ANTHROPIC_API_KEY]
+    env: [ANTHROPIC_API_KEY]
 
   tokenize:
     memory: 1769
     timeout: 900
-    env: [S3_BUCKET, PIPELINE_TABLE]
-
+    
   create-embeddings:
     memory: 1536
     timeout: 600
-    env: [S3_BUCKET, PIPELINE_TABLE]
-
+    
   publish:
     memory: 512
     timeout: 300
-    env: [S3_BUCKET, PIPELINE_TABLE, BOOK_TERM_TABLE, TERM_CORPUS_TABLE]
+    env: [BOOK_TERM_TABLE, TERM_CORPUS_TABLE]
 
   api:
     memory: 1024
+    env: [BOOK_TERM_TABLE, PRODUCTION_DOMAIN, OPENAI_API_KEY, REDIS_URL, REDIS_PREFIX]

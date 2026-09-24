@@ -9,15 +9,14 @@ import os
 
 import pytest
 
-import app
 import config
 import deploy
 from deploy import GateError, validate_dockerfile
 
 
-@pytest.mark.parametrize("service", app.DEPLOYED)
+@pytest.mark.parametrize("service", config.get_services())
 def test_every_deployed_service_can_be_gated(service):
-    """Adding a service to DEPLOYED without a suite or a `test` stage fails here."""
+    """Adding a service to services.yaml without a suite or a `test` stage fails here."""
     validate_dockerfile(service)
 
 

@@ -51,8 +51,16 @@ def build_function_from_container(
     role: aws_iam.IRole,
 ) -> aws_lambda.DockerImageFunction:
     """One service's Lambda, from the `lambda` stage of its Dockerfile.
+
+    TODO: ANTHROPIC_API_KEY, OPENAI_API_KEY and REDIS_URL are read here and baked into the synthesized template, which cdk deploy uploads to the CDK
+    staging bucket. Move the secrets to SSM and reference them with
+    ssm.StringParameter.value_for_string_parameter, so only the parameter name lands in
+    the template.
     """
-    svc = config.service(service)
+    service_envs = config.get_service_config(service, "env")
+    missing_envs = [env for env in service_envs if not os.getenv(env)]
+    if missing_envs:
+        raise SystemExit(f"missing in .env: {', '.join(missing_envs)}")
 
     return aws_lambda.DockerImageFunction(
         scope,
@@ -66,9 +74,9 @@ def build_function_from_container(
             exclude=get_test_files(service),
         ),
         role=role,
-        memory_size=svc["memory"],
-        timeout=Duration.seconds(svc["timeout"]),
-        environment=config.env_for(service),
+        memory_size=config.get_service_config(service, "memory"),
+        timeout=Duration.seconds(config.get_service_config(service, "timeout")),
+        environment={env: os.environ[env] for env in service_envs},
     )
 
 

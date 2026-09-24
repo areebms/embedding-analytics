@@ -124,9 +124,9 @@ def main() -> int:
 
     print("=== Building ===")
     app.build()
-    print(f"stack ships: {', '.join(app.DEPLOYED)}")
+    print(f"stack ships: {', '.join(config.get_services())}")
 
-    code = run_test_gate(app.DEPLOYED)
+    code = run_test_gate(config.get_services())
     if code != 0:
         return code
 

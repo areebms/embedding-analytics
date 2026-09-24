@@ -12,6 +12,10 @@ os.environ.update(
     BOOK_TERM_TABLE="book-terms-test",
     TERM_CORPUS_TABLE="corpus-terms-test",
     ANTHROPIC_API_KEY="test-key",
+    PRODUCTION_DOMAIN="https://test.example",
+    OPENAI_API_KEY="test-key",
+    REDIS_URL="redis://test:6379",
+    REDIS_PREFIX="test-prefix",
     CDK_DEFAULT_ACCOUNT="000000000000",
     CDK_DEFAULT_REGION="us-east-1",
 )

@@ -10,7 +10,6 @@ from collections import Counter
 
 import pytest
 
-import app
 import config
 from conftest import FUNCTION, MACHINE, PERMISSION, RULE, by_name, get_att, of_type
 
@@ -35,10 +34,10 @@ def announced_events(stage: str) -> set[tuple[str, str]]:
 
 
 def test_stack_holds_exactly_these_resources(resources):
-    """Five Lambdas, two machines, four rules and three permissions -- and nothing else.
+    """Six Lambdas, two machines, four rules and three permissions -- and nothing else.
     A stray construct shows up here."""
     assert Counter(r["Type"] for r in resources.values()) == {
-        FUNCTION: 5,
+        FUNCTION: 6,
         MACHINE: 2,
         RULE: 4,
         PERMISSION: 3,
@@ -47,21 +46,20 @@ def test_stack_holds_exactly_these_resources(resources):
 
 def test_one_function_per_deployed_service(resources):
     assert set(by_name(resources, FUNCTION, "FunctionName")) == {
-        f"{config.PREFIX}-{service}" for service in app.DEPLOYED
+        f"{config.PREFIX}-{service}" for service in config.get_services()
     }
 
 
-@pytest.mark.parametrize("service", app.DEPLOYED)
+@pytest.mark.parametrize("service", config.get_services())
 def test_function_is_sized_from_services_yaml(resources, service):
     """A `default:` quietly winning over the service's own entry is caught here."""
     function = by_name(resources, FUNCTION, "FunctionName")[f"{config.PREFIX}-{service}"]
-    declared = config.service(service)
 
-    assert function["Properties"]["MemorySize"] == declared["memory"]
-    assert function["Properties"]["Timeout"] == declared["timeout"]
+    assert function["Properties"]["MemorySize"] == config.get_service_config(service, "memory")
+    assert function["Properties"]["Timeout"] == config.get_service_config(service, "timeout")
 
 
-@pytest.mark.parametrize("service", app.DEPLOYED)
+@pytest.mark.parametrize("service", config.get_services())
 def test_function_environment_is_exactly_the_declared_names(resources, service):
     """services.yaml lists the names; nothing else may reach the running function.
 
@@ -70,7 +68,7 @@ def test_function_environment_is_exactly_the_declared_names(resources, service):
     function = by_name(resources, FUNCTION, "FunctionName")[f"{config.PREFIX}-{service}"]
     variables = function["Properties"].get("Environment", {}).get("Variables", {})
 
-    assert set(variables) == set(config.service(service).get("env", []))
+    assert set(variables) == set(config.get_service_config(service, "env"))
 
 
 def test_machines_are_named_for_their_stage(resources):
@@ -113,7 +111,7 @@ def module_constants(path) -> dict:
 
 def announced_by_functions() -> set[tuple[str, str]]:
     found = set()
-    for service in app.DEPLOYED:
+    for service in config.get_services():
         src = config.REPO_ROOT / "functions" / service / "src"
         for path in sorted(src.glob("*.py")):
             constants = module_constants(path)

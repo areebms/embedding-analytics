@@ -12,11 +12,6 @@ from resources import (
     build_tokenize_trigger,
 )
 
-# The services CloudFormation owns. Adding one here is what deploys it; deploy.py then
-# picks it up off the synthesized assembly and gates its suite.
-DEPLOYED = ["scrape", "standardize-html", "tokenize", "create-embeddings", "publish"]
-
-
 def build(outdir: str | None = None) -> cdk.App:
 
     app = cdk.App(outdir=outdir)
@@ -27,10 +22,14 @@ def build(outdir: str | None = None) -> cdk.App:
     rule_role = get_role(stack, "RuleRole", "PUT_EVENT_ROLE_ARN")
 
     functions = {}
-    for name in DEPLOYED:
-        functions[name] = build_function_from_container(stack, service=name, role=lambda_role)
+    for name in config.get_services():
+        functions[name] = build_function_from_container(
+            stack, service=name, role=lambda_role
+        )
 
-    build_state_machine(stack, machine="scrape", role=sfn_role, calls=functions["scrape"])
+    build_state_machine(
+        stack, machine="scrape", role=sfn_role, calls=functions["scrape"]
+    )
     standardize_machine = build_state_machine(
         stack,
         machine="standardize-html",

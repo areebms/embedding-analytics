@@ -40,7 +40,7 @@ TOKEN_LEMMAS = [
 ]
 
 KEPT_LEMMAS = [
-    ["labour", "rent", "productive"],
+    ["labour", "the", "rent", "productive"],
     ["value", "commodity", "wealth"],
 ]
 

@@ -38,7 +38,8 @@ services:
     volumes:
       - ./functions/tokenize/src/app.py:/var/task/app.py
       - ./functions/tokenize/src/main.py:/var/task/main.py
-      - ./functions/tokenize/src/ignored_nouns.txt:/var/task/ignored_nouns.txt
+      - ./functions/tokenize/src/data/ignored_nouns.txt:/var/task/data/ignored_nouns.txt
+      - ./shared:/var/task/shared
 
   lambda-create-embeddings:
     image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${AWS_ECR_REPO}/lambda-create-embeddings:0.1
@@ -53,6 +54,7 @@ services:
       - ./functions/create-embeddings/src/create_embeddings.py:/var/task/create_embeddings.py
       - ./functions/create-embeddings/src/constants.py:/var/task/constants.py
       - ./functions/create-embeddings/src/ppmi_svd.py:/var/task/ppmi_svd.py
+      - ./shared:/var/task/shared
 
   lambda-publish:
     image: lambda-publish:local
@@ -64,8 +66,8 @@ services:
       dockerfile: functions/publish/Dockerfile
     volumes:
       - ./functions/publish/src/app.py:/var/task/app.py
-      - ./functions/publish/src/publish_to_api.py:/var/task/publish_to_api.py
-      - ./functions/publish/src/publish_utils.py:/var/task/publish_utils.py
+      - ./functions/publish/src/publish.py:/var/task/publish.py
+      - ./shared:/var/task/shared
 
   lambda-api:
     image: lambda-api:local

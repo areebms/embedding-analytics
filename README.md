@@ -3,18 +3,18 @@
 **Live demo:** https://www.embedding-analytics.com  
 **Frontend repo:** https://github.com/areebms/embedding-analytics-frontend
 
-Two documents can use the same words to mean very different things. Treatises, legal opinions and technical specifications routinely have to be read several times before those shifts in meaning surface at all, and a close reading is the only conventional way to find them.
+Two documents can use the same words to mean very different things. Treatises, legal opinions, and technical specifications often require multiple readings before those shifts in meaning become clear, and close reading is the only conventional way to find them.
 
-Embedding Analytics lets you query and quantify changes in definitions across a collection of documents. For each document, the tool uses PPMI + SVD to create semantic embeddings. Your query is used to find the most similar terms within each document. To compare these similarities across documents, we compute the query's mean similarity to its 75 closest terms in each document, then rescale the similarities so the mean cosine similarity is the same across documents. The adjustment is adapted from cross-domain similarity local scaling (Conneau et al., 2018). Adjusted similarities from different queries cannot be compared.
+Embedding Analytics lets you query and quantify definition changes across a collection of documents. For each document, the tool uses PPMI + SVD to create semantic embeddings. Your query finds the most similar terms within each document. To compare these similarities across documents, we compute the query's mean similarity to its 75 closest terms in each document, then rescale the similarities so the mean cosine similarity is the same across documents. We adapt this adjustment from cross-domain similarity local scaling (Conneau et al., 2018). You cannot compare adjusted similarities from different queries.
 
-Since there can be too many shared terms across a collection of documents, Embedding Analytics identifies relevant terms that can be compared across the collection. A term is relevant if its adjusted similarity is above the baseline in at least 20% of the documents that carry the query. There are two types of relevant terms identified.
+Because many terms can be shared across a collection of documents, Embedding Analytics identifies relevant terms that can be compared across the collection. A term is relevant if its adjusted similarity is above the baseline in at least 20% of the documents that carry the query. The system identifies two types of relevant terms.
 
-- **Consistent terms** have the highest mean similarity to the query. They are closely tied to it across the collection: the core of its definition, the part the authors hold in common.
+- **Consistent terms** have the highest mean similarity to the query. They are closely tied to it across the collection: the core of its definition, what the authors have in common.
 - **Contested terms** have the highest standard deviation. They are close to the query in some documents and not in others. They are where the definition moves.
 
 ## Sample results
 
-Querying `value` across 24 books, where the average baseline is 0.321, returns the following.
+Querying `value` across 24 books, with an average baseline of 0.321, returns the following.
 
 *utility*, the basis of value in the marginalist theory that displaced the classical labour theory, leads the contested list.
 
@@ -77,9 +77,7 @@ flowchart LR
 | Testing | pytest, coverage gating, Docker test stages |
 | Infrastructure | AWS CDK (Python), Docker, Docker Compose |
 
-Six independent containerized Lambda functions — scraping, heading classification, tokenization, embedding, publishing, and API serving. S3 holds intermediate artifacts; the publish stage flattens one vector per term into DynamoDB for sub-second API reads. Fully serverless, no always-on infrastructure. Per-service pytest suites run inside a dedicated Docker test stage before any image is pushed, and every suite enforces an 85% coverage floor.
-
-Each stage but `publish` announces on the EventBridge default bus when it finishes — the two state machines from their definitions, `tokenize` and `create-embeddings` from inside the function — and a rule per consumer turns each announcement into the next invocation, so a stage can be redeployed, re-run or replaced without any other stage naming it. `standardize-html` is the one that leaves the account: it classifies every heading in a book through the Anthropic Batch API, submitting once, then called back by its state machine every five minutes to collect until the batch settles, because a batch is asynchronous. [Pipeline](docs/pipeline.md) has the map.
+The CDK-defined fully serverless architecture features six independent containerized Lambda functions for scraping, heading classification, tokenization, embedding, publishing, and serving the API. Each stage uses S3 to store intermediate artifacts, and the publish stage saves one vector per term into DynamoDB for sub-second API reads. Per-service pytest suites also run in a dedicated Docker test stage before pushing any image, and each suite enforces an 85% coverage floor. More details can be found in [Pipeline](docs/pipeline.md).
 
 ---
 
@@ -122,7 +120,7 @@ Processing a book is covered in [Pipeline](docs/pipeline.md), and deployment in 
 
 ## What's next
 
-- [ ] Add a concordance.
+- [ ] Add concordance to show how each term is being used within the passages.
 - [ ] Allow texts to be excluded from analysis.
 
 ---
